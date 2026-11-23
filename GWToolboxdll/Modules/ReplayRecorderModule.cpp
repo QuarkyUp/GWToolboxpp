@@ -2,22 +2,31 @@
 
 #include <GWCA/Context/CharContext.h>
 
+#include <GWCA/Constants/UIMessages.h>
+
 #include <GWCA/GameEntities/Agent.h>
 #include <GWCA/GameEntities/Map.h>
+#include <GWCA/GameEntities/Match.h>
 
 #include <GWCA/Managers/AgentMgr.h>
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/MemoryMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
+#include <GWCA/Managers/UIMgr.h>
 
 #include <GWCA/Packets/StoC.h>
+
+#include <GWCA/Utilities/Hooker.h>
+#include <GWCA/Utilities/Scanner.h>
 
 #include <GWToolbox.h>
 #include <ImGuiAddons.h>
 #include <Logger.h>
 #include <Modules/ReplayRecorderModule.h>
 #include <Modules/Resources.h>
+#include <Utils/EncString.h>
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayObserve.h>
 #include <Utils/StoCHandlers.h>
 #include <Utils/TextUtils.h>
 
@@ -53,6 +62,17 @@ namespace {
     std::wstring own_name;
     std::unordered_map<std::wstring, std::wstring> player_labels;
     std::string status = "Waiting for the next map";
+
+    using ObserveGame_pt = void(__cdecl*)(uint32_t game_key);
+    ObserveGame_pt ObserveGame_Func = nullptr;
+    ObserveGame_pt ObserveGame_Ret = nullptr;
+    GW::HookEntry observe_hook_entry;
+    bool observe_applied = false;
+    std::atomic_bool emulating_rows = false;
+    std::set<uint32_t> server_keys;
+    std::map<uint32_t, ReplayObserve::Row> listed_rows;
+    std::set<std::filesystem::path> logged_left_out;
+    std::string observe_status;
 
     std::filesystem::path RecordingsFolder()
     {
@@ -200,6 +220,9 @@ namespace {
 
     void OnServerMessage(GW::HookStatus*, PacketBase* packet, void*)
     {
+        if (emulating_rows) {
+            return;
+        }
         std::scoped_lock lock(recording_mutex);
         if (packet->header == GAME_SMSG_TRANSFER_GAME_SERVER_INFO) {
             FinishRecording();
@@ -280,6 +303,124 @@ namespace {
         }
         callbacks_registered = true;
     }
+
+    void __cdecl OnObserveGame(const uint32_t game_key)
+    {
+        GW::Hook::EnterHook();
+        std::unique_lock lock(recording_mutex);
+        const auto found = listed_rows.find(game_key);
+        if (found == listed_rows.end()) {
+            lock.unlock();
+            ObserveGame_Ret(game_key);
+            return GW::Hook::LeaveHook();
+        }
+        const auto row = found->second;
+        lock.unlock();
+        const auto& map_name = Resources::GetMapName(static_cast<GW::Constants::MapID>(row.header.map_id))->wstring();
+        const auto answer = std::format(L"Replay {}: {}, {} long. Playback is not available yet.", row.path.filename().wstring(), map_name.empty() ? std::format(L"map {}", row.header.map_id) : map_name, ReplayObserve::Duration(row.header.duration_ms));
+        Log::InfoW(L"%ls", answer.c_str());
+        GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
+        GW::Hook::LeaveHook();
+    }
+
+    void OnObserveRow(GW::HookStatus*, PacketBase* packet, void*)
+    {
+        if (emulating_rows) {
+            return;
+        }
+        std::scoped_lock lock(recording_mutex);
+        server_keys.insert(reinterpret_cast<const ReplayObserve::RowMessage*>(packet)->key);
+    }
+
+    void OnObserveRowsCommitted(GW::HookStatus*, PacketBase*, void*)
+    {
+        if (emulating_rows) {
+            return;
+        }
+        std::vector<ReplayObserve::RowMessage> messages;
+        {
+            std::scoped_lock lock(recording_mutex);
+            listed_rows.clear();
+            const auto taken_keys = std::exchange(server_keys, {});
+            if (message_table.empty()) {
+                observe_status = "Not listed: the client's message table is not read yet";
+                return;
+            }
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            auto scan = ReplayObserve::ScanFolder(RecordingsFolder(), GW::MemoryMgr::GetGWVersion(), message_table_digest, taken_keys, now);
+            for (auto& row : scan.rows) {
+                if (auto error = ReplayObserve::CheckRow(message_table, row.message); !error.empty()) {
+                    scan.left_out.push_back({row.path, std::move(error)});
+                    continue;
+                }
+                messages.push_back(row.message);
+                listed_rows.emplace(row.message.key, std::move(row));
+            }
+            for (const auto& [path, reason] : scan.left_out) {
+                if (logged_left_out.insert(path).second) {
+                    Log::Log("Replay Recorder: %s is not listed in the Observe window: %s", TextUtils::WStringToString(path.filename().wstring()).c_str(), reason.c_str());
+                }
+            }
+            observe_status = std::format("{} recordings listed in the Observe window, {} left out (the reasons are in the toolbox's log)", messages.size(), scan.left_out.size());
+        }
+        emulating_rows = true;
+        for (auto& message : messages) {
+            Resources::GetMapName(static_cast<GW::Constants::MapID>(message.map_id));
+            GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
+        }
+        emulating_rows = false;
+    }
+
+    void DropListedRows()
+    {
+        std::unique_lock lock(recording_mutex);
+        const auto listed = std::exchange(listed_rows, {});
+        server_keys.clear();
+        lock.unlock();
+        const auto char_context = GW::GetCharContext();
+        if (listed.empty() || !char_context) {
+            return;
+        }
+        const auto in_client_table = std::ranges::any_of(char_context->observer_matches, [&listed](const GW::ObserverMatch* match) {
+            return match && listed.contains(match->match_id);
+        });
+        if (!in_client_table) {
+            return;
+        }
+        // An empty list committed clears the client's table: without the hook, Observe on a row of ours would send its key to the server.
+        PacketBase commit{ReplayObserve::rows_committed_message_id};
+        emulating_rows = true;
+        GW::StoC::EmulatePacket(&commit);
+        emulating_rows = false;
+    }
+
+    std::string StartListing()
+    {
+        ObserveGame_Func = reinterpret_cast<ObserveGame_pt>(GW::Scanner::Find("\x55\x8B\xEC\xE8\x00\x00\x00\x00\xFF\x75\x08\x8B\x48\x44\x81\xC1\x58\x02\x00\x00\xE8\x00\x00\x00\x00\x85\xC0", "xxxx????xxxxxxxxxxxxx????xx"));
+        if (!ObserveGame_Func || GW::Hook::CreateHook(&ObserveGame_Func, OnObserveGame, &ObserveGame_Ret) != 0) {
+            ObserveGame_Func = nullptr;
+            Log::Log("Replay Recorder: the game's Observe function is not found in this client; recordings are not listed");
+            return "Not listed: the game's Observe function is not found in this client";
+        }
+        GW::Hook::EnableHooks(ObserveGame_Func);
+        if (!GW::StoC::RegisterPacketCallback(&observe_hook_entry, ReplayObserve::row_message_id, OnObserveRow) || !GW::StoC::RegisterPacketCallback(&observe_hook_entry, ReplayObserve::rows_committed_message_id, OnObserveRowsCommitted)) {
+            GW::StoC::RemoveCallbacks(&observe_hook_entry);
+            GW::Hook::RemoveHook(ObserveGame_Func);
+            ObserveGame_Func = nullptr;
+            return "Not listed: the Observe window's messages cannot be watched";
+        }
+        return "Waiting for the Observe window";
+    }
+
+    void StopListing()
+    {
+        GW::StoC::RemoveCallbacks(&observe_hook_entry);
+        DropListedRows();
+        if (ObserveGame_Func) {
+            GW::Hook::RemoveHook(ObserveGame_Func);
+            ObserveGame_Func = nullptr;
+        }
+    }
 }
 
 void ReplayRecorderModule::Initialize()
@@ -293,13 +434,37 @@ void ReplayRecorderModule::Initialize()
 void ReplayRecorderModule::SignalTerminate()
 {
     GW::StoC::RemoveCallbacks(&stoc_hook_entry);
+    GW::StoC::RemoveCallbacks(&observe_hook_entry);
+    DropListedRows();
     std::scoped_lock lock(recording_mutex);
     FinishRecording();
     callbacks_registered = false;
 }
 
+void ReplayRecorderModule::Terminate()
+{
+    ToolboxModule::Terminate();
+    if (ObserveGame_Func) {
+        GW::Hook::RemoveHook(ObserveGame_Func);
+        ObserveGame_Func = nullptr;
+    }
+    observe_applied = false;
+}
+
 void ReplayRecorderModule::Update(float)
 {
+    if (settings.list_in_observe_window != observe_applied) {
+        observe_applied = settings.list_in_observe_window;
+        std::string applied_status;
+        if (observe_applied) {
+            applied_status = StartListing();
+        }
+        else {
+            StopListing();
+        }
+        std::scoped_lock lock(recording_mutex);
+        observe_status = std::move(applied_status);
+    }
     std::scoped_lock lock(recording_mutex);
     if (!callbacks_registered) {
         RegisterCallbacks();
@@ -352,6 +517,11 @@ void ReplayRecorderModule::DrawSettingsInternal()
         settings.size_cap_mb = std::clamp(settings.size_cap_mb, 1, 4096);
     }
     ImGui::TextDisabled("PvP maps are never recorded. A recording starts on entering a map and ends on leaving it.");
+    ImGui::Checkbox("List recordings in the Observe window", &settings.list_in_observe_window);
+    ImGui::ShowHelp("Recordings made on this client build appear in the Observe window (B, in an outpost) under \"Custom Event (0)\". Choosing one is answered here; nothing is sent to the server.");
+    if (!observe_status.empty()) {
+        ImGui::TextDisabled("%s", observe_status.c_str());
+    }
     if (writer.IsOpen()) {
         ImGui::Text("Recording %s: %u messages, %llu KB, %u layout errors", RecordingName().c_str(), header.record_count, writer.Size() / 1024, header.layout_errors);
     }

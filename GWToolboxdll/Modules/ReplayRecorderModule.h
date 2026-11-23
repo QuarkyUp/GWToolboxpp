@@ -23,10 +23,12 @@ public:
         bool strip_names_and_chat = true;
         std::string folder;
         int size_cap_mb = 256;
+        bool list_in_observe_window = false;
     };
 
     void Initialize() override;
     void SignalTerminate() override;
+    void Terminate() override;
     void Update(float) override;
     void LoadSettings(SettingsDoc& doc, ToolboxIni* legacy) override;
     void SaveSettings(SettingsDoc& doc) override;
