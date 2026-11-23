@@ -14,6 +14,7 @@
 #include <map>
 #include <numeric>
 #include <random>
+#include <regex>
 #include <set>
 #include <string>
 #include <tuple>
@@ -226,7 +227,7 @@ namespace {
         Check(packed({}, out), "a message of every field type packs");
         Check(out == ExpectedWire(decoded, L"Ann", L"Bo", {0x107, L'C', 0x1}), "the packed message is its wire form");
 
-        const ReplayFile::TextFilter rename = [](std::wstring& text) {
+        const ReplayFile::TextFilter rename = [](std::wstring& text, uint32_t) {
             if (text == L"Ann") {
                 text = L"Pl 1";
             }
@@ -234,7 +235,7 @@ namespace {
         Check(packed(rename, out), "a filtered message packs");
         Check(out == ExpectedWire(decoded, L"Pl 1", L"Bo", {0x107, L'C', 0x1}), "the filter replaces the text it is given");
 
-        const ReplayFile::TextFilter too_long = [](std::wstring& text) {
+        const ReplayFile::TextFilter too_long = [](std::wstring& text, uint32_t) {
             text = L"much longer than the field";
         };
         Check(packed(too_long, out), "a filter's text longer than its field packs");
@@ -1607,11 +1608,189 @@ namespace {
         Check(bytes != plan.posts.front().bytes, "a receive state one byte off does not decrypt the stream");
     }
 
+    void TestNameStripper()
+    {
+        const auto stripped = [](ReplayFile::NameStripper& stripper, const uint16_t message_id, std::wstring text, const uint32_t capacity) {
+            stripper.Apply(message_id, text, capacity);
+            return text;
+        };
+        ReplayFile::NameStripper both(true, true, L"Own Name");
+        Check(stripped(both, 89, L"Own Name", 32) == L"Recorder", "the recorder's name becomes the placeholder");
+        Check(stripped(both, 89, L"Someone Else", 32) == L"Player 1", "another player's name becomes a numbered label");
+        Check(stripped(both, 89, L"Someone Else", 32) == L"Player 1", "a name keeps its label");
+        Check(stripped(both, 381, L"Load Name", 20) == L"Recorder", "the instance's player name is the recorder's");
+        Check(stripped(both, 314, L"Load Name", 32) == L"Recorder", "the instance's player name stays the recorder's in later messages");
+        Check(stripped(both, 48, L"Account", 32) == L"Recorder", "the account's name becomes the placeholder");
+        Check(stripped(both, 295, L"Account", 20) == L"Recorder", "the account's name stays the placeholder in later messages");
+        Check(stripped(both, 116, L"Alt Character", 32) == L"Mercenary 1", "a mercenary hero's name becomes a numbered label");
+        Check(stripped(both, 289, L"Our Guild", 32) == L"Guild 1", "a guild's name becomes a numbered label");
+        Check(stripped(both, 289, L"OG", 6) == L"G1", "a guild's tag becomes a numbered tag");
+        Check(stripped(both, 96, L"OG", 6) == L"G1", "a chat line's tag is a guild tag");
+        Check(stripped(both, 291, L"Inviter", 20) == L"Player 2", "a guild invite's inviter is a player");
+        const std::wstring encoded = {0x8102, 0x107, L'O', L'w', L'n', L' ', L'N', L'a', L'm', L'e', 0x1, 0x2};
+        Check(stripped(both, 76, encoded, 128) == std::wstring{0x8102, 0x107, L'R', L'e', L'c', L'o', L'r', L'd', L'e', L'r', 0x1, 0x2}, "a name inside an encoded text is replaced");
+        Check(stripped(both, 76, std::wstring{0x8102, 0x2}, 128) == std::wstring{0x8102, 0x2}, "an encoded text without a literal is kept");
+        ReplayFile::NameStripper others_only(true, false, L"Own Name");
+        Check(stripped(others_only, 89, L"Own Name", 32) == L"Own Name", "the recorder's name is kept when only other players' are stripped");
+        Check(stripped(others_only, 48, L"Account", 32) == L"Player 1", "the account's name is still hidden when only other players' are stripped");
+        Check(stripped(others_only, 288, L"Their Guild", 32) == L"Guild 1", "guild names are replaced with other players' names");
+        ReplayFile::NameStripper own_only(false, true, L"Own Name");
+        Check(stripped(own_only, 89, L"Someone Else", 32) == L"Someone Else", "other players' names are kept when only the recorder's are stripped");
+        Check(stripped(own_only, 89, L"Own Name", 32) == L"Recorder", "the recorder's name is replaced alone");
+        Check(stripped(own_only, 289, L"OG", 6) == L"G1", "guild tags are replaced with the recorder's names");
+    }
+
+    using Needles = std::vector<std::pair<std::wstring, std::string>>;
+
+    std::wstring RecorderName(const ReplayFile::Contents& contents)
+    {
+        constexpr uint16_t reporter = 34;
+        constexpr uint16_t player_create = 89;
+        constexpr uint16_t instance_player_name = 381;
+        uint32_t controlled = 0;
+        std::map<uint32_t, std::wstring> created_names;
+        for (const auto& record : contents.records) {
+            ReplayState::Message message;
+            if (!ReplayState::Decode(contents.table, record.body, message)) {
+                continue;
+            }
+            if (message.id == instance_player_name && !message.fields.empty() && !message.fields[0].text.empty()) {
+                return message.fields[0].text;
+            }
+            if (message.id == reporter && !controlled && !message.fields.empty()) {
+                controlled = message.U(0);
+            }
+            if (message.id == player_create && message.fields.size() > 6) {
+                created_names.try_emplace(message.U(1), message.fields[6].text);
+            }
+        }
+        const auto created = created_names.find(controlled);
+        return created == created_names.end() ? std::wstring() : created->second;
+    }
+
+    Needles RecorderNames(const ReplayFile::Contents& contents, const std::vector<std::wstring>& given)
+    {
+        Needles needles;
+        for (const auto& name : given) {
+            needles.emplace_back(name, "a name given");
+        }
+        if (const auto recorder = RecorderName(contents); !recorder.empty()) {
+            needles.emplace_back(recorder, "the recorder's name");
+        }
+        const std::map<uint16_t, std::string> kinds = {{381, "the recorder's name"}, {48, "the account's name"}, {49, "the account's name"}, {116, "a mercenary's name"},
+                                                       {288, "a guild's name or tag"}, {289, "a guild's name or tag"}};
+        for (const auto& record : contents.records) {
+            const auto kind = kinds.find(record.MessageId());
+            ReplayState::Message message;
+            if (kind == kinds.end() || !ReplayState::Decode(contents.table, record.body, message)) {
+                continue;
+            }
+            for (const auto& field : message.fields) {
+                if (!field.text.empty() && std::ranges::all_of(field.text, [](const wchar_t c) {
+                        return c >= 0x20 && c < 0x100;
+                    }) &&
+                    !std::ranges::contains(needles, std::pair{field.text, kind->second})) {
+                    needles.emplace_back(field.text, kind->second);
+                }
+            }
+        }
+        return needles;
+    }
+
+    int ProveNoNames(const ReplayFile::Contents& stripped, const ReplayFile::Contents& original, const std::vector<std::wstring>& given)
+    {
+        const auto needles = RecorderNames(original, given);
+        std::map<std::string, size_t> kinds;
+        for (const auto& [name, kind] : needles) {
+            kinds[kind]++;
+        }
+        const std::wregex placeholder(L"Recorder|Player [0-9]+|Guild [0-9]+|Mercenary [0-9]+|G[0-9]+");
+        const auto inside_placeholder = [](const std::wstring& name) {
+            for (auto number = 1; number < 1000; number++) {
+                for (const auto& label : {std::wstring(ReplayFile::own_name_placeholder), std::format(L"Player {}", number), std::format(L"Guild {}", number), std::format(L"Mercenary {}", number), std::format(L"G{}", number)}) {
+                    if (label.find(name) != std::wstring::npos) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        std::set<std::wstring> generic;
+        for (const auto& [name, kind] : needles) {
+            if (inside_placeholder(name)) {
+                generic.insert(name);
+            }
+        }
+        std::map<std::string, std::map<uint16_t, size_t>> found;
+        size_t undecoded = 0;
+        for (const auto& record : stripped.records) {
+            ReplayState::Message message;
+            const auto decoded = ReplayState::Decode(stripped.table, record.body, message);
+            undecoded += !decoded;
+            std::vector<std::wstring> texts;
+            for (const auto& field : message.fields) {
+                texts.push_back(std::regex_replace(field.text, placeholder, L"\x1"));
+            }
+            const std::wstring_view raw(reinterpret_cast<const wchar_t*>(record.body.data() + 2), (record.body.size() - 2) / 2);
+            const std::wstring_view raw_odd(reinterpret_cast<const wchar_t*>(record.body.data() + 1), (record.body.size() - 1) / 2);
+            for (const auto& [name, kind] : needles) {
+                const auto in_text = decoded && std::ranges::any_of(texts, [&name](const std::wstring& text) {
+                                         return text.find(name) != std::wstring::npos;
+                                     });
+                const auto in_bytes = name.size() >= 4 && !generic.contains(name) && (raw.find(name) != std::wstring_view::npos || raw_odd.find(name) != std::wstring_view::npos);
+                if (in_text || in_bytes) {
+                    found[kind][record.MessageId()]++;
+                }
+            }
+        }
+        printf("no-names: %zu names looked for (", needles.size());
+        for (auto first = true; const auto& [kind, count] : kinds) {
+            printf("%s%zu %s", first ? "" : ", ", count, kind.c_str());
+            first = false;
+        }
+        printf("), %zu of them inside a placeholder's text (looked for outside the placeholders only), %zu records, %zu not decoded\n", generic.size(), stripped.records.size(), undecoded);
+        for (const auto& [kind, ids] : found) {
+            for (const auto& [id, count] : ids) {
+                printf("  %s found in %zu records of message %u\n", kind.c_str(), count, id);
+            }
+        }
+        const auto passed = found.empty() && kinds.contains("the recorder's name");
+        printf("no-names: %s\n", passed ? "passed: none of them is in the stripped file" : found.empty() ? "FAILED: the recorder's name is not found in the original (no 381, no 89 for the agent of its first 34)" : "FAILED");
+        return passed ? 0 : 1;
+    }
+
+    int Strip(const ReplayFile::Contents& contents, const std::filesystem::path& out_path)
+    {
+        ReplayFile::NameStripper stripper(true, true, RecorderName(contents));
+        std::vector<ReplayFile::Record> records;
+        size_t changed = 0;
+        size_t kept = 0;
+        for (const auto& record : contents.records) {
+            ReplayState::Message message;
+            ReplayFile::Record stripped{record.time_ms, {}};
+            if (!ReplayState::Decode(contents.table, record.body, message, stripper.For(record.MessageId())) || !ReplayState::Encode(contents.table, message, stripped.body)) {
+                stripped.body = record.body;
+                kept++;
+            }
+            changed += stripped.body != record.body;
+            records.push_back(std::move(stripped));
+        }
+        auto header = contents.header;
+        header.flags |= ReplayFile::NamesStripped | ReplayFile::OwnNamesStripped;
+        if (!WriteRecording(out_path, header, contents.table, records, true)) {
+            printf("%ls: cannot be written\n", out_path.c_str());
+            return 1;
+        }
+        printf("strip: %zu records, %zu changed, %zu not decoded and kept as they were, written to %ls\n", records.size(), changed, kept, out_path.filename().c_str());
+        return 0;
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
         std::filesystem::create_directories(folder, error_code);
         TestPacking();
+        TestNameStripper();
         TestWorld(folder);
         TestRows(folder);
         TestWire(folder);
@@ -1672,6 +1851,25 @@ int wmain(const int argc, const wchar_t* argv[])
     if (argc >= 3 && wcscmp(argv[1], L"--mine") == 0) {
         return Mine({argv + 2, argv + argc});
     }
+    if (argc == 4 && wcscmp(argv[1], L"--strip") == 0) {
+        ReplayFile::Contents contents;
+        std::string error;
+        if (!ReplayFile::Read(argv[2], contents, error)) {
+            printf("%ls: %s\n", argv[2], error.c_str());
+            return 1;
+        }
+        return Strip(contents, argv[3]);
+    }
+    if (argc >= 4 && wcscmp(argv[1], L"--no-names") == 0) {
+        ReplayFile::Contents stripped;
+        ReplayFile::Contents original;
+        std::string error;
+        if (!ReplayFile::Read(argv[2], stripped, error) || !ReplayFile::Read(argv[3], original, error)) {
+            printf("%s\n", error.c_str());
+            return 1;
+        }
+        return ProveNoNames(stripped, original, {argv + 4, argv + argc});
+    }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
     const auto single = command == L"--check-join" || command == L"--wire" || command == L"--order";
     const auto arguments = command.empty() || single ? 1 : command == L"--state" || command == L"--feed" ? 2 : command == L"--join" || command == L"--keyframes" ? 3 : 0;
@@ -1686,6 +1884,8 @@ int wmain(const int argc, const wchar_t* argv[])
             "       replay_check --feed <recording.gwrec> <ms>\n"
             "       replay_check --order <recording.gwrec>\n"
             "       replay_check --mine <recording.gwrec>...\n"
+            "       replay_check --strip <recording.gwrec> <out.gwrec>\n"
+            "       replay_check --no-names <stripped.gwrec> <original.gwrec> [name...]\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );

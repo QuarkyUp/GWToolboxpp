@@ -49,6 +49,11 @@ namespace ReplayObserve {
             if (!entry.is_regular_file(error_code) || entry.path().extension() != L".gwrec") {
                 continue;
             }
+            if (entry.file_size(error_code) == 0 && !error_code) {
+                std::filesystem::remove(entry.path(), error_code);
+                scan.left_out.push_back({entry.path(), error_code ? "empty, and it could not be removed" : "empty: removed"});
+                continue;
+            }
             Row row{entry.path(), {}, {}};
             const auto& header = row.header;
             std::string error;

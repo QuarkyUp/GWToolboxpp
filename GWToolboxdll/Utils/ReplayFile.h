@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <set>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace ReplayFile {
@@ -18,6 +21,7 @@ namespace ReplayFile {
         ChatDropped = 1 << 1,
         Complete = 1 << 2,
         SizeCapReached = 1 << 3,
+        OwnNamesStripped = 1 << 4,
     };
 
     struct Header {
@@ -58,8 +62,30 @@ namespace ReplayFile {
 
     uint64_t TableDigest(const MessageTable& table);
 
-    using TextFilter = std::function<void(std::wstring& text)>;
+    using TextFilter = std::function<void(std::wstring& text, uint32_t capacity)>;
     bool PackMessage(uint32_t message_id, const uint32_t* fields, uint32_t field_count, const uint8_t* decoded, std::vector<uint8_t>& out, const TextFilter& filter);
+
+    constexpr wchar_t own_name_placeholder[] = L"Recorder";
+
+    class NameStripper {
+    public:
+        NameStripper(bool other_players, bool own_names, std::wstring own_name);
+
+        void Apply(uint16_t message_id, std::wstring& text, uint32_t capacity);
+        [[nodiscard]] TextFilter For(uint16_t message_id);
+
+    private:
+        std::wstring Label(uint16_t message_id, std::wstring_view name, uint32_t capacity);
+
+        bool other_players;
+        bool own_names;
+        std::set<std::wstring, std::less<>> recorder_names;
+        std::set<std::wstring, std::less<>> account_names;
+        std::unordered_map<std::wstring, std::wstring> players;
+        std::unordered_map<std::wstring, std::wstring> guilds;
+        std::unordered_map<std::wstring, std::wstring> tags;
+        std::unordered_map<std::wstring, std::wstring> mercenaries;
+    };
 
     bool Read(const std::filesystem::path& path, Contents& out, std::string& error);
     bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error);

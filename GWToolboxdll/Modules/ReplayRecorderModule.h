@@ -21,6 +21,7 @@ public:
         bool record_explorables = true;
         bool record_outposts = false;
         bool strip_names_and_chat = true;
+        bool strip_own_names = true;
         std::string folder;
         int size_cap_mb = 256;
         bool list_in_observe_window = false;

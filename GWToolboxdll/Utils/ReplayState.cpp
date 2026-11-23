@@ -333,6 +333,7 @@ namespace ReplayState {
             const uint8_t* body;
             size_t body_size;
             Message& out;
+            const ReplayFile::TextFilter& filter;
             size_t offset = 2;
             bool ok = true;
 
@@ -397,6 +398,10 @@ namespace ReplayState {
                             auto& field = out.fields.emplace_back();
                             for (uint32_t c = 0; c < length && ok; c++) {
                                 field.text.push_back(static_cast<wchar_t>(Take(2)));
+                            }
+                            if (filter && ok && !field.text.empty()) {
+                                filter(field.text, size);
+                                field.text.resize(std::min<size_t>(field.text.size(), size - 1));
                             }
                             break;
                         }
@@ -605,7 +610,7 @@ namespace ReplayState {
         Set(field, std::bit_cast<uint32_t>(value), item);
     }
 
-    size_t DecodePrefix(const ReplayFile::MessageTable& table, const uint8_t* bytes, const size_t size, Message& out)
+    size_t DecodePrefix(const ReplayFile::MessageTable& table, const uint8_t* bytes, const size_t size, Message& out, const ReplayFile::TextFilter& filter)
     {
         out = {};
         if (size < 2) {
@@ -615,14 +620,14 @@ namespace ReplayState {
         if (out.id >= table.size() || table[out.id].empty()) {
             return 0;
         }
-        Decoder decoder{bytes, std::min(size, ReplayFile::max_body_size), out};
+        Decoder decoder{bytes, std::min(size, ReplayFile::max_body_size), out, filter};
         const auto& descriptors = table[out.id];
         return decoder.Walk(descriptors.data() + 1, descriptors.size() - 1) ? decoder.offset : 0;
     }
 
-    bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out)
+    bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out, const ReplayFile::TextFilter& filter)
     {
-        return !body.empty() && DecodePrefix(table, body.data(), body.size(), out) == body.size();
+        return !body.empty() && DecodePrefix(table, body.data(), body.size(), out, filter) == body.size();
     }
 
     bool Encode(const ReplayFile::MessageTable& table, const Message& message, std::vector<uint8_t>& out)
