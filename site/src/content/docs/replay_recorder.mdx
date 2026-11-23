@@ -1,6 +1,6 @@
 ---
 title: "Replay Recorder"
-description: "Record what the game server sends in PvE explorable areas, one file per instance, for replays; list recordings in the Observe window; its settings, its file format, and how replay_check restores any moment of a recording."
+description: "Record what the game server sends in PvE explorable areas, one file per instance; list recordings in the Observe window and play them in the game's observer mode; its settings, its file format, and how replay_check restores any moment of a recording."
 section: features
 ---
 
@@ -8,7 +8,7 @@ import ToolboxPath from '../../components/ToolboxPath.astro';
 
 All settings for this feature live under <ToolboxPath steps={["Settings", "Replay Recorder"]} />. The module is off by default: turn it on under <ToolboxPath steps={["Settings", "Toolbox Modules"]} />.
 
-The Replay Recorder saves every message the game server sends while you are in a PvE map, from entering the map until leaving it, with the time each one arrived. It only reads what the client already received and changes nothing in the game. PvP maps and observed matches are never recorded. A recording is the raw material for replays: nothing in the toolbox plays them back yet.
+The Replay Recorder saves every message the game server sends while you are in a PvE map, from entering the map until leaving it, with the time each one arrived. It only reads what the client already received and changes nothing in the game. PvP maps and observed matches are never recorded. A recording can be played back in the game's own observer mode, from the Observe window (see [Playing a recording](#playing-a-recording)).
 
 A recording starts when you enter a map, so enable the module before you travel or zone. Leaving the map, logging out or a minute without any message from the server ends it.
 
@@ -20,6 +20,7 @@ A recording starts when you enter a map, so enable the module before you travel 
 - **Folder** — where recordings go. Empty means the `replays` folder inside the toolbox's settings folder; **Open** shows it in Explorer.
 - **Size cap per recording (MB)** — a recording stops growing at this size and is marked as capped.
 - **List recordings in the Observe window** — off by default. See [Recordings in the Observe window](#recordings-in-the-observe-window).
+- **Play recordings from the Observe window** — off by default; needs the list. See [Playing a recording](#playing-a-recording).
 
 The panel shows the recording in progress (messages, size, layout errors) or the last one saved. A solo hour in an explorable area is about 120,000 to 150,000 messages, 2 to 3 MB.
 
@@ -28,10 +29,22 @@ The panel shows the recording in progress (messages, size, layout errors) or the
 With **List recordings in the Observe window** on, your recordings appear in the game's own Observe window (**B** in a town or outpost), next to the matches the server lists, under the category **Custom Event (0)**. Each row is named `Replay <date> <time> (<length>)`; its card shows the map and when the recording began ("Started N minutes ago").
 
 - The rows are built from each file's header alone, when the server's list arrives. A file is left out if its header is not a recording's, if it was recorded on another client build or with another message table, if it is unfinished or empty; the toolbox's log names each file left out and why. The newest 100 recordings are listed.
-- Choosing one of these rows and pressing **Observe** is answered in chat by the toolbox: the recording's file, map and length, and that playback is not available yet. **Nothing is sent to the server** for these rows: the toolbox catches the choice before the game sends it, and every other row is observed as usual.
+- Choosing one of these rows and pressing **Observe** plays it when **Play recordings from the Observe window** is on (below); otherwise the toolbox answers in chat with the recording's file, map and length. **Nothing is sent to the server** for these rows: the toolbox catches the choice before the game sends it, and every other row is observed as usual.
 - The rows use keys of their own (`0x52500000` to `0x5250FFFF`), never one the server's list already holds. Turning the setting off, or unloading the toolbox, clears them from the window's list first, so the game cannot send one of them afterwards; the server's own rows come back at the window's next refresh (every 15 seconds).
 
 `replay_check --rows <folder>` prints the rows the toolbox would list for a folder, with the same code, and checks each one against the client's own layout for the Observe window's rows as the newest recording carries it.
+
+## Playing a recording
+
+With **Play recordings from the Observe window** on, **Observe** on one of your rows plays that recording in the game's observer mode: the loading screen, then the map as it was, seen from the observer's camera (Auto Camera, Hide UI, the Observers chat channel), with every agent, effect and move the server sent. Leave it with the game's own stop observing (**B**, then **Yes**): the game asks to go back to the map you were on before observing, as after any observed match, and you are back in your outpost. When the recording ends, the toolbox does the same for you.
+
+While a recording plays, the settings panel shows its time, **Pause** and **Resume**, a speed (x1, x2, x4) and **Stop**. Turning the setting off, disabling the module or unloading the toolbox also stops it the same way; the toolbox waits for the game to leave the replay before it unloads.
+
+How it works, and what reaches the server:
+- The toolbox gives the game a transfer to a game server of its own making (the loopback address and a closed port), then takes over the connection the game opens for it: the game gets a connection with no network socket, the kind its own playback code runs on, and everything the game sends on it goes nowhere. The game server you were on gets the game's usual goodbye before a transfer.
+- The recording is fed into that connection as the server's own bytes: first the start of the instance, rebuilt from the recording at its first moment (see [Restoring any moment](#restoring-any-moment)) and an empty inventory for the observer, each part when the game asks for the next (after it acknowledges the instance, then after it has loaded the map), then the recording itself at its recorded times. The recorder's own inventory, skills and other private messages are left out.
+- Nothing of the replay is sent to ArenaNet's servers. Your account's login connection stays as it is; stop observing is the only message it gets, the same one as after any observed match.
+- Each game function the toolbox uses is found by its code when the setting is turned on. If one is missing (a game update), nothing is hooked, playback stays off and the panel says which one; the rows are still listed. With the setting off, nothing of playback is hooked.
 
 ## Reading a recording
 
@@ -43,6 +56,8 @@ replay_check --state <recording.gwrec> <ms>
 replay_check --join <recording.gwrec> <ms> <out.gwrec>
 replay_check --check-join <recording.gwrec>
 replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>
+replay_check --wire <recording.gwrec>
+replay_check --feed <recording.gwrec> <ms>
 replay_check --rows <folder> [client build]
 replay_check --self-test <folder>
 ```
@@ -51,8 +66,10 @@ replay_check --self-test <folder>
 - `--join` writes a recording that starts at that time: the join that recreates the state (below), then the rest of the stream.
 - `--check-join` checks a recording against what the client asserts when it enters an instance (below).
 - `--keyframes` proves a recording's joins. For each keyframe, the state rebuilt from its join and the records after it must equal the whole stream's state at every sample time. Each keyframe's join must pass `--check-join`. A seek between two keyframes must give the stream's state. Every record must decode against the file's table and encode back to its bytes.
+- `--wire` checks a recording's playback on the wire: the plan the toolbox feeds (the start rebuilt, then the recording) is encrypted post by post with an RC4 state, decrypted, cut back into messages by the file's table and encoded again, and must come back byte for byte, its stream equal to the recording's records.
+- `--feed` prints that plan up to a time: each post in order with when it is sent (after the connection is ready, after the game acknowledges the instance, after the map is loaded, or its time in the recording), its message count, size and first message ids (no names), and checks the stages' order, the 410's observer byte and that every post cuts into its messages.
 - `--rows` lists the rows the Observe window would get from a folder (key, map, type, category, age, length; no names) and the files left out with their reasons. Each row must pack and read back by the 414 layout of the newest recording (or the newest of the given client build), its type must be one the window has a category for, and its key must be in the toolbox's range and unique.
-- `--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written. It also writes a synthetic instance (players, NPCs, a gadget, an item on the ground, moves, effects, damage, deaths and returns) and runs the `--keyframes` proof on it, with keyframes every 10 s and every second.
+- `--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written. It also writes a synthetic instance (players, NPCs, a gadget, an item on the ground, moves, effects, damage, deaths and returns) and runs the `--keyframes` proof on it, with keyframes every 10 s and every second, then the `--feed` and `--wire` proofs (the RC4 step checked against the textbook cipher).
 
 ## Restoring any moment
 
