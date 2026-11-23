@@ -1,6 +1,7 @@
 #include <Utils/ReplayFile.h>
 #include <Utils/ReplayObserve.h>
 #include <Utils/ReplayState.h>
+#include <Utils/ReplayWire.h>
 
 #include <algorithm>
 #include <bit>
@@ -9,6 +10,7 @@
 #include <format>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <random>
 #include <set>
 #include <string>
@@ -527,7 +529,10 @@ namespace {
         {263, {0x10, 0x404, 0x404, 0x104, 0x2017}},
         {277, {0x404, 0x404}},
         {318, {0x204, 0x404, 0x204, 0x104}},
+        {319, {0x204, 0x104, 0x104, 0x204, 0x104, 0x404}},
+        {324, {0x204, 0x104}},
         {327, {0x204, 0x104, 0x404, 0x404}},
+        {328, {0x204, 0x104}},
         {353, {0x404, 0x404, 0x104, 0x104, 0x204, 0x204, 0x104, 0x404, 0x404, 0x404, 0x404, 0x4017, 0x400c, 0x404}},
         {380, {0x104, 0x104, 0x104, 0x104}},
         {381, {0x1417}},
@@ -585,6 +590,13 @@ namespace {
             write(353, {N(item), N(item * 7), N(2), N(0), N(0), N(0), N(1), N(0), N(10), N(item), N(1), Text(L"\x108\x107item\x1"), N(1), N(0x2400)});
             write(318, {N(1), N(item), N(1), N(item - 100)});
         }
+        write(324, {N(1), N(0)});
+        write(328, {N(1), N(0)});
+        write(319, {N(1), N(2), N(0), N(1), N(9), N(0)});
+        write(319, {N(1), N(1), N(1), N(2), N(20), N(104)});
+        write(324, {N(2), N(0)});
+        write(328, {N(2), N(1)});
+        write(319, {N(2), N(2), N(0), N(3), N(9), N(0)});
         write(327, {N(1), N(0), N(103), N(104)});
         write(409, {N(1)});
         write(407, {Bytes(40, 7)});
@@ -718,6 +730,7 @@ namespace {
                     case 20:
                         write(93, {Text(L"chat")});
                         write(12, {});
+                        write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(1)});
                         break;
                     default:
                         if (agent != recorder) {
@@ -985,6 +998,203 @@ namespace {
         Check(!ReplayObserve::CheckRow(table, wide).empty(), "a map id the 414 cannot carry is refused");
     }
 
+    struct WireProof {
+        size_t posts = 0;
+        size_t records = 0;
+        size_t bytes = 0;
+        std::string error;
+    };
+
+    WireProof ProveWire(const ReplayFile::Contents& contents, const uint32_t seed)
+    {
+        WireProof proof;
+        const auto plan = ReplayWire::MakePlan(contents);
+        if (!plan.error.empty()) {
+            proof.error = plan.error;
+            return proof;
+        }
+        std::mt19937 random(seed);
+        uint8_t key[ReplayWire::ready_secret_size];
+        for (auto& byte : key) {
+            byte = static_cast<uint8_t>(random());
+        }
+        ReplayWire::Rc4 sender;
+        sender.Init(key, sizeof(key));
+        auto receiver = sender;
+        std::vector<uint8_t> plain;
+        std::vector<uint8_t> received;
+        size_t unchanged = 0;
+        for (const auto& post : plan.posts) {
+            if (post.bytes.size() > ReplayWire::max_post_size && post.records > 1) {
+                proof.error = std::format("post {} holds {} records in {} bytes, over {}", proof.posts, post.records, post.bytes.size(), ReplayWire::max_post_size);
+                return proof;
+            }
+            auto chunk = post.bytes;
+            sender.Apply(chunk.data(), chunk.size());
+            unchanged += chunk == post.bytes;
+            receiver.Apply(chunk.data(), chunk.size());
+            received.insert(received.end(), chunk.begin(), chunk.end());
+            plain.insert(plain.end(), post.bytes.begin(), post.bytes.end());
+            proof.posts++;
+            proof.records += post.records;
+        }
+        proof.bytes = plain.size();
+        if (unchanged) {
+            proof.error = std::format("{} of {} posts left as they were by the cipher", unchanged, plan.posts.size());
+            return proof;
+        }
+        if (received != plain) {
+            proof.error = "the stream decrypted post by post is not the plain stream";
+            return proof;
+        }
+        std::string error;
+        const auto bodies = ReplayWire::Split(contents.table, received, error);
+        if (!error.empty() || bodies.size() != proof.records) {
+            proof.error = error.empty() ? std::format("{} messages cut from the stream, {} posted", bodies.size(), proof.records) : error;
+            return proof;
+        }
+        for (size_t i = 0; i < bodies.size(); i++) {
+            ReplayState::Message message;
+            std::vector<uint8_t> encoded;
+            if (!ReplayState::Decode(contents.table, bodies[i], message) || !ReplayState::Encode(contents.table, message, encoded) || encoded != bodies[i]) {
+                proof.error = std::format("message {} (id {}) does not decode and encode back to its bytes", i, message.id);
+                return proof;
+            }
+        }
+        std::vector<std::vector<uint8_t>> streamed;
+        for (const auto& record : contents.records) {
+            if (record.time_ms >= plan.start_ms && ReplayState::KindOf(record.MessageId()) != ReplayState::Kind::Private) {
+                streamed.push_back(record.body);
+            }
+        }
+        const auto stream_records = std::accumulate(plan.posts.begin(), plan.posts.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
+            return sum + (post.stage == ReplayWire::Stage::Stream ? post.records : 0);
+        });
+        if (stream_records > streamed.size() || !std::equal(bodies.end() - static_cast<std::ptrdiff_t>(stream_records), bodies.end(), streamed.end() - static_cast<std::ptrdiff_t>(stream_records))) {
+            proof.error = "the stream's messages are not the recording's records from the start on, byte for byte";
+        }
+        return proof;
+    }
+
+    bool ProveFeed(const ReplayFile::Contents& contents, const uint32_t until_ms, const bool verbose)
+    {
+        const auto plan = ReplayWire::MakePlan(contents);
+        if (!plan.error.empty()) {
+            if (verbose) {
+                printf("feed: %s\nfeed: FAILED\n", plan.error.c_str());
+            }
+            return false;
+        }
+        size_t failures = 0;
+        const auto fail = [&failures, verbose](const std::string& what) {
+            failures++;
+            if (verbose) {
+                printf("  FAILED: %s\n", what.c_str());
+            }
+        };
+        if (verbose) {
+            printf("start at %u ms of the recording, %u ms played from there; inventory skeleton %zu records; private records left out of the stream %zu\n\n", plan.start_ms, plan.duration_ms, plan.skeleton_records,
+                   plan.private_records_dropped);
+            printf("%6s  %-38s %9s %8s %6s  %s\n", "post", "stage (posted when)", "time ms", "records", "bytes", "first message ids");
+        }
+        auto stage = ReplayWire::Stage::BeforeLoad;
+        uint32_t time_ms = 0;
+        size_t shown = 0;
+        size_t shown_records = 0;
+        size_t shown_bytes = 0;
+        std::map<ReplayWire::Stage, size_t> per_stage;
+        bool observer_info = false;
+        for (size_t i = 0; i < plan.posts.size(); i++) {
+            const auto& post = plan.posts[i];
+            if (post.stage < stage) {
+                fail(std::format("post {} goes back to an earlier stage", i));
+            }
+            if (post.stage != ReplayWire::Stage::Stream && post.time_ms) {
+                fail(std::format("join post {} has a time", i));
+            }
+            if (post.time_ms < time_ms) {
+                fail(std::format("post {} goes back in time", i));
+            }
+            if (post.bytes.size() > ReplayWire::max_post_size && post.records > 1) {
+                fail(std::format("post {} holds {} records in {} bytes", i, post.records, post.bytes.size()));
+            }
+            std::string error;
+            const auto bodies = ReplayWire::Split(contents.table, post.bytes, error);
+            if (!error.empty() || bodies.size() != post.records) {
+                fail(std::format("post {} does not cut into its {} messages ({})", i, post.records, error));
+            }
+            for (const auto& body : bodies) {
+                ReplayState::Message message;
+                observer_info |= post.stage == ReplayWire::Stage::BeforeLoad && ReplayState::Decode(contents.table, body, message) && message.id == 410 && message.U(5) == 1;
+            }
+            stage = post.stage;
+            time_ms = post.time_ms;
+            per_stage[post.stage] += post.records;
+            if (post.time_ms > until_ms) {
+                continue;
+            }
+            shown++;
+            shown_records += post.records;
+            shown_bytes += post.bytes.size();
+            if (verbose) {
+                std::string ids;
+                for (size_t b = 0; b < bodies.size() && b < 6; b++) {
+                    ids += std::format(" {}", bodies[b][0] | bodies[b][1] << 8);
+                }
+                printf("%6zu  %-38s %9u %8u %6zu %s%s\n", i, ReplayWire::StageName(post.stage), post.time_ms, post.records, post.bytes.size(), ids.c_str(), bodies.size() > 6 ? " ..." : "");
+            }
+        }
+        for (const auto required : {ReplayWire::Stage::BeforeLoad, ReplayWire::Stage::Load, ReplayWire::Stage::Entry, ReplayWire::Stage::Stream}) {
+            if (!per_stage[required]) {
+                fail(std::format("no records {}", ReplayWire::StageName(required)));
+            }
+        }
+        if (!observer_info) {
+            fail("no 410 with its observer byte set before 406");
+        }
+        if (verbose) {
+            printf("\nup to %u ms: %zu posts, %zu records, %zu bytes; the whole plan: %zu posts (join %zu + %zu + %zu records, stream %zu records)\n", until_ms, shown, shown_records, shown_bytes, plan.posts.size(),
+                   per_stage[ReplayWire::Stage::BeforeLoad], per_stage[ReplayWire::Stage::Load], per_stage[ReplayWire::Stage::Entry], per_stage[ReplayWire::Stage::Stream]);
+            printf("feed: %s\n", failures ? "FAILED" : "passed");
+        }
+        return !failures;
+    }
+
+    void TestWire(const std::filesystem::path& folder)
+    {
+        ReplayWire::Rc4 known;
+        const uint8_t key[] = {'K', 'e', 'y'};
+        known.Init(key, sizeof(key));
+        uint8_t text[] = {'P', 'l', 'a', 'i', 'n', 't', 'e', 'x', 't'};
+        known.Apply(text, sizeof(text));
+        const uint8_t expected[] = {0xBB, 0xF3, 0x16, 0xE8, 0xD9, 0x40, 0xAF, 0x0A, 0xD3};
+        Check(memcmp(text, expected, sizeof(text)) == 0, "the RC4 step is the textbook cipher (key \"Key\", \"Plaintext\")");
+
+        ReplayFile::Contents contents;
+        std::string error;
+        Check(ReplayFile::Read(folder / L"self-test-world.gwrec", contents, error), "the synthetic world is read for the wire");
+        const auto plan = ReplayWire::MakePlan(contents);
+        Check(plan.error.empty() && !plan.posts.empty(), std::format("the synthetic world has a feeder's plan ({})", plan.error).c_str());
+        if (plan.posts.empty()) {
+            return;
+        }
+        Check(plan.skeleton_records == 3, "the inventory skeleton is the first inventory's 324, 328 and equipped bag");
+        Check(plan.private_records_dropped > 0, "private records are left out of the stream");
+        Check(ProveFeed(contents, UINT32_MAX, false), "the synthetic world's feed holds its stages in order, each post cut into its messages");
+        const auto proof = ProveWire(contents, 20261125);
+        Check(proof.error.empty() && proof.records > 0, std::format("the synthetic world's wire round trip is byte for byte ({})", proof.error).c_str());
+
+        ReplayWire::Rc4 sender;
+        sender.Init(key, sizeof(key));
+        auto receiver = sender;
+        auto bytes = plan.posts.front().bytes;
+        sender.Apply(bytes.data(), bytes.size());
+        uint8_t skipped = 0;
+        receiver.Apply(&skipped, 1);
+        receiver.Apply(bytes.data(), bytes.size());
+        Check(bytes != plan.posts.front().bytes, "a receive state one byte off does not decrypt the stream");
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
@@ -992,6 +1202,7 @@ namespace {
         TestPacking();
         TestWorld(folder);
         TestRows(folder);
+        TestWire(folder);
 
         std::mt19937 random(20261123);
         const auto table = SyntheticTable(random);
@@ -1047,7 +1258,7 @@ int wmain(const int argc, const wchar_t* argv[])
         return Rows(argv[2], argc == 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 0);
     }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
-    const auto arguments = command.empty() ? 1 : command == L"--state" ? 2 : command == L"--join" ? 3 : command == L"--check-join" ? 1 : command == L"--keyframes" ? 3 : 0;
+    const auto arguments = command.empty() ? 1 : command == L"--state" ? 2 : command == L"--join" ? 3 : command == L"--check-join" ? 1 : command == L"--keyframes" ? 3 : command == L"--wire" ? 1 : command == L"--feed" ? 2 : 0;
     if (!arguments || argc != 2 + (command.empty() ? 0 : arguments)) {
         printf(
             "usage: replay_check <recording.gwrec>\n"
@@ -1055,6 +1266,8 @@ int wmain(const int argc, const wchar_t* argv[])
             "       replay_check --join <recording.gwrec> <ms> <out.gwrec>\n"
             "       replay_check --check-join <recording.gwrec>\n"
             "       replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>\n"
+            "       replay_check --wire <recording.gwrec>\n"
+            "       replay_check --feed <recording.gwrec> <ms>\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );
@@ -1080,6 +1293,15 @@ int wmain(const int argc, const wchar_t* argv[])
         }
         printf("check-join: %s\n", check.failures.empty() ? "passed" : "FAILED");
         return check.failures.empty() ? 0 : 1;
+    }
+    if (command == L"--wire") {
+        const auto proof = ProveWire(contents, 20261123);
+        printf("wire: %zu posts, %zu messages, %zu bytes encrypted post by post, decrypted, cut back into messages and encoded again: %s%s\n", proof.posts, proof.records, proof.bytes,
+               proof.error.empty() ? "passed, byte for byte" : "FAILED: ", proof.error.c_str());
+        return proof.error.empty() ? 0 : 1;
+    }
+    if (command == L"--feed") {
+        return ProveFeed(contents, static_cast<uint32_t>(_wtoi(argv[3])), true) ? 0 : 1;
     }
     if (command == L"--keyframes") {
         const auto proof = ProveKeyframes(contents, static_cast<uint32_t>(_wtoi(argv[3])), std::max(1u, static_cast<uint32_t>(_wtoi(argv[4]))), true);
