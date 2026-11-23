@@ -46,6 +46,7 @@
 #include <Modules/PartyBroadcastModule.h>
 #include <Modules/PriceCheckerModule.h>
 #include <Modules/ResignLogModule.h>
+#include <Modules/ReplayRecorderModule.h>
 #include <Modules/TexmodModule.h>
 #include <Modules/SplashScreenModule.h>
 #include <Modules/TextToSpeechModule.h>
@@ -186,6 +187,7 @@ namespace {
         PriceCheckerModule::Instance(),
         ItemTooltipModule::Instance(),
         ResignLogModule::Instance(),
+        {ReplayRecorderModule::Instance(), false},
         PathfindingWindow::Instance(),
         QuestModule::Instance(),
 #ifdef _DEBUG
