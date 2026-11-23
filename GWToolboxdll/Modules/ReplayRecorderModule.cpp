@@ -27,6 +27,7 @@
 #include <Utils/EncString.h>
 #include <Utils/ReplayFile.h>
 #include <Utils/ReplayObserve.h>
+#include <Utils/ReplayWire.h>
 #include <Utils/StoCHandlers.h>
 #include <Utils/TextUtils.h>
 
@@ -69,6 +70,8 @@ namespace {
     GW::HookEntry observe_hook_entry;
     bool observe_applied = false;
     std::atomic_bool emulating_rows = false;
+    std::atomic_bool playing_replay = false;
+    uint32_t last_game_type = 0;
     std::set<uint32_t> server_keys;
     std::map<uint32_t, ReplayObserve::Row> listed_rows;
     std::set<std::filesystem::path> logged_left_out;
@@ -220,11 +223,12 @@ namespace {
 
     void OnServerMessage(GW::HookStatus*, PacketBase* packet, void*)
     {
-        if (emulating_rows) {
+        if (emulating_rows || playing_replay) {
             return;
         }
         std::scoped_lock lock(recording_mutex);
         if (packet->header == GAME_SMSG_TRANSFER_GAME_SERVER_INFO) {
+            last_game_type = static_cast<const GW::Packet::StoC::GameSrvTransfer*>(packet)->token1;
             FinishRecording();
             StartRecording(static_cast<const GW::Packet::StoC::GameSrvTransfer*>(packet));
             return;
@@ -304,6 +308,382 @@ namespace {
         callbacks_registered = true;
     }
 
+    using GameConnect_pt = void(__cdecl*)(uint32_t protocol, const uint8_t* address, const void* data, uint32_t size);
+    using Goodbye_pt = void(__cdecl*)(uint32_t reason);
+    using InstanceAck_pt = void(__cdecl*)(uint8_t* mission);
+    using MapLoaded_pt = void(__cdecl*)();
+    using PostNetEvent_pt = uint32_t(__cdecl*)(void* context, uint32_t connection, uint32_t kind, const void* data, uint32_t size);
+
+    constexpr uint32_t replay_connection_id = 0x7E500001;
+    constexpr uint16_t closed_port = 1;
+    constexpr uint8_t address_family_ipv4 = 2;
+    constexpr uint32_t net_event_connected = 5;
+    constexpr uint32_t net_event_closed = 6;
+    constexpr uint32_t net_event_data = 8;
+    constexpr uint32_t mission_flags_offset = 0x190;
+    constexpr uint32_t instance_acknowledged = 0xC0;
+    constexpr uint32_t msgconn_mode_offset = 0x60;
+    constexpr uint32_t msgconn_receive_cipher_offset = 0x7C;
+    constexpr uint32_t msgconn_encrypted = 2;
+    constexpr auto connect_timeout = std::chrono::seconds(15);
+    constexpr auto load_timeout = std::chrono::seconds(120);
+    constexpr auto close_timeout = std::chrono::seconds(20);
+    const std::vector<uint32_t> transfer_fields = {0x1a6, 0x1805, 0x404, 0x104, 0x204, 0x104, 0x404, 0x104};
+
+    struct TransferMessage {
+        uint32_t header = GAME_SMSG_TRANSFER_GAME_SERVER_INFO;
+        uint8_t address[24] = {};
+        uint32_t game_type = 0;
+        uint32_t territory = 0;
+        uint32_t map_id = 0;
+        uint32_t map_type = 0;
+        uint32_t key = 0;
+        uint32_t last_byte = 0;
+    };
+    // The 422 handler (0x0084dbe0) reads +0x30, a field GWCA's GameSrvTransfer does not have.
+    static_assert(sizeof(TransferMessage) == 0x34);
+
+    struct ConnectedEvent {
+        uint32_t socket = 0;
+        uint32_t server = 0;
+        uint8_t address[24] = {};
+        uint32_t protocol = 0;
+        uint32_t connection = replay_connection_id;
+        uint8_t secret[ReplayWire::ready_secret_size] = {};
+    };
+    static_assert(sizeof(ConnectedEvent) == 0x3C && offsetof(ConnectedEvent, connection) == 0x24 && offsetof(ConnectedEvent, secret) == 0x28);
+
+    enum class Playback {
+        Off,
+        Transfer,
+        Connecting,
+        Acknowledging,
+        Loading,
+        Playing,
+        Ending,
+    };
+
+    GameConnect_pt GameConnect_Func = nullptr;
+    GameConnect_pt GameConnect_Ret = nullptr;
+    Goodbye_pt Goodbye_Func = nullptr;
+    Goodbye_pt Goodbye_Ret = nullptr;
+    InstanceAck_pt InstanceAck_Func = nullptr;
+    InstanceAck_pt InstanceAck_Ret = nullptr;
+    MapLoaded_pt MapLoaded_Func = nullptr;
+    MapLoaded_pt MapLoaded_Ret = nullptr;
+    PostNetEvent_pt PostNetEvent_Func = nullptr;
+    uint8_t** game_connection_global = nullptr;
+    void** net_context_global = nullptr;
+    bool playback_armed = false;
+    std::string playback_status;
+
+    std::atomic<Playback> playback = Playback::Off;
+    std::atomic_bool playback_paused = false;
+    std::atomic_int playback_speed = 1;
+    std::atomic_bool playback_stop_requested = false;
+    ReplayWire::Plan plan;
+    ReplayWire::Rc4 send_cipher;
+    std::filesystem::path playing_path;
+    TransferMessage transfer;
+    bool transfer_due = false;
+    bool connection_open = false;
+    bool stop_sent = false;
+    uint8_t* replay_connection = nullptr;
+    size_t next_post = 0;
+    double played_ms = 0;
+    Clock::time_point stage_since;
+    Clock::time_point last_update;
+
+    std::mt19937 RandomBytes()
+    {
+        std::random_device device;
+        return std::mt19937(device());
+    }
+
+    void PostNetEvent(const uint32_t kind, const uint32_t connection, const void* data, const uint32_t size)
+    {
+        PostNetEvent_Func(*net_context_global, connection, kind, data, size);
+    }
+
+    void PostStage(const ReplayWire::Stage stage)
+    {
+        for (; next_post < plan.posts.size() && plan.posts[next_post].stage == stage; next_post++) {
+            auto bytes = plan.posts[next_post].bytes;
+            send_cipher.Apply(bytes.data(), bytes.size());
+            PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
+        }
+    }
+
+    void EnterStage(const Playback stage)
+    {
+        playback = stage;
+        playing_replay = stage != Playback::Off;
+        stage_since = Clock::now();
+    }
+
+    void FinishPlayback(const std::string& why)
+    {
+        Log::Info("Replay Recorder: %s", why.c_str());
+        playback_status = why;
+        plan = {};
+        connection_open = false;
+        replay_connection = nullptr;
+        transfer_due = false;
+        stop_sent = false;
+        playback_stop_requested = false;
+        EnterStage(Playback::Off);
+    }
+
+    void CloseReplayConnection(const std::string& why)
+    {
+        if (connection_open) {
+            connection_open = false;
+            PostNetEvent(net_event_closed, replay_connection_id, nullptr, 0);
+        }
+        FinishPlayback(why);
+    }
+
+    void StopObserving()
+    {
+        if (stop_sent) {
+            return;
+        }
+        stop_sent = true;
+        EnterStage(Playback::Ending);
+        GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000017d);
+    }
+
+    void __cdecl OnGameConnect(const uint32_t protocol, const uint8_t* address, const void* data, const uint32_t size)
+    {
+        GW::Hook::EnterHook();
+        if (playback != Playback::Transfer || protocol != 0 || memcmp(address, transfer.address, 8) != 0) {
+            GameConnect_Ret(protocol, address, data, size);
+            return GW::Hook::LeaveHook();
+        }
+        auto random = RandomBytes();
+        ConnectedEvent connected;
+        memcpy(connected.address, address, sizeof(connected.address));
+        uint8_t ready[ReplayWire::ready_record_size] = {ReplayWire::ready_record_type, ReplayWire::ready_record_size};
+        for (auto& byte : connected.secret) {
+            byte = static_cast<uint8_t>(random());
+        }
+        for (size_t i = 2; i < sizeof(ready); i++) {
+            ready[i] = static_cast<uint8_t>(random());
+        }
+        // A kind-5 event with no socket gives the client the MsgConn its own playback runs on (GcSrv.cpp, MsgConn's null-socket branches).
+        PostNetEvent(net_event_connected, 0, &connected, sizeof(connected));
+        PostNetEvent(net_event_data, replay_connection_id, ready, sizeof(ready));
+        connection_open = true;
+        EnterStage(Playback::Connecting);
+        GW::Hook::LeaveHook();
+    }
+
+    void __cdecl OnGoodbye(const uint32_t reason)
+    {
+        GW::Hook::EnterHook();
+        Goodbye_Ret(reason);
+        if (connection_open) {
+            CloseReplayConnection(std::format("Left the replay of {}", TextUtils::WStringToString(playing_path.filename().wstring())));
+        }
+        GW::Hook::LeaveHook();
+    }
+
+    void __cdecl OnInstanceAck(uint8_t* mission)
+    {
+        GW::Hook::EnterHook();
+        InstanceAck_Ret(mission);
+        if (playback == Playback::Acknowledging && (*reinterpret_cast<uint32_t*>(mission + mission_flags_offset) & instance_acknowledged) == instance_acknowledged) {
+            PostStage(ReplayWire::Stage::Load);
+            EnterStage(Playback::Loading);
+        }
+        GW::Hook::LeaveHook();
+    }
+
+    void __cdecl OnMapLoaded()
+    {
+        GW::Hook::EnterHook();
+        MapLoaded_Ret();
+        if (playback == Playback::Loading) {
+            PostStage(ReplayWire::Stage::Entry);
+            played_ms = 0;
+            last_update = Clock::now();
+            EnterStage(Playback::Playing);
+        }
+        GW::Hook::LeaveHook();
+    }
+
+    void DisarmPlayback()
+    {
+        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func)}) {
+            if (hooked) {
+                GW::Hook::RemoveHook(hooked);
+            }
+        }
+        GameConnect_Func = nullptr;
+        Goodbye_Func = nullptr;
+        InstanceAck_Func = nullptr;
+        MapLoaded_Func = nullptr;
+        playback_armed = false;
+    }
+
+    std::string ArmPlayback()
+    {
+        const auto find = [](const char* pattern, const char* mask) {
+            return GW::Scanner::Find(pattern, mask, 0);
+        };
+        const auto game_connect = find("\x55\x8B\xEC\xE8\x00\x00\x00\x00\x85\xC0\x0F\x85\x00\x00\x00\x00\x53\x56\x57\xFF\x75\x08\xE8", "xxxx????xxxx????xxxxxxx");
+        const auto goodbye = find("\x55\x8B\xEC\x83\x3D\x00\x00\x00\x00\x00\x56\x8B\x75\x08\x75\x00\x8B\xC6\xF7\xD8\x1B\xC0\x83\xE0\x06", "xxxxx?????xxxxx?xxxxxxxxx");
+        const auto post_net_event = find("\x55\x8B\xEC\x56\x8B\x75\x08\x85\xF6\x75\x00\x68\xDB\x07\x00\x00\xBA\x00\x00\x00\x00\xB9", "xxxxxxxxxx?xxxxxx????x");
+        const auto net_callback = find("\x55\x8B\xEC\x83\xEC\x48\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x53\x8B\x5D\x0C\x56\x8B\x75\x08", "xxxxxxx????xxxxxxxxxxxxx");
+        const auto ready_step = find(
+            "\x55\x8B\xEC\x83\xEC\x28\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x8B\x45\x0C\x53\x8B\x5D\x08\x89\x5D\xDC\x89\x45\xD8\x83\x7B\x60\x01\x0F\x85\x00\x00\x00\x00\x8B\x45\x10\x80\x78\x01\x16\x0F\x85\x00\x00\x00\x00\x56\x57\x8D\x53\x69",
+            "xxxxxxx????xxxxxxxxxxxxxxxxxxxxxxxx????xxxxxxxxx????xxxxx");
+        const auto ready_cipher = find("\x6A\x14\x8D\x73\x7C\xC7\x43\x60\x02\x00\x00\x00\x8B\xCE\xE8\x00\x00\x00\x00\x8B\x43\x64\x8D\xBB\x84\x01\x00\x00", "xxxxxxxxxxxxxxx????xxxxxxxxx");
+        const auto receive = find(
+            "\x55\x8B\xEC\x51\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x53\x56\x57\xE8\x00\x00\x00\x00\x8B\x5D\x10\x85\xC0\x74\x0E\x8D\x43\x34\x50\x6A\x00\xE8\x00\x00\x00\x00\x83\xC4\x08\x8B\x4D\x08\x83\x79\x34\x00\x74\x7A\x8B\x7D\x0C\x83\x79\x60\x02",
+            "xxxxx????xxxxxxxxx????xxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxx");
+        const auto receive_cipher = find("\x53\x8D\x4F\x7C\xE8\x00\x00\x00\x00\xFF\x75\x14\x8D\x04\x1E\x89\x77\x44\x57\x89\x47\x48\xE8", "xxxxx????xxxxxxxxxxxxxx");
+        const auto instance_ack = find("\x55\x8B\xEC\x8B\x45\x08\x8B\x88\x90\x01\x00\x00\x8B\xC1\x25\xC0\x00\x00\x00\x3C\xC0\x75\x00\xF6\xC1\x01", "xxxxxxxxxxxxxxxxxxxxxx?xxx");
+        const auto map_loaded = find("\x55\x8B\xEC\x81\xEC\x48\x01\x00\x00\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x8D\x45\xE8\xC7\x45\xE4\x90\x00\x00\x00", "xxxxxxxxxx????xxxxxxxxxxxxxxx");
+        const auto transfer_handler = find("\x55\x8B\xEC\x8B\x45\x08\x83\xEC\x08\x8B\x40\x20\x84\xC0\x79\x00\x83\xC8\x80\x56\x50\xE8", "xxxxxxxxxxxxxxx?xxxxxx");
+        const std::pair<const char*, bool> checks[] = {
+            {"the game connect", game_connect != 0},
+            {"the game connection's goodbye", goodbye != 0},
+            {"the network event post", post_net_event != 0},
+            {"the network callback", net_callback != 0},
+            {"the connection's ready step", ready_step != 0 && ready_cipher == ready_step + 0xA5},
+            {"the connection's receive", receive != 0 && receive_cipher == receive + 0x89},
+            {"the instance acknowledgement", instance_ack != 0},
+            {"the map loaded message", map_loaded != 0},
+            {"the transfer handler", transfer_handler != 0},
+            {"the Observe window's hook", ObserveGame_Func != nullptr},
+            {"the transfer message's layout", message_table.size() > GAME_SMSG_TRANSFER_GAME_SERVER_INFO && message_table[GAME_SMSG_TRANSFER_GAME_SERVER_INFO] == transfer_fields},
+        };
+        for (const auto& [name, found] : checks) {
+            if (!found) {
+                return std::format("Playback not available: {} is not found in this client", name);
+            }
+        }
+        game_connection_global = *reinterpret_cast<uint8_t***>(goodbye + 0x4B);
+        net_context_global = *reinterpret_cast<void***>(net_callback + 0x50);
+        PostNetEvent_Func = reinterpret_cast<PostNetEvent_pt>(post_net_event);
+        GameConnect_Func = reinterpret_cast<GameConnect_pt>(game_connect);
+        Goodbye_Func = reinterpret_cast<Goodbye_pt>(goodbye);
+        InstanceAck_Func = reinterpret_cast<InstanceAck_pt>(instance_ack);
+        MapLoaded_Func = reinterpret_cast<MapLoaded_pt>(map_loaded);
+        if (GW::Hook::CreateHook(&GameConnect_Func, OnGameConnect, &GameConnect_Ret) != 0 || GW::Hook::CreateHook(&Goodbye_Func, OnGoodbye, &Goodbye_Ret) != 0 ||
+            GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 || GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0) {
+            DisarmPlayback();
+            return "Playback not available: its hooks could not be made";
+        }
+        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func)}) {
+            GW::Hook::EnableHooks(hooked);
+        }
+        playback_armed = true;
+        return "Ready: Observe on one of your recordings plays it";
+    }
+
+    void StartPlayback(const ReplayObserve::Row& row)
+    {
+        ReplayFile::Contents contents;
+        std::string error;
+        auto made = ReplayFile::Read(row.path, contents, error) ? ReplayWire::MakePlan(contents) : ReplayWire::Plan{.error = error};
+        const auto name = TextUtils::WStringToString(row.path.filename().wstring());
+        if (!made.error.empty()) {
+            playback_status = std::format("{} cannot be played: {}", name, made.error);
+            Log::Error("Replay Recorder: %s", playback_status.c_str());
+            GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
+            return;
+        }
+        plan = std::move(made);
+        playing_path = row.path;
+        next_post = 0;
+        played_ms = 0;
+        playback_paused = false;
+        transfer = {};
+        const uint8_t loopback[] = {address_family_ipv4, 0, closed_port >> 8, closed_port & 0xFF, 127, 0, 0, 1};
+        memcpy(transfer.address, loopback, sizeof(loopback));
+        transfer.game_type = last_game_type;
+        transfer.territory = contents.header.region;
+        transfer.map_id = contents.header.map_id;
+        transfer.map_type = contents.header.is_explorable;
+        transfer.key = RandomBytes()();
+        transfer_due = true;
+        playback_status = std::format("Playing {}", name);
+        EnterStage(Playback::Transfer);
+    }
+
+    void UpdatePlayback()
+    {
+        const auto now = Clock::now();
+        const auto waited = now - stage_since;
+        const auto stop = playback_stop_requested || !settings.play_from_observe_window || !settings.list_in_observe_window;
+        switch (playback.load()) {
+            case Playback::Off:
+                return;
+            case Playback::Transfer:
+                if (transfer_due) {
+                    transfer_due = false;
+                    stage_since = now;
+                    emulating_rows = true;
+                    GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&transfer));
+                    emulating_rows = false;
+                }
+                else if (waited > connect_timeout) {
+                    FinishPlayback("The game did not start the replay's connection");
+                }
+                return;
+            case Playback::Connecting: {
+                const auto connection = *game_connection_global;
+                if (connection && *reinterpret_cast<uint32_t*>(connection + msgconn_mode_offset) == msgconn_encrypted) {
+                    if (*reinterpret_cast<uint32_t*>(connection) != 0) {
+                        CloseReplayConnection("The game's connection is not the replay's: playback stopped");
+                        return;
+                    }
+                    replay_connection = connection;
+                    memcpy(&send_cipher, connection + msgconn_receive_cipher_offset, sizeof(send_cipher));
+                    EnterStage(Playback::Acknowledging);
+                    PostStage(ReplayWire::Stage::BeforeLoad);
+                }
+                else if (waited > connect_timeout || stop) {
+                    CloseReplayConnection("The replay's connection did not become ready");
+                }
+                return;
+            }
+            case Playback::Acknowledging:
+            case Playback::Loading:
+                if (*game_connection_global != replay_connection) {
+                    FinishPlayback("The replay's connection is gone");
+                }
+                else if (waited > load_timeout || stop) {
+                    CloseReplayConnection("The replay's map did not load");
+                }
+                return;
+            case Playback::Playing: {
+                const auto elapsed = std::chrono::duration<double, std::milli>(now - last_update).count();
+                last_update = now;
+                if (!playback_paused) {
+                    played_ms += elapsed * playback_speed;
+                }
+                for (; next_post < plan.posts.size() && plan.posts[next_post].time_ms <= played_ms && !stop; next_post++) {
+                    auto bytes = plan.posts[next_post].bytes;
+                    send_cipher.Apply(bytes.data(), bytes.size());
+                    PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
+                }
+                if (next_post == plan.posts.size() || stop) {
+                    Log::Info("Replay Recorder: %s", stop ? "playback stopped: back to the outpost" : "the replay has ended: back to the outpost");
+                    StopObserving();
+                }
+                return;
+            }
+            case Playback::Ending:
+                if (waited > close_timeout) {
+                    CloseReplayConnection("The game did not leave the replay: its connection closed by the toolbox");
+                }
+                return;
+        }
+    }
+
     void __cdecl OnObserveGame(const uint32_t game_key)
     {
         GW::Hook::EnterHook();
@@ -316,8 +696,13 @@ namespace {
         }
         const auto row = found->second;
         lock.unlock();
+        if (playback_armed && playback == Playback::Off) {
+            StartPlayback(row);
+            return GW::Hook::LeaveHook();
+        }
         const auto& map_name = Resources::GetMapName(static_cast<GW::Constants::MapID>(row.header.map_id))->wstring();
-        const auto answer = std::format(L"Replay {}: {}, {} long. Playback is not available yet.", row.path.filename().wstring(), map_name.empty() ? std::format(L"map {}", row.header.map_id) : map_name, ReplayObserve::Duration(row.header.duration_ms));
+        const auto answer = std::format(L"Replay {}: {}, {} long. Turn on \"Play recordings from the Observe window\" in the Replay Recorder's settings to play it.", row.path.filename().wstring(),
+                                        map_name.empty() ? std::format(L"map {}", row.header.map_id) : map_name, ReplayObserve::Duration(row.header.duration_ms));
         Log::InfoW(L"%ls", answer.c_str());
         GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
         GW::Hook::LeaveHook();
@@ -423,6 +808,7 @@ void ReplayRecorderModule::Initialize()
 
 void ReplayRecorderModule::SignalTerminate()
 {
+    playback_stop_requested = true;
     GW::StoC::RemoveCallbacks(&stoc_hook_entry);
     GW::StoC::RemoveCallbacks(&observe_hook_entry);
     DropListedRows();
@@ -431,9 +817,15 @@ void ReplayRecorderModule::SignalTerminate()
     callbacks_registered = false;
 }
 
+bool ReplayRecorderModule::CanTerminate()
+{
+    return playback == Playback::Off;
+}
+
 void ReplayRecorderModule::Terminate()
 {
     ToolboxModule::Terminate();
+    DisarmPlayback();
     if (ObserveGame_Func) {
         GW::Hook::RemoveHook(ObserveGame_Func);
         ObserveGame_Func = nullptr;
@@ -459,6 +851,16 @@ void ReplayRecorderModule::Update(float)
         }
         std::scoped_lock lock(recording_mutex);
         observe_status = std::move(applied_status);
+    }
+    UpdatePlayback();
+    const auto play = settings.play_from_observe_window && settings.list_in_observe_window && ObserveGame_Func;
+    if (play && !playback_armed && playback_status.empty()) {
+        playback_status = ArmPlayback();
+        Log::Log("Replay Recorder: %s", playback_status.c_str());
+    }
+    else if (!play && playback == Playback::Off && (playback_armed || !playback_status.empty())) {
+        DisarmPlayback();
+        playback_status.clear();
     }
     std::scoped_lock lock(recording_mutex);
     if (!callbacks_registered) {
@@ -516,6 +918,28 @@ void ReplayRecorderModule::DrawSettingsInternal()
     ImGui::ShowHelp("Recordings made on this client build appear in the Observe window (B, in an outpost) under \"Custom Event (0)\". Choosing one is answered here; nothing is sent to the server.");
     if (!observe_status.empty()) {
         ImGui::TextDisabled("%s", observe_status.c_str());
+    }
+    ImGui::Checkbox("Play recordings from the Observe window", &settings.play_from_observe_window);
+    ImGui::ShowHelp("Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. Stop observing (B, then Yes) brings you back to your outpost. Needs the list above.");
+    if (!playback_status.empty()) {
+        ImGui::TextDisabled("%s", playback_status.c_str());
+    }
+    if (playback == Playback::Playing) {
+        ImGui::Text("%s / %s", TextUtils::WStringToString(ReplayObserve::Duration(static_cast<uint32_t>(played_ms))).c_str(), TextUtils::WStringToString(ReplayObserve::Duration(plan.duration_ms)).c_str());
+        ImGui::SameLine();
+        if (ImGui::Button(playback_paused ? "Resume" : "Pause")) {
+            playback_paused = !playback_paused;
+        }
+        for (const auto speed : {1, 2, 4}) {
+            ImGui::SameLine();
+            if (ImGui::RadioButton(std::format("x{}", speed).c_str(), playback_speed == speed)) {
+                playback_speed = speed;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop")) {
+            playback_stop_requested = true;
+        }
     }
     if (writer.IsOpen()) {
         ImGui::Text("Recording %s: %u messages, %llu KB, %u layout errors", RecordingName().c_str(), header.record_count, writer.Size() / 1024, header.layout_errors);

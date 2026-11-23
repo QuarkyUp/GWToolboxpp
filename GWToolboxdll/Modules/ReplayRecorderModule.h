@@ -24,10 +24,12 @@ public:
         std::string folder;
         int size_cap_mb = 256;
         bool list_in_observe_window = false;
+        bool play_from_observe_window = false;
     };
 
     void Initialize() override;
     void SignalTerminate() override;
+    bool CanTerminate() override;
     void Terminate() override;
     void Update(float) override;
     void LoadSettings(SettingsDoc& doc, ToolboxIni* legacy) override;
