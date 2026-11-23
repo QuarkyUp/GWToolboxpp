@@ -411,16 +411,6 @@ namespace {
         }
         return "Waiting for the Observe window";
     }
-
-    void StopListing()
-    {
-        GW::StoC::RemoveCallbacks(&observe_hook_entry);
-        DropListedRows();
-        if (ObserveGame_Func) {
-            GW::Hook::RemoveHook(ObserveGame_Func);
-            ObserveGame_Func = nullptr;
-        }
-    }
 }
 
 void ReplayRecorderModule::Initialize()
@@ -460,7 +450,12 @@ void ReplayRecorderModule::Update(float)
             applied_status = StartListing();
         }
         else {
-            StopListing();
+            GW::StoC::RemoveCallbacks(&observe_hook_entry);
+            DropListedRows();
+            if (ObserveGame_Func) {
+                GW::Hook::RemoveHook(ObserveGame_Func);
+                ObserveGame_Func = nullptr;
+            }
         }
         std::scoped_lock lock(recording_mutex);
         observe_status = std::move(applied_status);
