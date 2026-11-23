@@ -55,6 +55,7 @@ namespace ReplayState {
             CharPostProcess = 107,
             CharHeroActivate = 114,
             CharHeroDataAdd = 115,
+            CharMercenaryInfo = 116,
             CharNpcUpdateWeapons = 109,
             CharEquipment = 110,
             CharEquipUpdate = 111,
@@ -94,6 +95,7 @@ namespace ReplayState {
             ItemProfession = 346,
             ItemReportDetailLow = 350,
             ItemReportDetailAll = 353,
+            ItemReportDetailAllReset = 354,
             MissionAccessRights = 366,
             MissionInstanceLoadHead = 380,
             MissionInstanceLoadPlayerName = 381,
@@ -153,10 +155,8 @@ namespace ReplayState {
         };
 
         constexpr uint16_t state_ids[] = {
-            30, 31, 32, 33, 34, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 53, 60, 62, 63, 64, 65, 66, 68, 72, 73, 76, 77, 80, 81, 82, 83,
-            84, 86, 87, 89, 90, 107, 109, 110, 111, 112, 141, 154, 155, 156, 159, 162, 163, 166, 170, 174, 176, 177, 186, 240, 241, 242, 263,
-            270, 273, 277, 280, 284, 288, 289, 302, 309, 314, 346, 350, 353, 366, 380, 381, 390, 398, 404, 406, 407, 408, 409, 410, 428, 430,
-            435, 446, 447, 451, 460, 467, 468, 474,
+            30,  31,  32,  33,  34,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,  53,  60,  62,  63,  64,  65,  66,  68,  72,  73,  76,  77,  80,  81,  82,  83,  84,  86,  87,  89,  90,  107, 109, 110, 111, 112, 141, 154, 155, 156, 159,
+            162, 163, 166, 170, 174, 176, 177, 186, 240, 241, 242, 263, 270, 273, 277, 280, 284, 288, 289, 302, 309, 314, 346, 350, 353, 354, 366, 380, 381, 390, 398, 404, 406, 407, 408, 409, 410, 428, 430, 435, 446, 447, 451, 460, 467, 468, 474,
         };
         constexpr uint16_t transient_ids[] = {12, 13, 35, 52, 61, 69, 70, 71, 93, 94, 96, 97, 160, 161, 164, 165, 226, 227, 228, 345};
         constexpr uint16_t private_ids[] = {
@@ -172,10 +172,29 @@ namespace ReplayState {
         constexpr size_t observer_field = 5;
         constexpr size_t equipment_slots = 9;
         constexpr uint16_t quest_ids[] = {CharQuestAdd, CharQuestGeneralInfo, CharQuestUpdateName, CharQuestDescription, CharQuestAddMarker, CharQuestUpdateMarker, CharQuestEarned};
-        constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
+        constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailAllReset, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
         constexpr uint16_t character_ids[] = {CharAttributeState, CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharPlayerUnlockedProfession, CharProfessions, CharSkillbar};
         constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharProfessions};
         constexpr size_t skillbar_create_field = 3;
+        constexpr IdField named_id_fields[] = {
+            {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},      {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
+            {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},     {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
+            {110, 1, IdKind::Item},      {110, 2, IdKind::Item},   {110, 3, IdKind::Item},      {110, 4, IdKind::Item},      {110, 5, IdKind::Item},      {110, 6, IdKind::Item},      {110, 7, IdKind::Item},      {110, 8, IdKind::Item},
+            {110, 9, IdKind::Item},      {111, 2, IdKind::Item},   {114, 0, IdKind::Hero},      {114, 2, IdKind::Inventory}, {115, 0, IdKind::Hero},      {116, 0, IdKind::Hero},      {174, 1, IdKind::Npc},       {176, 0, IdKind::Player},
+            {177, 0, IdKind::Player},    {177, 1, IdKind::Player}, {209, 1, IdKind::Skill},     {210, 1, IdKind::Skill},     {217, 2, IdKind::Skill},     {220, 0, IdKind::Skill},     {226, 1, IdKind::Skill},     {227, 1, IdKind::Skill},
+            {228, 1, IdKind::Skill},     {229, 1, IdKind::Skill},  {230, 1, IdKind::Skill},     {270, 0, IdKind::Prop},      {271, 0, IdKind::Prop},      {272, 0, IdKind::Prop},      {273, 0, IdKind::Prop},      {280, 0, IdKind::Guild},
+            {288, 0, IdKind::Guild},     {289, 0, IdKind::Guild},  {309, 0, IdKind::Item},      {313, 0, IdKind::Item},      {314, 0, IdKind::Item},      {318, 0, IdKind::Inventory}, {318, 1, IdKind::Item},      {318, 2, IdKind::Bag},
+            {319, 0, IdKind::Inventory}, {319, 3, IdKind::Bag},    {320, 0, IdKind::Inventory}, {324, 0, IdKind::Inventory}, {327, 0, IdKind::Inventory}, {327, 2, IdKind::Item},      {327, 3, IdKind::Item},      {328, 0, IdKind::Inventory},
+            {331, 0, IdKind::Inventory}, {331, 1, IdKind::Item},   {331, 2, IdKind::Bag},       {333, 0, IdKind::Inventory}, {333, 1, IdKind::Item},      {335, 0, IdKind::Inventory}, {338, 0, IdKind::Inventory}, {338, 1, IdKind::Item},
+            {338, 2, IdKind::Item},      {345, 0, IdKind::Item},   {346, 0, IdKind::Item},      {350, 0, IdKind::Item},      {353, 0, IdKind::Item},      {354, 0, IdKind::Item},      {410, 0, IdKind::Player},    {435, 0, IdKind::Party},
+            {460, 0, IdKind::Party},     {460, 1, IdKind::Player}, {465, 0, IdKind::Party},     {465, 1, IdKind::Player},    {467, 0, IdKind::Party},     {468, 0, IdKind::Party},
+        };
+        constexpr IdField id_bringers[] = {
+            {32, 0, IdKind::Agent},  {55, 0, IdKind::Agent},  {89, 1, IdKind::Agent},  {154, 0, IdKind::Agent},  {155, 0, IdKind::Agent},  {159, 1, IdKind::Agent},  {160, 2, IdKind::Agent},     {167, 0, IdKind::Agent},
+            {240, 0, IdKind::Agent}, {241, 0, IdKind::Agent}, {350, 0, IdKind::Item},  {353, 0, IdKind::Item},   {354, 0, IdKind::Item},   {319, 3, IdKind::Bag},    {324, 0, IdKind::Inventory}, {288, 0, IdKind::Guild},
+            {289, 0, IdKind::Guild}, {467, 0, IdKind::Party}, {89, 0, IdKind::Player}, {176, 0, IdKind::Player}, {177, 0, IdKind::Player}, {410, 0, IdKind::Player}, {73, 0, IdKind::Quest},      {80, 0, IdKind::Quest},
+            {116, 0, IdKind::Hero},  {115, 0, IdKind::Hero},  {86, 0, IdKind::Npc},    {273, 0, IdKind::Prop},   {66, 1, IdKind::Skill},   {226, 1, IdKind::Skill},  {228, 1, IdKind::Skill},
+        };
         constexpr uint16_t row_ids[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentUpdateProfession, CharAgentAllyAdd, CharAgentInitialEffects, CharAgentUpdateEffects};
 
         template <typename List>
@@ -621,46 +640,131 @@ namespace ReplayState {
     std::vector<uint32_t> NamedAgents(const ReplayFile::MessageTable& table, const Message& message)
     {
         std::vector<uint32_t> named;
-        const auto add = [&named](const uint32_t agent) {
-            if (agent) {
-                named.push_back(agent);
+        for (const auto& field : IdFields(table, message.id)) {
+            if (field.kind == IdKind::Agent && message.U(field.field)) {
+                named.push_back(message.U(field.field));
             }
-        };
-        if (IsAgentClient(message.id)) {
-            if (message.id != AgentAdvance && message.id != AgentConnect) {
-                add(message.U(0));
-            }
-            if (message.id == AgentUpdateMoveTarget) {
-                add(message.U(4));
-            }
-            if (message.id == AgentCreate) {
-                add(message.U(20));
-            }
-            return named;
-        }
-        if (message.id == GadgetState) {
-            add(message.U(0));
-            return named;
-        }
-        if (message.id == GadgetClassDefine || message.id >= table.size()) {
-            return named;
-        }
-        const auto& descriptors = table[message.id];
-        size_t field = 0;
-        for (size_t i = 1; i < descriptors.size() && field < message.fields.size(); i++) {
-            const auto type = descriptors[i] & 0xF;
-            if (type == 6 || type == 10) {
-                continue;
-            }
-            if (type == 12) {
-                break;
-            }
-            if (type == 0 && (descriptors[i] >> 4 & 0xF) == 1) {
-                add(message.U(field));
-            }
-            field++;
         }
         return named;
+    }
+
+    const char* IdKindName(const IdKind kind)
+    {
+        switch (kind) {
+            case IdKind::Agent:
+                return "agent";
+            case IdKind::Item:
+                return "item";
+            case IdKind::Bag:
+                return "bag";
+            case IdKind::Inventory:
+                return "inventory";
+            case IdKind::Guild:
+                return "guild";
+            case IdKind::Party:
+                return "party";
+            case IdKind::Player:
+                return "player";
+            case IdKind::Quest:
+                return "quest";
+            case IdKind::Hero:
+                return "hero";
+            case IdKind::Npc:
+                return "npc";
+            case IdKind::Prop:
+                return "prop";
+            case IdKind::Skill:
+                return "skill";
+        }
+        return "?";
+    }
+
+    std::vector<IdField> IdFields(const ReplayFile::MessageTable& table, const uint16_t message_id)
+    {
+        std::vector<IdField> fields;
+        const auto agent = [&fields, message_id](const size_t field) {
+            fields.push_back({message_id, static_cast<uint8_t>(field), IdKind::Agent});
+        };
+        if (IsAgentClient(message_id)) {
+            if (message_id != AgentAdvance && message_id != AgentConnect) {
+                agent(0);
+            }
+            if (message_id == AgentUpdateMoveTarget) {
+                agent(4);
+            }
+            if (message_id == AgentCreate) {
+                agent(20);
+            }
+        }
+        else if (message_id == GadgetState) {
+            agent(0);
+        }
+        else if (message_id != GadgetClassDefine && message_id < table.size() && !table[message_id].empty()) {
+            const auto& descriptors = table[message_id];
+            size_t field = 0;
+            for (size_t i = 1; i < descriptors.size(); i++) {
+                const auto type = descriptors[i] & 0xF;
+                if (type == 6 || type == 10) {
+                    continue;
+                }
+                if (type == 12) {
+                    break;
+                }
+                if (type == 0 && (descriptors[i] >> 4 & 0xF) == 1) {
+                    agent(field);
+                }
+                field++;
+            }
+        }
+        for (const auto& named : named_id_fields) {
+            if (named.message == message_id) {
+                fields.push_back(named);
+            }
+        }
+        return fields;
+    }
+
+    bool BringsIdsIn(const IdField& field)
+    {
+        return std::ranges::find(id_bringers, field) != std::ranges::end(id_bringers);
+    }
+
+    bool OrderChecked(const IdKind kind)
+    {
+        // Skill ids are the game's own data: what comes first in a load is a skill's use (228, then 227 to 230), not its making.
+        return kind != IdKind::Skill;
+    }
+
+    std::string Describe(const OrderFailure& failure)
+    {
+        return std::format("record {} (message {}): its {} {} (field {}) comes before any message that brings it in", failure.record, failure.field.message, IdKindName(failure.field.kind), failure.id, failure.field.field);
+    }
+
+    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages)
+    {
+        std::vector<OrderFailure> failures;
+        std::set<std::pair<IdKind, uint32_t>> brought;
+        for (size_t i = 0; i < messages.size(); i++) {
+            const auto& message = messages[i];
+            for (const auto& field : IdFields(table, message.id)) {
+                if (field.field >= message.fields.size()) {
+                    continue;
+                }
+                const auto brings = BringsIdsIn(field);
+                for (const auto id : message.fields[field.field].numbers) {
+                    if (!id) {
+                        continue;
+                    }
+                    if (brings) {
+                        brought.insert({field.kind, id});
+                    }
+                    else if (OrderChecked(field.kind) && !brought.contains({field.kind, id})) {
+                        failures.push_back({i, field, id});
+                    }
+                }
+            }
+        }
+        return failures;
     }
 
     Kind KindOf(const uint16_t message_id)
@@ -709,12 +813,12 @@ namespace ReplayState {
             else if (Contains(attribute_state_users, message.id) && !attribute_states.contains(agent_id)) {
                 fail(i, message.id, std::format("agent {} has no attribute state (55) yet: the client asserts attribState", agent_id));
             }
-            else if (message.id == CharHeroDataAdd) {
+            else if (message.id == CharHeroDataAdd || message.id == CharMercenaryInfo) {
                 hero_data.insert(message.U(0));
             }
             else if (message.id == CharHeroActivate) {
                 if (!hero_data.contains(message.U(0))) {
-                    fail(i, message.id, std::format("hero {} activated before its data (115): the client asserts charHeroData", message.U(0)));
+                    fail(i, message.id, std::format("hero {} activated before its data (115, or 116 for a mercenary): the client asserts charHeroData", message.U(0)));
                 }
                 active_heroes.insert(message.U(1));
             }
@@ -794,6 +898,7 @@ namespace ReplayState {
                 return;
             case CharAgentDestroyPlayer:
                 players.erase(message.U(0));
+                player_flags.erase(message.U(0));
                 return;
             case CharPlayerRowFlags: {
                 auto& flags = player_flags[message.U(0)];
@@ -1267,8 +1372,9 @@ namespace ReplayState {
         for (const auto& [player, flags] : player_flags) {
             out.push_back(Make(CharPlayerRowFlags, {player, flags, ~flags}));
         }
-        for (const auto id : {CharUpdateAgentPartysize, CharPlayerLink, CharPointTable141, GuildAssign, GuildAllianceInfo, GuildGeneralInfo, GuildToClient284,
-                              GuildToClient302, CharPostProcess, CharContextValue112, GadgetClassDefine, CharNpcProperties, CharNpcModel, PropAnimate, PropLayers}) {
+        for (const auto id :
+             {CharUpdateAgentPartysize, CharPlayerLink, CharPointTable141, GuildAllianceInfo, GuildGeneralInfo, GuildAssign, GuildToClient284, GuildToClient302, CharPostProcess, CharContextValue112, GadgetClassDefine, CharNpcProperties, CharNpcModel,
+              PropLayers, PropAnimate}) {
             emit_instance(id);
         }
         for (auto found = instance.lower_bound({PartyMembershipBegin}); found != instance.end() && found->first[0] == PartyMembershipBegin; ++found) {

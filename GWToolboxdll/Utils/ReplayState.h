@@ -40,6 +40,30 @@ namespace ReplayState {
     bool Streamed(const ReplayFile::MessageTable& table, const ReplayFile::Record& record, uint32_t controlled_agent);
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
+    enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };
+    const char* IdKindName(IdKind kind);
+
+    struct IdField {
+        uint16_t message = 0;
+        uint8_t field = 0;
+        IdKind kind = IdKind::Agent;
+
+        auto operator<=>(const IdField&) const = default;
+    };
+
+    std::vector<IdField> IdFields(const ReplayFile::MessageTable& table, uint16_t message_id);
+    bool BringsIdsIn(const IdField& field);
+    bool OrderChecked(IdKind kind);
+
+    struct OrderFailure {
+        size_t record = 0;
+        IdField field;
+        uint32_t id = 0;
+    };
+
+    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages);
+    std::string Describe(const OrderFailure& failure);
+
     constexpr uint32_t default_keyframe_interval_ms = 10000;
 
     class World {
