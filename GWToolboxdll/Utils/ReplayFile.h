@@ -62,6 +62,7 @@ namespace ReplayFile {
     bool PackMessage(uint32_t message_id, const uint32_t* fields, uint32_t field_count, const uint8_t* decoded, std::vector<uint8_t>& out, const TextFilter& filter);
 
     bool Read(const std::filesystem::path& path, Contents& out, std::string& error);
+    bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error);
 
     class Writer {
     public:

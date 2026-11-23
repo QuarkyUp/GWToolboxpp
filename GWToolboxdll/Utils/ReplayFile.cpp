@@ -75,6 +75,23 @@ namespace ReplayFile {
             visit(header.toolbox_version);
         }
 
+        bool ParseHeader(const uint8_t* bytes, const size_t size, Header& out, std::string& error)
+        {
+            if (size < header_size || memcmp(bytes, magic, sizeof(magic)) != 0) {
+                error = "not a recording (no magic)";
+                return false;
+            }
+            HeaderReader header_reader{bytes + sizeof(magic)};
+            uint16_t version = 0;
+            uint16_t stored_size = 0;
+            VisitHeader(header_reader, out, version, stored_size);
+            if (version != format_version || stored_size != header_size) {
+                error = std::format("format version {} with a header of {} bytes, expected {} and {}", version, stored_size, format_version, header_size);
+                return false;
+            }
+            return true;
+        }
+
         std::vector<uint8_t> HeaderBytes(Header header)
         {
             std::vector<uint8_t> out(magic, magic + sizeof(magic));
@@ -268,16 +285,7 @@ namespace ReplayFile {
         }
         fclose(file);
 
-        if (bytes.size() < header_size || memcmp(bytes.data(), magic, sizeof(magic)) != 0) {
-            error = "not a recording (no magic)";
-            return false;
-        }
-        HeaderReader header_reader{bytes.data() + sizeof(magic)};
-        uint16_t version = 0;
-        uint16_t size = 0;
-        VisitHeader(header_reader, out.header, version, size);
-        if (version != format_version || size != header_size) {
-            error = std::format("format version {} with a header of {} bytes, expected {} and {}", version, size, format_version, header_size);
+        if (!ParseHeader(bytes.data(), bytes.size(), out.header, error)) {
             return false;
         }
 
@@ -347,6 +355,20 @@ namespace ReplayFile {
             return false;
         }
         return true;
+    }
+
+    bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error)
+    {
+        out = {};
+        const auto file = _wfopen(path.c_str(), L"rb");
+        if (!file) {
+            error = "cannot open the file";
+            return false;
+        }
+        uint8_t bytes[header_size];
+        const auto read = fread(bytes, 1, sizeof(bytes), file);
+        fclose(file);
+        return ParseHeader(bytes, read, out, error);
     }
 
     Writer::~Writer()
