@@ -1,6 +1,6 @@
 ---
 title: "Replay Recorder"
-description: "Record what the game server sends in PvE explorable areas, one file per instance, for replays; its settings and its file format."
+description: "Record what the game server sends in PvE explorable areas, one file per instance, for replays; its settings, its file format, and how replay_check restores any moment of a recording."
 section: features
 ---
 
@@ -24,14 +24,75 @@ The panel shows the recording in progress (messages, size, layout errors) or the
 
 ## Reading a recording
 
-`replay_check`, built with `python scripts/build.py --target replay_check`, prints a recording's header and the count and bytes of each message id:
+`replay_check`, built with `python scripts/build.py --target replay_check`, prints a recording's header and the count, bytes and kind (see [Message kinds](#message-kinds)) of each message id:
 
 ```
 replay_check <recording.gwrec>
+replay_check --state <recording.gwrec> <ms>
+replay_check --join <recording.gwrec> <ms> <out.gwrec>
+replay_check --check-join <recording.gwrec>
+replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>
 replay_check --self-test <folder>
 ```
 
-`--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written.
+- `--state` prints the instance's state after the records up to that time: its clock and its agents, with what each holds as message and agent ids only (no names, texts or values), and a digest of the whole state.
+- `--join` writes a recording that starts at that time: the join that recreates the state (below), then the rest of the stream.
+- `--check-join` checks a recording against what the client asserts when it enters an instance (below).
+- `--keyframes` proves a recording's joins. For each keyframe, the state rebuilt from its join and the records after it must equal the whole stream's state at every sample time. Each keyframe's join must pass `--check-join`. A seek between two keyframes must give the stream's state. Every record must decode against the file's table and encode back to its bytes.
+- `--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written. It also writes a synthetic instance (players, NPCs, a gadget, an item on the ground, moves, effects, damage, deaths and returns) and runs the `--keyframes` proof on it, with keyframes every 10 s and every second.
+
+## Restoring any moment
+
+A replay that starts in the middle of a recording, or seeks, cannot feed the client the stream from that point: the later messages assume every agent, effect and quest made before. `replay_check` keeps the instance's state as the records come (`GWToolboxdll/Utils/ReplayState.*`, which does not depend on the game) and turns it back into the messages an instance's entry sends.
+
+**What the state holds**:
+- The entry: 380, 390, 381, 410 (its observer byte cleared), the manifest's 409, 407 and 408, 428, 406, 186 and 398, as the recording had them.
+- The agents' clock: 31's time, then each 30's milliseconds added.
+- Every agent alive (32 until 33) and its creation, with its position kept current:
+  - Its walk (41 or 42) advances at each 30, in a straight line to its point, at its speed (39, else 32's) times its move speed (43, else 32's), until it arrives; 44 moves it, 40 stops it.
+  - Its last 36, 37, 38, 39, 43, 46 (until 45), 47, 53, 72, 109, 154, 155, 156, 166, 170 (until 62), 174 and 277; its status (240, 241); its equipment (110, 111).
+  - Its health and energy: set by 162 (kinds 34 and 33), changed by 163 (kinds 16, 17, 18, 55) and 162 (kind 62), regenerated at each 30 by 162 (kinds 44 and 43).
+  - Its effects (66, until 68 or the end of their duration), upkeeps (63 and 65, until 64), auras (159 kinds 6 and 7) and lasting notices (159 kinds 11, 12, 30, 36, 41, 42, 66).
+- Messages about an agent not yet created (154, 155, 159, 166, 170, 240, 241), kept for that agent's creation and dropped at the next 30 when it does not come.
+- The players' rows (89, until 90) with their agent, even one out of the world, and their flags (60); the reporter (34).
+- The instance: 242, 430, the quests (73, 76, 77, 80, 81, 83, 84, until 82), NPC and gadget definitions (86, 87, 263), props (270, 273), 141's table, guilds (280, 284, 288, 289, 302), the party (435, 446, 447, 451, 460, 467, 468, 474), 107, 112, 176, 177, 366 and 404.
+- Item details (353, 350, 346, 314, 309), sent again only for the items ever shown (worn, 110 and 111; held, 109; on the ground; in a weapon set, 327) and for the items never put in the recorder's inventory (318).
+
+**The join** at a time is, in order:
+1. 380, 390, 381, and 410 with its observer byte set; 409, 407 and 408; 428; the quests; 406; 430; 242.
+2. 31 with the clock; the details of those items.
+3. The recorder's own row (89) and agent, then every agent that is not a player's. Each agent comes as the entry sends it: its definitions, its rows, 32, its items, its equipment and state, its health and energy, its effects with their remaining time.
+4. 34 for the recorder's character, which the viewer controls.
+5. The other players' rows and agents; the walks under way and the upkeeps.
+6. The players' flags, the rest of the instance and the party; 186 and 398; 366 and 404.
+
+Private messages are never in a join: the viewer's client would show the recorder's inventory, skills and attributes as its own.
+
+**Keyframes**: the state is kept every N seconds of the recording (10 by default), in memory, at the first 30 after each multiple; the file format does not change. A seek to a time is the nearest keyframe's join, then the records from that keyframe to the time.
+
+**What `--check-join` checks**, as the client asserts or needs:
+- 410 before 408, and 409 before 407.
+- No agent message (32 to 47) before 31.
+- 242 before 34, and the reporter's agent created as a player first (89, then 32) with 242's team token.
+- No message naming an agent that is not alive, except the rows the entry sends just before an agent's own 32.
+- Every record decodes against the file's table and encodes back to its bytes.
+
+After the join, the stream's own character-client messages about agents not created are counted rather than failed, because the game server sends them. So are player rows naming an agent out of the world: the server sends those too, and the client keeps them.
+
+### Message kinds
+
+Every server message id is one of these (`replay_check <recording>` prints each id's kind):
+- **State**, what the join restores (above): 30-34, 36-47, 53, 60, 62-66, 68, 72, 73, 76, 77, 80-84, 86, 87, 89, 90, 107, 109-112, 141, 154-156, 159, 162, 163, 166, 170, 174, 176, 177, 186, 240-242, 263, 270, 273, 277, 280, 284, 288, 289, 302, 309, 314, 346, 350, 353, 366, 380, 381, 390, 398, 404, 406-410, 428, 430, 435, 446, 447, 451, 460, 467, 468, 474. Some kinds within these are one-off and dropped: 159's other kinds (attacks, casts, animations), 162's kinds 52 and 63, 163's kinds 52 and 61.
+- **Transient**, safe to drop at a join: 12 and 13 (ping), 35, 52, 61, 69 and 71 (the client only posts them to its interface), 70 (a screen shake), 93, 94, 96 and 97 (chat), 160, 161, 164, 165 and 226-228 (attacks, casts, projectiles, speech), 345 (a pick-up).
+- **Private**, the recorder's own and never in a join: 15, 48-51, 54-59, 75, 78, 92 (acted on only for the controlled character), 101, 115, 116, 124-126, 128, 129, 131, 132, 138-140, 181-183, 195-197, 202-204, 218, 219, 221, 224, 229, 230, 233-239, 243-246, 313, 318-321, 324, 327, 328, 331, 333, 335, 337 and 479-481. These are the inventory, gold, skill bars, attributes, titles, account, heroes' builds, explored map, dialogs, windows and party search.
+- **Unknown**, dropped from a join: 74, 114, 153, 167, 207 and 360, seen in recordings but not understood. Each handler calls one function that was not read:
+  - 74 and 153 call 0x0059b2e0, then post a frame message.
+  - 114 calls 0x0081c100. It comes with the heroes' private messages before 31.
+  - 167 calls one of two functions, by the agent's kind. It mostly names agents that are not created.
+  - 207 calls 0x00820040.
+  - 360 calls a function of the agent view, by the agent's model kind.
+
+  Any id not listed is unknown too; none was seen in the recordings at hand.
 
 ## File format
 

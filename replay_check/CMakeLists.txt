@@ -1,7 +1,9 @@
 add_executable(replay_check EXCLUDE_FROM_ALL
     main.cpp
     "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayFile.cpp"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayFile.h")
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayFile.h"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayState.cpp"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayState.h")
 
 target_include_directories(replay_check PRIVATE "${PROJECT_SOURCE_DIR}/GWToolboxdll")
 target_compile_options(replay_check PRIVATE -Wall -Wextra)

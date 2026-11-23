@@ -1,8 +1,12 @@
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayState.h>
 
+#include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -43,10 +47,10 @@ namespace {
                header.flags & ReplayFile::SizeCapReached ? ", size cap reached" : "");
         printf("records           %zu (header: %u), layout errors %u%s\n", contents.records.size(), header.record_count, header.layout_errors,
                contents.truncated_tail ? ", last record cut short" : "");
-        printf("\n%8s %10s %12s\n", "id", "count", "bytes");
+        printf("\n%8s %10s %12s  %s\n", "id", "count", "bytes", "kind");
         uint64_t total_bytes = 0;
         for (const auto& [message_id, count] : CountPerMessage(contents.records)) {
-            printf("%8u %10u %12llu\n", message_id, count.count, static_cast<unsigned long long>(count.bytes));
+            printf("%8u %10u %12llu  %s\n", message_id, count.count, static_cast<unsigned long long>(count.bytes), ReplayState::KindName(ReplayState::KindOf(message_id)));
             total_bytes += count.bytes;
         }
         printf("%8s %10zu %12llu\n", "total", contents.records.size(), static_cast<unsigned long long>(total_bytes));
@@ -307,11 +311,481 @@ namespace {
         return close ? writer.Close(header) : writer.Flush();
     }
 
+    uint64_t Digest(const std::string& text)
+    {
+        uint64_t digest = 0xcbf29ce484222325;
+        for (const auto c : text) {
+            digest = (digest ^ static_cast<uint8_t>(c)) * 0x100000001b3;
+        }
+        return digest;
+    }
+
+    std::string FirstDifference(const std::string& expected, const std::string& actual)
+    {
+        size_t line = 0;
+        size_t a = 0;
+        size_t b = 0;
+        while (a < expected.size() || b < actual.size()) {
+            const auto a_end = std::min(expected.find('\n', a), expected.size());
+            const auto b_end = std::min(actual.find('\n', b), actual.size());
+            const auto expected_line = expected.substr(a, a_end - a);
+            const auto actual_line = actual.substr(b, b_end - b);
+            if (expected_line != actual_line) {
+                const auto words = [](const std::string& text) {
+                    const auto first = text.find(' ', 1);
+                    return text.substr(0, first == std::string::npos ? text.size() : text.find(' ', first + 1));
+                };
+                return std::format("line {}: \"{}\" against \"{}\"", line, words(expected_line), words(actual_line));
+            }
+            a = a_end + 1;
+            b = b_end + 1;
+            line++;
+        }
+        return "none";
+    }
+
+    ReplayFile::Contents Joined(const ReplayFile::Contents& contents, std::vector<ReplayFile::Record> records, const size_t tail_start)
+    {
+        ReplayFile::Contents joined{contents.header, contents.table, std::move(records), false};
+        joined.records.insert(joined.records.end(), contents.records.begin() + static_cast<std::ptrdiff_t>(tail_start), contents.records.end());
+        joined.header.record_count = static_cast<uint32_t>(joined.records.size());
+        joined.header.layout_errors = 0;
+        joined.header.flags |= ReplayFile::Complete;
+        return joined;
+    }
+
+    size_t RecordsUpTo(const ReplayFile::Contents& contents, const uint32_t time_ms)
+    {
+        size_t count = 0;
+        while (count < contents.records.size() && contents.records[count].time_ms <= time_ms) {
+            count++;
+        }
+        return count;
+    }
+
+    struct Proof {
+        size_t keyframes = 0;
+        size_t samples = 0;
+        size_t mismatches = 0;
+        size_t check_failures = 0;
+        size_t seeks = 0;
+        size_t layout_errors = 0;
+    };
+
+    Proof ProveKeyframes(const ReplayFile::Contents& contents, const uint32_t interval_ms, const uint32_t sample_ms, const bool verbose)
+    {
+        Proof proof;
+        const auto& records = contents.records;
+        for (const auto& record : records) {
+            ReplayState::Message message;
+            std::vector<uint8_t> encoded;
+            if (!ReplayState::Decode(contents.table, record.body, message) || !ReplayState::Encode(contents.table, message, encoded) || encoded != record.body) {
+                proof.layout_errors++;
+            }
+        }
+        const auto end_ms = records.empty() ? 0 : records.back().time_ms;
+        std::vector<uint32_t> sample_times;
+        for (uint32_t time_ms = 0; time_ms < end_ms; time_ms += sample_ms) {
+            sample_times.push_back(time_ms);
+        }
+        sample_times.push_back(end_ms);
+        std::map<uint32_t, std::string> reference;
+        ReplayState::World world(contents.table);
+        size_t applied = 0;
+        for (const auto time_ms : sample_times) {
+            for (; applied < records.size() && records[applied].time_ms <= time_ms; applied++) {
+                world.Apply(records[applied]);
+            }
+            reference[time_ms] = world.Dump(true);
+        }
+
+        const auto keyframes = ReplayState::Keyframes(contents, interval_ms);
+        proof.keyframes = keyframes.size();
+        for (size_t k = 0; k < keyframes.size(); k++) {
+            const auto& keyframe = keyframes[k];
+            const auto join = ReplayState::JoinRecords(contents.table, keyframe.world, keyframe.time_ms);
+            const auto joined = Joined(contents, join, keyframe.record_index);
+            const auto check = ReplayState::CheckJoin(joined);
+            proof.check_failures += check.failures.size();
+
+            ReplayState::World replayed(contents.table);
+            for (const auto& record : join) {
+                replayed.Apply(record);
+            }
+            size_t mismatches = 0;
+            std::string first_mismatch;
+            const auto compare = [&](const std::string& expected, const std::string& actual) {
+                proof.samples++;
+                if (Digest(expected) != Digest(actual)) {
+                    if (!mismatches) {
+                        first_mismatch = FirstDifference(expected, actual);
+                    }
+                    mismatches++;
+                }
+            };
+            compare(keyframe.world.Dump(true), replayed.Dump(true));
+            auto tail = keyframe.record_index;
+            for (const auto time_ms : sample_times) {
+                if (time_ms < keyframe.time_ms) {
+                    continue;
+                }
+                for (; tail < records.size() && records[tail].time_ms <= time_ms; tail++) {
+                    replayed.Apply(records[tail]);
+                }
+                compare(reference[time_ms], replayed.Dump(true));
+            }
+            const auto seek_ms = k + 1 < keyframes.size() ? (keyframe.time_ms + keyframes[k + 1].time_ms) / 2 : (keyframe.time_ms + end_ms) / 2;
+            ReplayState::World sought(contents.table);
+            for (const auto& record : ReplayState::Seek(contents, keyframes, seek_ms)) {
+                sought.Apply(record);
+            }
+            ReplayState::World expected(contents.table);
+            for (size_t i = 0; i < RecordsUpTo(contents, seek_ms); i++) {
+                expected.Apply(records[i]);
+            }
+            compare(expected.Dump(true), sought.Dump(true));
+            proof.seeks++;
+            proof.mismatches += mismatches;
+            if (verbose || mismatches || !check.failures.empty()) {
+                printf("keyframe %2zu at %7u ms (record %zu): %zu join records, %zu agents; samples to the end %s; check-join %s (%zu join records, %zu stream rows before their agent, %zu player rows without agent)\n",
+                       k, keyframe.time_ms, keyframe.record_index, join.size(), keyframe.world.AgentCount(),
+                       mismatches ? std::format("{} differ, first {}", mismatches, first_mismatch).c_str() : "identical",
+                       check.failures.empty() ? "passed" : std::format("{} failures, first {}", check.failures.size(), check.failures.front()).c_str(), check.join_records,
+                       check.stream_rows_before_creation, check.player_rows_without_agent);
+            }
+        }
+        printf("keyframes every %u ms: %zu keyframes, %zu samples compared, %zu differ; %zu seeks; check-join failures %zu; records that do not decode and encode back %zu: %s\n",
+               interval_ms, proof.keyframes, proof.samples, proof.mismatches, proof.seeks, proof.check_failures, proof.layout_errors,
+               proof.mismatches || proof.check_failures || proof.layout_errors ? "FAILED" : "passed");
+        return proof;
+    }
+
+    using ReplayState::Field;
+
+    Field N(const uint32_t value)
+    {
+        return {{value}, {}};
+    }
+
+    Field Floats(std::initializer_list<float> values)
+    {
+        Field field;
+        for (const auto value : values) {
+            field.numbers.push_back(std::bit_cast<uint32_t>(value));
+        }
+        return field;
+    }
+
+    Field Bytes(const size_t count, const uint8_t value)
+    {
+        return {std::vector<uint32_t>(count, value), {}};
+    }
+
+    Field Text(const std::wstring& text)
+    {
+        return {{}, text};
+    }
+
+    const std::map<uint16_t, std::vector<uint32_t>> world_layouts = {
+        {12, {}},
+        {30, {0x404}},
+        {31, {0x404}},
+        {32, {0x404, 0x404, 0x104, 0x104, 0x12, 0x204, 0x2, 0x104, 0x21, 0x1, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x2, 0x12, 0x204, 0x404, 0x12, 0x204}},
+        {33, {0x404}},
+        {34, {0x404, 0x404}},
+        {39, {0x404, 0x21}},
+        {40, {0x404}},
+        {41, {0x404, 0x12, 0x204, 0x204}},
+        {42, {0x404, 0x12, 0x204, 0x204, 0x404}},
+        {43, {0x404, 0x1, 0x104}},
+        {44, {0x404, 0x12, 0x204}},
+        {46, {0x404, 0x404, 0x404}},
+        {47, {0x404, 0x404}},
+        {62, {0x10}},
+        {63, {0x10, 0x10, 0x204, 0x404, 0x404}},
+        {64, {0x10, 0x404}},
+        {65, {0x10, 0x10, 0x204, 0x404, 0x404}},
+        {66, {0x10, 0x204, 0x404, 0x404, 0x404}},
+        {68, {0x10, 0x404}},
+        {89, {0x404, 0x10, 0x404, 0x104, 0x404, 0x404, 0x2017}},
+        {90, {0x404}},
+        {93, {0x7a17}},
+        {110, {0x10, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404}},
+        {111, {0x10, 0x404, 0x404}},
+        {154, {0x10, 0x404}},
+        {155, {0x10, 0x2017}},
+        {159, {0x404, 0x10, 0x404}},
+        {162, {0x404, 0x10, 0x404}},
+        {163, {0x404, 0x10, 0x10, 0x404}},
+        {170, {0x10, 0x404, 0x404}},
+        {218, {0x10, 0x82b, 0x6, 0x82b, 0x6, 0x104}},
+        {240, {0x10, 0x404}},
+        {241, {0x10, 0x404}},
+        {242, {0x404}},
+        {263, {0x10, 0x404, 0x404, 0x104, 0x2017}},
+        {277, {0x404, 0x404}},
+        {318, {0x204, 0x404, 0x204, 0x104}},
+        {327, {0x204, 0x104, 0x404, 0x404}},
+        {353, {0x404, 0x404, 0x104, 0x104, 0x204, 0x204, 0x104, 0x404, 0x404, 0x404, 0x404, 0x4017, 0x400c, 0x404}},
+        {380, {0x104, 0x104, 0x104, 0x104}},
+        {381, {0x1417}},
+        {390, {}},
+        {406, {0x404, 0x12, 0x204, 0x104, 0x104, 0x805}},
+        {407, {0x4000b, 0x6}},
+        {408, {0x104, 0x204, 0x404}},
+        {409, {0x104}},
+        {410, {0x50, 0x204, 0x104, 0x404, 0x104, 0x104, 0x104}},
+        {428, {0x404}},
+        {430, {0x204, 0x404, 0x104, 0x104, 0x104, 0x1417}},
+        {435, {0x204, 0x104}},
+        {460, {0x204, 0x204, 0x104}},
+        {467, {0x204}},
+        {468, {0x204}},
+    };
+
+    struct WorldWriter {
+        const ReplayFile::MessageTable& table;
+        std::vector<ReplayFile::Record> records;
+        uint32_t time_ms = 0;
+
+        void operator()(const uint16_t message_id, std::vector<Field> fields)
+        {
+            ReplayFile::Record record{time_ms, {}};
+            Check(ReplayState::Encode(table, {message_id, std::move(fields)}, record.body), std::format("the synthetic message {} encodes", message_id).c_str());
+            records.push_back(std::move(record));
+        }
+    };
+
+    std::vector<ReplayFile::Record> SyntheticWorld(const ReplayFile::MessageTable& table, std::mt19937& random)
+    {
+        constexpr uint32_t players_team = 0x706C6179;
+        constexpr uint32_t foes_team = 0x6D6F6E73;
+        constexpr uint32_t recorder = 10;
+        WorldWriter write{table, {}};
+        const auto unit = [&random] {
+            return static_cast<float>(random() % 2001) / 1000.f - 1.f;
+        };
+        const auto point = [&] {
+            return Floats({unit() * 3000.f, unit() * 3000.f});
+        };
+        const auto create = [&](const uint32_t agent, const uint32_t agent_class, const uint32_t def, const uint32_t team) {
+            const auto infinity = std::numeric_limits<float>::infinity();
+            write(32, {N(agent), N(agent_class), N(def), N(1), point(), N(0), Floats({1.f, 0.f}), N(1), Floats({288.f}), Floats({1.f}), N(0), N(team), N(0), N(0), N(0), N(0), N(0),
+                       Floats({0.f, 0.f}), Floats({infinity, infinity}), N(0), N(0), Floats({infinity, infinity}), N(0)});
+        };
+
+        write(30, {N(100)});
+        write(380, {N(1), N(2), N(3), N(4)});
+        write(390, {});
+        write(381, {Text(L"Recorder")});
+        write(410, {N(1), N(148), N(1), N(1), N(0), N(0), N(0)});
+        for (uint32_t item = 100; item < 105; item++) {
+            write(353, {N(item), N(item * 7), N(2), N(0), N(0), N(0), N(1), N(0), N(10), N(item), N(1), Text(L"\x108\x107item\x1"), N(1), N(0x2400)});
+            write(318, {N(1), N(item), N(1), N(item - 100)});
+        }
+        write(327, {N(1), N(0), N(103), N(104)});
+        write(409, {N(1)});
+        write(407, {Bytes(40, 7)});
+        write(409, {N(2)});
+        write(407, {Bytes(12, 9)});
+        write(408, {N(1), N(2), N(3)});
+        write(428, {N(7)});
+        write(406, {N(0x1234), point(), N(0), N(1), N(0), Bytes(8, 1)});
+        write(430, {N(1), N(players_team), N(0), N(1), N(2), Text(L"Team")});
+        write(242, {N(players_team)});
+        write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(1)});
+        write.time_ms = 2000;
+        write(31, {N(5000)});
+        write(89, {N(1), N(recorder), N(0x1234), N(2), N(0), N(0), Text(L"Recorder")});
+        write(240, {N(recorder), N(0)});
+        create(recorder, 0x30000001, 1, players_team);
+        write(110, {N(recorder), N(100), N(101), N(102), N(0), N(0), N(0), N(0), N(0), N(0)});
+        write(39, {N(recorder), Floats({288.f})});
+        write(34, {N(recorder), N(3)});
+        std::vector<uint32_t> others;
+        const auto spawn = [&](const uint32_t agent) {
+            write(154, {N(agent), N(100 + agent)});
+            write(155, {N(agent), Text(L"\x8101\x2345")});
+            write(159, {N(66), N(agent), N(0)});
+            write(240, {N(agent), N(0)});
+            if (agent % 5 == 0) {
+                write(170, {N(agent), N(1), N(2)});
+            }
+            create(agent, 0x20000000 | (50 + agent % 4), 1, agent % 3 ? foes_team : players_team);
+            others.push_back(agent);
+        };
+        for (uint32_t agent = 20; agent < 32; agent++) {
+            spawn(agent);
+        }
+        write(263, {N(5), N(0x4444), N(0), N(100), Text(L"\x8102")});
+        create(40, 5, 2, 0);
+        write(277, {N(40), N(1)});
+        write(353, {N(200), N(1400), N(11), N(0), N(0), N(0), N(1), N(0), N(10), N(200), N(3), Text(L"\x8103"), N(0)});
+        create(41, 200, 4, 0);
+        write(89, {N(2), N(12), N(0x99), N(3), N(0), N(0), Text(L"Player 1")});
+        create(12, 0x30000002, 1, players_team);
+        others.push_back(12);
+        write(467, {N(1)});
+        write(460, {N(1), N(1), N(0)});
+        write(460, {N(1), N(2), N(0)});
+        write(468, {N(1)});
+        write(435, {N(1), N(0)});
+
+        uint32_t next_agent = 60;
+        uint32_t next_effect = 1000;
+        std::vector<std::pair<uint32_t, uint32_t>> effects;
+        std::vector<std::pair<uint32_t, uint32_t>> upkeeps;
+        for (uint32_t tick = 0; tick < 600; tick++) {
+            write.time_ms += 100;
+            write(30, {N(100)});
+            const auto events = random() % 6;
+            for (uint32_t e = 0; e < events && !others.empty(); e++) {
+                const auto agent = random() % 4 == 0 ? recorder : others[random() % others.size()];
+                const auto other = others[random() % others.size()];
+                switch (random() % 22) {
+                    case 0:
+                    case 1:
+                    case 2:
+                        write(41, {N(agent), point(), N(0), N(0)});
+                        break;
+                    case 3:
+                        write(42, {N(agent), point(), N(0), N(0), N(other)});
+                        break;
+                    case 4:
+                        write(40, {N(agent)});
+                        break;
+                    case 5:
+                        write(43, {N(agent), Floats({random() % 2 ? 0.5f : 1.f}), N(1)});
+                        break;
+                    case 6:
+                        write(39, {N(agent), Floats({static_cast<float>(200 + random() % 150)})});
+                        break;
+                    case 7:
+                        write(44, {N(agent), point(), N(0)});
+                        break;
+                    case 8:
+                        write(46, {N(agent), N(std::bit_cast<uint32_t>(unit() * 3.f)), N(std::bit_cast<uint32_t>(2.f))});
+                        break;
+                    case 9:
+                        write(66, {N(agent), N(random() % 3000), N(1), N(next_effect), N(std::bit_cast<uint32_t>(static_cast<float>(1 + random() % 15) + 0.25f))});
+                        effects.emplace_back(agent, next_effect++);
+                        break;
+                    case 10:
+                        if (!effects.empty()) {
+                            const auto index = random() % effects.size();
+                            write(68, {N(effects[index].first), N(effects[index].second)});
+                            effects.erase(effects.begin() + index);
+                        }
+                        break;
+                    case 11:
+                        write(65, {N(agent), N(other), N(random() % 3000), N(next_effect), N(0)});
+                        upkeeps.emplace_back(agent, next_effect++);
+                        break;
+                    case 12:
+                        if (!upkeeps.empty()) {
+                            const auto index = random() % upkeeps.size();
+                            write(64, {N(upkeeps[index].first), N(upkeeps[index].second)});
+                            upkeeps.erase(upkeeps.begin() + index);
+                        }
+                        break;
+                    case 13:
+                        write(162, {N(44), N(agent), N(std::bit_cast<uint32_t>(unit() * 0.02f))});
+                        break;
+                    case 14:
+                        write(163, {N(random() % 2 ? 16 : 55), N(agent), N(other), N(std::bit_cast<uint32_t>(unit() * 0.3f))});
+                        break;
+                    case 15:
+                        write(159, {N(random() % 2 ? 36 : 22), N(agent), N(random() % 20)});
+                        break;
+                    case 16:
+                        write(159, {N(random() % 2 ? 6 : 7), N(agent), N(random() % 4)});
+                        break;
+                    case 17:
+                        write(111, {N(recorder), N(random() % 2), N(100 + random() % 5)});
+                        break;
+                    case 18:
+                        if (agent != recorder && agent != 12) {
+                            write(33, {N(agent)});
+                            std::erase(others, agent);
+                            spawn(random() % 2 ? agent : next_agent++);
+                        }
+                        break;
+                    case 19:
+                        write(241, {N(agent), N(random() % 2 ? 0x10 : 0)});
+                        break;
+                    case 20:
+                        write(93, {Text(L"chat")});
+                        write(12, {});
+                        break;
+                    default:
+                        if (agent != recorder) {
+                            write(47, {N(agent), N(random() % 2 ? foes_team : players_team)});
+                        }
+                        break;
+                }
+            }
+        }
+        return write.records;
+    }
+
+    void TestWorld(const std::filesystem::path& folder)
+    {
+        std::mt19937 random(20261124);
+        ReplayFile::MessageTable table(488);
+        for (uint32_t message_id = 0; message_id < table.size(); message_id++) {
+            table[message_id] = {message_id};
+        }
+        for (const auto& [message_id, layout] : world_layouts) {
+            table[message_id].insert(table[message_id].end(), layout.begin(), layout.end());
+        }
+        const auto records = SyntheticWorld(table, random);
+        auto header = SyntheticHeader(table);
+        header.duration_ms = records.back().time_ms;
+        header.record_count = static_cast<uint32_t>(records.size());
+        header.flags |= ReplayFile::Complete;
+        const auto path = folder / L"self-test-world.gwrec";
+        Check(WriteRecording(path, header, table, records, true), "the synthetic world is written");
+        ReplayFile::Contents contents;
+        std::string error;
+        Check(ReplayFile::Read(path, contents, error) && contents.records == records, "the synthetic world reads back");
+
+        ReplayState::World world(contents.table);
+        for (const auto& record : contents.records) {
+            world.Apply(record);
+        }
+        Check(!world.LayoutErrors(), "every synthetic record decodes");
+        const auto join = world.Join();
+        const auto has = [&join](const uint16_t message_id) {
+            return std::ranges::any_of(join, [message_id](const ReplayState::Message& message) {
+                return message.id == message_id;
+            });
+        };
+        Check(!has(218) && !has(318) && !has(327) && !has(93) && !has(12) && !has(30), "a join holds no private or transient message and no clock advance");
+        const auto info = std::ranges::find(join, uint16_t{410}, &ReplayState::Message::id);
+        Check(info != join.end() && info->U(5) == 1, "a join's 410 carries the observer byte");
+        const auto reporter = std::ranges::find(join, uint16_t{34}, &ReplayState::Message::id);
+        Check(reporter != join.end() && reporter->U(0) == 10, "a join's reporter is the recorder's character");
+        const auto joined = Joined(contents, ReplayState::JoinRecords(contents.table, world, contents.records.back().time_ms), contents.records.size());
+        const auto check = ReplayState::CheckJoin(joined);
+        Check(check.failures.empty(), std::format("the final join passes check-join ({})", check.failures.empty() ? "" : check.failures.front()).c_str());
+        ReplayState::World replayed(contents.table);
+        for (const auto& record : joined.records) {
+            replayed.Apply(record);
+        }
+        Check(replayed.Dump(true) == world.Dump(true), "the model fed its own join is the model");
+
+        for (const auto interval_ms : {ReplayState::default_keyframe_interval_ms, 1000u}) {
+            const auto proof = ProveKeyframes(contents, interval_ms, 500, false);
+            Check(proof.keyframes > 0 && !proof.mismatches && !proof.check_failures && !proof.layout_errors, "the synthetic world's keyframes are equivalent and their joins pass");
+        }
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
         std::filesystem::create_directories(folder, error_code);
         TestPacking();
+        TestWorld(folder);
 
         std::mt19937 random(20261123);
         const auto table = SyntheticTable(random);
@@ -363,16 +837,60 @@ int wmain(const int argc, const wchar_t* argv[])
     if (argc == 3 && wcscmp(argv[1], L"--self-test") == 0) {
         return SelfTest(argv[2]);
     }
-    if (argc != 2) {
-        printf("usage: replay_check <recording.gwrec>\n       replay_check --self-test <folder>\n");
+    const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
+    const auto arguments = command.empty() ? 1 : command == L"--state" ? 2 : command == L"--join" ? 3 : command == L"--check-join" ? 1 : command == L"--keyframes" ? 3 : 0;
+    if (!arguments || argc != 2 + (command.empty() ? 0 : arguments)) {
+        printf("usage: replay_check <recording.gwrec>\n"
+               "       replay_check --state <recording.gwrec> <ms>\n"
+               "       replay_check --join <recording.gwrec> <ms> <out.gwrec>\n"
+               "       replay_check --check-join <recording.gwrec>\n"
+               "       replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>\n"
+               "       replay_check --self-test <folder>\n");
         return 2;
     }
+    const auto path = command.empty() ? argv[1] : argv[2];
     ReplayFile::Contents contents;
     std::string error;
-    if (!ReplayFile::Read(argv[1], contents, error)) {
-        printf("%ls: %s\n", argv[1], error.c_str());
+    if (!ReplayFile::Read(path, contents, error)) {
+        printf("%ls: %s\n", path, error.c_str());
         return 1;
     }
-    PrintRecording(contents);
+    if (command.empty()) {
+        PrintRecording(contents);
+        return 0;
+    }
+    if (command == L"--check-join") {
+        const auto check = ReplayState::CheckJoin(contents);
+        printf("join part %zu records, stream rows naming an agent not created %zu, player rows naming an agent not in the world %zu, failures %zu\n", check.join_records,
+               check.stream_rows_before_creation, check.player_rows_without_agent, check.failures.size());
+        for (size_t i = 0; i < check.failures.size() && i < 20; i++) {
+            printf("  %s\n", check.failures[i].c_str());
+        }
+        printf("check-join: %s\n", check.failures.empty() ? "passed" : "FAILED");
+        return check.failures.empty() ? 0 : 1;
+    }
+    if (command == L"--keyframes") {
+        const auto proof = ProveKeyframes(contents, static_cast<uint32_t>(_wtoi(argv[3])), std::max(1u, static_cast<uint32_t>(_wtoi(argv[4]))), true);
+        return proof.mismatches || proof.check_failures || proof.layout_errors ? 1 : 0;
+    }
+    const auto time_ms = static_cast<uint32_t>(_wtoi(argv[3]));
+    const auto applied = RecordsUpTo(contents, time_ms);
+    ReplayState::World world(contents.table);
+    for (size_t i = 0; i < applied; i++) {
+        world.Apply(contents.records[i]);
+    }
+    if (command == L"--state") {
+        printf("state after %zu records (%u ms): clock %u, %zu agents, layout errors %u, digest %016llx\n%s", applied, time_ms, world.Clock(), world.AgentCount(), world.LayoutErrors(),
+               static_cast<unsigned long long>(Digest(world.Dump(true))), world.Dump(false).c_str());
+        return 0;
+    }
+    const auto join = ReplayState::JoinRecords(contents.table, world, time_ms);
+    auto joined = Joined(contents, join, applied);
+    joined.header.duration_ms = joined.records.empty() ? 0 : joined.records.back().time_ms;
+    if (!WriteRecording(argv[4], joined.header, joined.table, joined.records, true)) {
+        printf("%ls: cannot be written\n", argv[4]);
+        return 1;
+    }
+    printf("%ls: the join at %u ms (%zu records) then %zu records of the stream\n", argv[4], time_ms, join.size(), contents.records.size() - applied);
     return 0;
 }
