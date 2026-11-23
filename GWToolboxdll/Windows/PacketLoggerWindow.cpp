@@ -27,6 +27,7 @@
 #include <Utils/TextUtils.h>
 #include <Utils/TextUtils_Time.h>
 #include <Utils/ToolboxUtils.h>
+#include <Utils/StoCHandlers.h>
 
 namespace packetlogger_export {
     struct MapInfoJson {
@@ -112,23 +113,12 @@ namespace {
         Log::Info("Maps exported to %ls", file_location.c_str());
     }
 
-    // Taken from StoCMgr.cpp
-    using StoCHandler_pt = bool(__fastcall*)(GW::Packet::StoC::PacketBase* pak);
-
-    struct StoCHandler {
-        uint32_t* fields;
-        uint32_t field_count;
-        StoCHandler_pt handler_func;
-    };
-
     StoCHandler** gwca_original_functions = nullptr;
 
 
     void TooltipHandlerInfo(StoCHandler& handler) {
         ImGui::SetTooltip("Field Count: %d\nHandler Addr: %08x", handler.field_count, handler.handler_func);
     }
-
-    using StoCHandlerArray = GW::Array<StoCHandler>;
 
     enum class FieldType {
         Ignore,
@@ -181,43 +171,6 @@ namespace {
         }
     }
 
-    uintptr_t game_srv_object_addr;
-
-    StoCHandlerArray* GetStoCHandlerArray() {
-
-        uintptr_t address = GW::Scanner::Find("\x75\x04\x33\xC0\x5D\xC3\x8B\x41\x08\xA8\x01\x75", "xxxxxxxxxxxx", -6);
-        DEBUG_ASSERT(address);
-        const uintptr_t StoCHandler_Addr = *(uintptr_t*)address;
-
-        struct GameServer {
-            uint8_t h0000[8];
-
-            struct {
-                uint8_t h0000[12]{};
-
-                struct {
-                    uint8_t h0000[12]{};
-                    void* next{};
-                    uint8_t h0010[12]{};
-                    uint32_t ClientCodecArray[4]{};
-                    StoCHandlerArray handlers;
-                }* ls_codec{};
-
-                uint8_t h0010[12]{};
-                // Client codec
-                uint32_t ClientCodecArray[4]{};
-                StoCHandlerArray handlers;
-            } * gs_codec;
-        };
-
-
-        const auto addr = (GameServer* *)StoCHandler_Addr;
-        if (!(addr && *addr)) {
-            return nullptr;
-        }
-        return &(*addr)->gs_codec->handlers;
-
-    }
     bool stoc_initialised = false;
     void InitStoC()
     {
