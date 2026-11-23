@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -348,10 +349,12 @@ namespace {
         return "none";
     }
 
-    ReplayFile::Contents Joined(const ReplayFile::Contents& contents, std::vector<ReplayFile::Record> records, const size_t tail_start)
+    ReplayFile::Contents Joined(const ReplayFile::Contents& contents, std::vector<ReplayFile::Record> records, const size_t tail_start, const uint32_t controlled_agent)
     {
         ReplayFile::Contents joined{contents.header, contents.table, std::move(records), false};
-        joined.records.insert(joined.records.end(), contents.records.begin() + static_cast<std::ptrdiff_t>(tail_start), contents.records.end());
+        std::copy_if(contents.records.begin() + static_cast<std::ptrdiff_t>(tail_start), contents.records.end(), std::back_inserter(joined.records), [&](const ReplayFile::Record& record) {
+            return ReplayState::Streamed(contents.table, record, controlled_agent);
+        });
         joined.header.record_count = static_cast<uint32_t>(joined.records.size());
         joined.header.layout_errors = 0;
         joined.header.flags |= ReplayFile::Complete;
@@ -408,7 +411,7 @@ namespace {
         for (size_t k = 0; k < keyframes.size(); k++) {
             const auto& keyframe = keyframes[k];
             const auto join = ReplayState::JoinRecords(contents.table, keyframe.world, keyframe.time_ms);
-            const auto joined = Joined(contents, join, keyframe.record_index);
+            const auto joined = Joined(contents, join, keyframe.record_index, keyframe.world.ControlledAgent());
             const auto check = ReplayState::CheckJoin(joined);
             proof.check_failures += check.failures.size();
 
@@ -505,6 +508,11 @@ namespace {
         {44, {0x404, 0x12, 0x204}},
         {46, {0x404, 0x404, 0x404}},
         {47, {0x404, 0x404}},
+        {55, {0x10, 0x104, 0x104}},
+        {56, {0x10, 0x104}},
+        {57, {0x10, 0x104}},
+        {58, {0x10, 0x302b, 0x6}},
+        {59, {0x10, 0x104, 0x104, 0x104}},
         {62, {0x10}},
         {63, {0x10, 0x10, 0x204, 0x404, 0x404}},
         {64, {0x10, 0x404}},
@@ -516,13 +524,17 @@ namespace {
         {93, {0x7a17}},
         {110, {0x10, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404, 0x404}},
         {111, {0x10, 0x404, 0x404}},
+        {114, {0x204, 0x10, 0x404, 0x404}},
+        {115, {0x204, 0x104, 0x104, 0x104, 0x404, 0x404, 0x82b, 0x6, 0x104, 0x104}},
         {154, {0x10, 0x404}},
         {155, {0x10, 0x2017}},
         {159, {0x404, 0x10, 0x404}},
         {162, {0x404, 0x10, 0x404}},
         {163, {0x404, 0x10, 0x10, 0x404}},
         {170, {0x10, 0x404, 0x404}},
-        {218, {0x10, 0x82b, 0x6, 0x82b, 0x6, 0x104}},
+        {182, {0x10, 0x404}},
+        {183, {0x10, 0x104, 0x104, 0x104}},
+        {218,{0x10, 0x82b, 0x6, 0x82b, 0x6, 0x104}},
         {240, {0x10, 0x404}},
         {241, {0x10, 0x404}},
         {242, {0x404}},
@@ -568,6 +580,8 @@ namespace {
         constexpr uint32_t players_team = 0x706C6179;
         constexpr uint32_t foes_team = 0x6D6F6E73;
         constexpr uint32_t recorder = 10;
+        constexpr uint32_t hero = 3;
+        constexpr uint32_t hero_agent = 13;
         WorldWriter write{table, {}};
         const auto unit = [&random] {
             return static_cast<float>(random() % 2001) / 1000.f - 1.f;
@@ -607,7 +621,16 @@ namespace {
         write(406, {N(0x1234), point(), N(0), N(1), N(0), Bytes(8, 1)});
         write(430, {N(1), N(players_team), N(0), N(1), N(2), Text(L"Team")});
         write(242, {N(players_team)});
+        write(55, {N(recorder), N(5), N(30)});
+        write(183, {N(recorder), N(1), N(2), N(0)});
+        write(182, {N(recorder), N(6)});
         write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(1)});
+        write(115, {N(hero), N(1), N(3), N(0), N(20), N(0), {{4, 5, 6}, {}}, N(0), N(0)});
+        write(57, {N(recorder), N(35)});
+        write(58, {N(recorder), {{17, 18, 5, 4, 6, 4}, {}}});
+        write(55, {N(hero_agent), N(0), N(20)});
+        write(58, {N(hero_agent), {{1, 12, 12}, {}}});
+        write(114, {N(hero), N(hero_agent), N(0), N(1)});
         write.time_ms = 2000;
         write(31, {N(5000)});
         write(89, {N(1), N(recorder), N(0x1234), N(2), N(0), N(0), Text(L"Recorder")});
@@ -639,6 +662,7 @@ namespace {
         write(89, {N(2), N(12), N(0x99), N(3), N(0), N(0), Text(L"Player 1")});
         create(12, 0x30000002, 1, players_team);
         others.push_back(12);
+        create(hero_agent, 0x20000060, 1, players_team);
         write(467, {N(1)});
         write(460, {N(1), N(1), N(0)});
         write(460, {N(1), N(2), N(0)});
@@ -730,7 +754,10 @@ namespace {
                     case 20:
                         write(93, {Text(L"chat")});
                         write(12, {});
-                        write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(1)});
+                        write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(0)});
+                        write(59, {N(recorder), N(17), N(5), N(7)});
+                        write(56, {N(recorder), N(random() % 4)});
+                        write(59, {N(hero_agent), N(1), N(12), N(13)});
                         break;
                     default:
                         if (agent != recorder) {
@@ -775,12 +802,22 @@ namespace {
                 return message.id == message_id;
             });
         };
-        Check(!has(218) && !has(318) && !has(327) && !has(93) && !has(12) && !has(30), "a join holds no private or transient message and no clock advance");
+        Check(!has(318) && !has(327) && !has(93) && !has(12) && !has(30) && !has(114) && !has(115), "a join holds no inventory, hero, transient message or clock advance");
+        Check(std::ranges::all_of(join,
+                                  [](const ReplayState::Message& message) {
+                                      return ReplayState::KindOf(message.id) != ReplayState::Kind::Private || ReplayState::IsCharacterMessageOf(message, 10);
+                                  }),
+              "a join's only private messages are the controlled character's own");
+        const auto attribute_state = std::ranges::find(join, uint16_t{55}, &ReplayState::Message::id);
+        const auto connect = std::ranges::find(join, uint16_t{31}, &ReplayState::Message::id);
+        Check(attribute_state != join.end() && attribute_state < connect && attribute_state->U(0) == 10 && attribute_state->U(2) == 35 && has(58) && has(59) && has(183) && has(182) && has(218),
+              "a join gives the controlled character its attribute state (57 folded in), attributes, professions and skillbar before 31");
+        Check(ReplayState::CheckClientNeeds(join).empty(), "a join holds what the client needs before 34");
         const auto info = std::ranges::find(join, uint16_t{410}, &ReplayState::Message::id);
         Check(info != join.end() && info->U(5) == 1, "a join's 410 carries the observer byte");
         const auto reporter = std::ranges::find(join, uint16_t{34}, &ReplayState::Message::id);
         Check(reporter != join.end() && reporter->U(0) == 10, "a join's reporter is the recorder's character");
-        const auto joined = Joined(contents, ReplayState::JoinRecords(contents.table, world, contents.records.back().time_ms), contents.records.size());
+        const auto joined = Joined(contents, ReplayState::JoinRecords(contents.table, world, contents.records.back().time_ms), contents.records.size(), world.ControlledAgent());
         const auto check = ReplayState::CheckJoin(joined);
         Check(check.failures.empty(), std::format("the final join passes check-join ({})", check.failures.empty() ? "" : check.failures.front()).c_str());
         ReplayState::World replayed(contents.table);
@@ -788,6 +825,27 @@ namespace {
             replayed.Apply(record);
         }
         Check(replayed.Dump(true) == world.Dump(true), "the model fed its own join is the model");
+
+        ReplayState::World stateless(contents.table);
+        for (const auto& record : contents.records) {
+            if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message) || message.id != 55 || message.U(0) != 10) {
+                stateless.Apply(record);
+            }
+        }
+        const auto fallback = stateless.Join();
+        Check(stateless.ControlledAgent() == 0 && std::ranges::none_of(fallback,
+                                                                       [](const ReplayState::Message& message) {
+                                                                           return message.id == 34 || (message.id == 89 && message.U(1) == 10) || (message.id == 32 && message.U(0) == 10) || ReplayState::IsCharacterMessageOf(message, 10);
+                                                                       }),
+              "a controlled character with no attribute state is left out of the join: no 34, nor its 89 and 32");
+        const auto fallback_joined = Joined(contents, ReplayState::JoinRecords(contents.table, stateless, contents.records.back().time_ms), contents.records.size(), stateless.ControlledAgent());
+        const auto fallback_check = ReplayState::CheckJoin(fallback_joined);
+        Check(fallback_check.failures.empty(), std::format("the join without the controlled character passes check-join ({})", fallback_check.failures.empty() ? "" : fallback_check.failures.front()).c_str());
+        ReplayState::World fallback_replayed(contents.table);
+        for (const auto& record : fallback_joined.records) {
+            fallback_replayed.Apply(record);
+        }
+        Check(fallback_replayed.Dump(true) == stateless.Dump(true), "the model fed the join without the controlled character is that model");
 
         for (const auto interval_ms : {ReplayState::default_keyframe_interval_ms, 1000u}) {
             const auto proof = ProveKeyframes(contents, interval_ms, 500, false);
@@ -1063,7 +1121,7 @@ namespace {
         }
         std::vector<std::vector<uint8_t>> streamed;
         for (const auto& record : contents.records) {
-            if (record.time_ms >= plan.start_ms && ReplayState::KindOf(record.MessageId()) != ReplayState::Kind::Private) {
+            if (record.time_ms >= plan.start_ms && ReplayState::Streamed(contents.table, record, plan.controlled_agent)) {
                 streamed.push_back(record.body);
             }
         }
@@ -1076,9 +1134,8 @@ namespace {
         return proof;
     }
 
-    bool ProveFeed(const ReplayFile::Contents& contents, const uint32_t until_ms, const bool verbose)
+    bool ProveFeed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms, const bool verbose)
     {
-        const auto plan = ReplayWire::MakePlan(contents);
         if (!plan.error.empty()) {
             if (verbose) {
                 printf("feed: %s\nfeed: FAILED\n", plan.error.c_str());
@@ -1093,8 +1150,8 @@ namespace {
             }
         };
         if (verbose) {
-            printf("start at %u ms of the recording, %u ms played from there; inventory skeleton %zu records; private records left out of the stream %zu\n\n", plan.start_ms, plan.duration_ms, plan.skeleton_records,
-                   plan.private_records_dropped);
+            printf("start at %u ms of the recording, %u ms played from there; inventory skeleton %zu records; private records left out of the stream %zu; controlled agent %u, its own character records streamed %zu\n\n",
+                   plan.start_ms, plan.duration_ms, plan.skeleton_records, plan.private_records_dropped, plan.controlled_agent, plan.own_records_streamed);
             printf("%6s  %-38s %9s %8s %6s  %s\n", "post", "stage (posted when)", "time ms", "records", "bytes", "first message ids");
         }
         auto stage = ReplayWire::Stage::BeforeLoad;
@@ -1103,6 +1160,7 @@ namespace {
         size_t shown_records = 0;
         size_t shown_bytes = 0;
         std::map<ReplayWire::Stage, size_t> per_stage;
+        std::vector<ReplayState::Message> fed;
         bool observer_info = false;
         for (size_t i = 0; i < plan.posts.size(); i++) {
             const auto& post = plan.posts[i];
@@ -1124,8 +1182,9 @@ namespace {
                 fail(std::format("post {} does not cut into its {} messages ({})", i, post.records, error));
             }
             for (const auto& body : bodies) {
-                ReplayState::Message message;
-                observer_info |= post.stage == ReplayWire::Stage::BeforeLoad && ReplayState::Decode(contents.table, body, message) && message.id == 410 && message.U(5) == 1;
+                auto& message = fed.emplace_back();
+                const auto decoded = ReplayState::Decode(contents.table, body, message);
+                observer_info |= decoded && post.stage == ReplayWire::Stage::BeforeLoad && message.id == 410 && message.U(5) == 1;
             }
             stage = post.stage;
             time_ms = post.time_ms;
@@ -1151,6 +1210,9 @@ namespace {
         }
         if (!observer_info) {
             fail("no 410 with its observer byte set before 406");
+        }
+        for (const auto& need : ReplayState::CheckClientNeeds(fed)) {
+            fail(std::format("what the client needs: {}", need));
         }
         if (verbose) {
             printf("\nup to %u ms: %zu posts, %zu records, %zu bytes; the whole plan: %zu posts (join %zu + %zu + %zu records, stream %zu records)\n", until_ms, shown, shown_records, shown_bytes, plan.posts.size(),
@@ -1180,7 +1242,23 @@ namespace {
         }
         Check(plan.skeleton_records == 3, "the inventory skeleton is the first inventory's 324, 328 and equipped bag");
         Check(plan.private_records_dropped > 0, "private records are left out of the stream");
-        Check(ProveFeed(contents, UINT32_MAX, false), "the synthetic world's feed holds its stages in order, each post cut into its messages");
+        Check(plan.controlled_agent == 10 && plan.own_records_streamed > 0, "the controlled character's own character records stay in the stream");
+        Check(ProveFeed(contents, plan, UINT32_MAX, false), "the synthetic world's feed holds its stages in order, each post cut into its messages, and what the client needs");
+        auto without_own = plan;
+        for (auto& post : without_own.posts) {
+            std::string split_error;
+            std::vector<uint8_t> kept;
+            post.records = 0;
+            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, split_error)) {
+                if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && ReplayState::IsCharacterMessageOf(message, plan.controlled_agent)) {
+                    continue;
+                }
+                kept.insert(kept.end(), body.begin(), body.end());
+                post.records++;
+            }
+            post.bytes = std::move(kept);
+        }
+        Check(!ProveFeed(contents, without_own, UINT32_MAX, false), "a plan whose 34 names an agent without its attribute state fails the feed check");
         const auto proof = ProveWire(contents, 20261125);
         Check(proof.error.empty() && proof.records > 0, std::format("the synthetic world's wire round trip is byte for byte ({})", proof.error).c_str());
 
@@ -1301,7 +1379,7 @@ int wmain(const int argc, const wchar_t* argv[])
         return proof.error.empty() ? 0 : 1;
     }
     if (command == L"--feed") {
-        return ProveFeed(contents, static_cast<uint32_t>(_wtoi(argv[3])), true) ? 0 : 1;
+        return ProveFeed(contents, ReplayWire::MakePlan(contents), static_cast<uint32_t>(_wtoi(argv[3])), true) ? 0 : 1;
     }
     if (command == L"--keyframes") {
         const auto proof = ProveKeyframes(contents, static_cast<uint32_t>(_wtoi(argv[3])), std::max(1u, static_cast<uint32_t>(_wtoi(argv[4]))), true);
@@ -1319,7 +1397,7 @@ int wmain(const int argc, const wchar_t* argv[])
         return 0;
     }
     const auto join = ReplayState::JoinRecords(contents.table, world, time_ms);
-    auto joined = Joined(contents, join, applied);
+    auto joined = Joined(contents, join, applied, world.ControlledAgent());
     joined.header.duration_ms = joined.records.empty() ? 0 : joined.records.back().time_ms;
     if (!WriteRecording(argv[4], joined.header, joined.table, joined.records, true)) {
         printf("%ls: cannot be written\n", argv[4]);

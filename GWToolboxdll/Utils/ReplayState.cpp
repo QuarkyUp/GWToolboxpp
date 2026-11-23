@@ -27,6 +27,11 @@ namespace ReplayState {
             AgentUpdateRotation = 46,
             AgentUpdateTeamToken = 47,
             CharAttackInterval = 53,
+            CharAttributeState = 55,
+            CharAttribPointsAvail = 56,
+            CharAttribPointsTotal = 57,
+            CharAttributes = 58,
+            CharAgentUpdateAttribute = 59,
             CharPlayerRowFlags = 60,
             CharAgentAllyDestroy = 62,
             CharEffectUpkeepAdded = 63,
@@ -48,6 +53,8 @@ namespace ReplayState {
             CharPlayerCreate = 89,
             CharAgentDestroyPlayer = 90,
             CharPostProcess = 107,
+            CharHeroActivate = 114,
+            CharHeroDataAdd = 115,
             CharNpcUpdateWeapons = 109,
             CharEquipment = 110,
             CharEquipUpdate = 111,
@@ -64,7 +71,10 @@ namespace ReplayState {
             CharUpdateAgentModel = 174,
             CharUpdateAgentPartysize = 176,
             CharPlayerLink = 177,
+            CharPlayerUnlockedProfession = 182,
+            CharProfessions = 183,
             CharMissionStreamStart = 186,
+            CharSkillbar = 218,
             CharAgentInitialEffects = 240,
             CharAgentUpdateEffects = 241,
             CharPlayerTeam = 242,
@@ -150,7 +160,7 @@ namespace ReplayState {
         };
         constexpr uint16_t transient_ids[] = {12, 13, 35, 52, 61, 69, 70, 71, 93, 94, 96, 97, 160, 161, 164, 165, 226, 227, 228, 345};
         constexpr uint16_t private_ids[] = {
-            15, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 75, 78, 92, 101, 115, 116, 124, 125, 126, 128, 129, 131, 132, 138, 139, 140, 181, 182,
+            15, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 75, 78, 92, 101, 114, 115, 116, 124, 125, 126, 128, 129, 131, 132, 138, 139, 140, 181, 182,
             183, 195, 196, 197, 202, 203, 204, 218, 219, 221, 224, 229, 230, 233, 234, 235, 236, 237, 238, 239, 243, 244, 245, 246, 313, 318,
             319, 320, 321, 324, 327, 328, 331, 333, 335, 337, 479, 480, 481,
         };
@@ -163,6 +173,9 @@ namespace ReplayState {
         constexpr size_t equipment_slots = 9;
         constexpr uint16_t quest_ids[] = {CharQuestAdd, CharQuestGeneralInfo, CharQuestUpdateName, CharQuestDescription, CharQuestAddMarker, CharQuestUpdateMarker, CharQuestEarned};
         constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
+        constexpr uint16_t character_ids[] = {CharAttributeState, CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharPlayerUnlockedProfession, CharProfessions, CharSkillbar};
+        constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharProfessions};
+        constexpr size_t skillbar_create_field = 3;
         constexpr uint16_t row_ids[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentUpdateProfession, CharAgentAllyAdd, CharAgentInitialEffects, CharAgentUpdateEffects};
 
         template <typename List>
@@ -664,6 +677,60 @@ namespace ReplayState {
         return Kind::Unknown;
     }
 
+    bool IsCharacterMessageOf(const Message& message, const uint32_t agent_id)
+    {
+        return agent_id && Contains(character_ids, message.id) && message.U(0) == agent_id;
+    }
+
+    bool Streamed(const ReplayFile::MessageTable& table, const ReplayFile::Record& record, const uint32_t controlled_agent)
+    {
+        if (KindOf(record.MessageId()) != Kind::Private) {
+            return true;
+        }
+        Message message;
+        return Decode(table, record.body, message) && IsCharacterMessageOf(message, controlled_agent);
+    }
+
+    std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages)
+    {
+        std::vector<std::string> failures;
+        std::set<uint32_t> attribute_states;
+        std::set<uint32_t> hero_data;
+        std::set<uint32_t> active_heroes;
+        const auto fail = [&failures](const size_t index, const uint16_t id, const std::string_view what) {
+            failures.push_back(std::format("record {} (message {}): {}", index, id, what));
+        };
+        for (size_t i = 0; i < messages.size(); i++) {
+            const auto& message = messages[i];
+            const auto agent_id = message.U(0);
+            if (message.id == CharAttributeState && !attribute_states.insert(agent_id).second) {
+                fail(i, message.id, std::format("a second attribute state for agent {}: the client asserts !attribState", agent_id));
+            }
+            else if (Contains(attribute_state_users, message.id) && !attribute_states.contains(agent_id)) {
+                fail(i, message.id, std::format("agent {} has no attribute state (55) yet: the client asserts attribState", agent_id));
+            }
+            else if (message.id == CharHeroDataAdd) {
+                hero_data.insert(message.U(0));
+            }
+            else if (message.id == CharHeroActivate) {
+                if (!hero_data.contains(message.U(0))) {
+                    fail(i, message.id, std::format("hero {} activated before its data (115): the client asserts charHeroData", message.U(0)));
+                }
+                active_heroes.insert(message.U(1));
+            }
+            else if (message.id == AgentReporter && agent_id) {
+                auto walked = active_heroes;
+                walked.insert(agent_id);
+                for (const auto walked_agent : walked) {
+                    if (!attribute_states.contains(walked_agent)) {
+                        fail(i, message.id, std::format("34 makes agent {} the controlled one, and agent {} has no attribute state (55): the skill list asserts attribState (ChCliAttrib.cpp:146)", agent_id, walked_agent));
+                    }
+                }
+            }
+        }
+        return failures;
+    }
+
     const char* KindName(const Kind kind)
     {
         switch (kind) {
@@ -744,6 +811,34 @@ namespace ReplayState {
             case ItemInventoryAdd:
                 inventory_items.insert(message.U(1));
                 return;
+            case CharAttributeState:
+                characters[message.U(0)].attribute_state = message;
+                return;
+            case CharAttribPointsAvail:
+            case CharAttribPointsTotal:
+                if (const auto found = characters.find(message.U(0)); found != characters.end() && found->second.attribute_state.id) {
+                    found->second.attribute_state.Set(message.id == CharAttribPointsAvail ? 1 : 2, message.U(1));
+                }
+                return;
+            case CharAttributes: {
+                auto& character = characters[message.U(0)];
+                character.latest[message.id] = message;
+                character.attribute_updates.clear();
+                return;
+            }
+            case CharAgentUpdateAttribute:
+                characters[message.U(0)].attribute_updates[message.U(1)] = message;
+                return;
+            case CharPlayerUnlockedProfession:
+            case CharProfessions:
+                characters[message.U(0)].latest[message.id] = message;
+                return;
+            case CharSkillbar: {
+                auto& skillbar = characters[message.U(0)].latest[message.id];
+                skillbar = message;
+                skillbar.Set(skillbar_create_field, 1);
+                return;
+            }
             default:
                 break;
         }
@@ -920,11 +1015,35 @@ namespace ReplayState {
         }
     }
 
+    bool World::Alive(const uint32_t agent_id) const
+    {
+        const auto found = agents.find(agent_id);
+        return agent_id && found != agents.end() && found->second.create.id;
+    }
+
+    uint32_t World::ReportedAgent() const
+    {
+        return reporter.id && Alive(reporter.U(0)) ? reporter.U(0) : 0;
+    }
+
+    uint32_t World::ControlledAgent() const
+    {
+        const auto reported = ReportedAgent();
+        const auto found = characters.find(reported);
+        return found != characters.end() && found->second.attribute_state.id ? reported : 0;
+    }
+
+    uint32_t World::LeftOutAgent() const
+    {
+        return ControlledAgent() ? 0 : ReportedAgent();
+    }
+
     std::set<uint32_t> World::ShownItems() const
     {
         std::set<uint32_t> shown;
-        for (const auto& agent : agents | std::views::values) {
-            if (!agent.create.id) {
+        const auto left_out = LeftOutAgent();
+        for (const auto& [agent_id, agent] : agents) {
+            if (!agent.create.id || agent_id == left_out) {
                 continue;
             }
             if (agent.create.U(CreateDef) == item_def) {
@@ -1021,9 +1140,11 @@ namespace ReplayState {
     {
         std::vector<Message> out;
         std::set<Key> emitted;
-        const auto alive = [this](const uint32_t agent_id) {
-            const auto found = agents.find(agent_id);
-            return agent_id && found != agents.end() && found->second.create.id;
+        const auto reported = ReportedAgent();
+        const auto controlled = ControlledAgent();
+        const auto left_out = LeftOutAgent();
+        const auto alive = [this, left_out](const uint32_t agent_id) {
+            return Alive(agent_id) && agent_id != left_out;
         };
         const auto emit_entry = [&](const int section) {
             for (const auto& message : entry) {
@@ -1070,6 +1191,18 @@ namespace ReplayState {
         emit_entry(3);
         emit_instance(MissionTeam);
         emit_instance(CharPlayerTeam);
+        if (controlled) {
+            const auto& character = characters.at(controlled);
+            out.push_back(character.attribute_state);
+            for (const auto id : {CharProfessions, CharPlayerUnlockedProfession, CharSkillbar, CharAttributes}) {
+                if (const auto found = character.latest.find(id); found != character.latest.end()) {
+                    out.push_back(found->second);
+                }
+            }
+            for (const auto& update : character.attribute_updates | std::views::values) {
+                out.push_back(update);
+            }
+        }
 
         if (connected) {
             out.push_back(Make(AgentConnect, {clock}));
@@ -1078,7 +1211,6 @@ namespace ReplayState {
                     JoinItem(item_id, out, emitted);
                 }
             }
-            const auto controlled = reporter.id && alive(reporter.U(0)) ? reporter.U(0) : 0;
             const auto row_of = [this](const uint32_t agent_id) -> const Message* {
                 for (const auto& row : players | std::views::values) {
                     if (row.U(1) == agent_id) {
@@ -1094,7 +1226,7 @@ namespace ReplayState {
                 JoinAgent(agents.at(controlled), out, emitted);
             }
             for (const auto& [agent_id, agent] : agents) {
-                if (agent.create.id && agent_id != controlled && !row_of(agent_id)) {
+                if (agent.create.id && agent_id != reported && !row_of(agent_id)) {
                     JoinAgent(agent, out, emitted);
                 }
             }
@@ -1103,7 +1235,7 @@ namespace ReplayState {
             }
             for (const auto& row : players | std::views::values) {
                 const auto agent_id = row.U(1);
-                if (controlled && agent_id == controlled) {
+                if (reported && agent_id == reported) {
                     continue;
                 }
                 out.push_back(row);
@@ -1111,8 +1243,8 @@ namespace ReplayState {
                     JoinAgent(agents.at(agent_id), out, emitted);
                 }
             }
-            for (const auto& agent : agents | std::views::values) {
-                if (!agent.create.id) {
+            for (const auto& [agent_id, agent] : agents) {
+                if (!alive(agent_id)) {
                     continue;
                 }
                 for (const auto& [key, message] : agent.slots) {
@@ -1162,9 +1294,10 @@ namespace ReplayState {
 
     std::string World::Dump(const bool full) const
     {
-        const auto alive = [this](const uint32_t agent_id) {
-            const auto found = agents.find(agent_id);
-            return agent_id && found != agents.end() && found->second.create.id ? agent_id : 0;
+        const auto controlled = ControlledAgent();
+        const auto left_out = LeftOutAgent();
+        const auto alive = [this, left_out](const uint32_t agent_id) {
+            return Alive(agent_id) && agent_id != left_out ? agent_id : 0;
         };
         std::string out = std::format("clock {} connected {}\n", full ? clock : 0, connected);
         for (auto section = 0; section <= 4; section++) {
@@ -1183,15 +1316,29 @@ namespace ReplayState {
             out += full ? std::format("player flags {} {:x}\n", player, flags) : std::format("player flags {}\n", player);
         }
         for (const auto& row : players | std::views::values) {
+            if (left_out && row.U(1) == left_out) {
+                continue;
+            }
             out += "player ";
             Describe(out, row, full);
         }
-        if (reporter.id && alive(reporter.U(0))) {
+        if (controlled) {
             out += "reporter ";
             Describe(out, reporter, full);
+            const auto& character = characters.at(controlled);
+            out += "character ";
+            Describe(out, character.attribute_state, full);
+            for (const auto& message : character.latest | std::views::values) {
+                out += " ";
+                Describe(out, message, full);
+            }
+            for (const auto& message : character.attribute_updates | std::views::values) {
+                out += " ";
+                Describe(out, message, full);
+            }
         }
         for (const auto& [agent_id, agent] : agents) {
-            if (!agent.create.id) {
+            if (!alive(agent_id)) {
                 continue;
             }
             out += std::format("agent {}\n create ", agent_id);
@@ -1272,14 +1419,19 @@ namespace ReplayState {
     {
         const auto after = std::ranges::upper_bound(keyframes, time_ms, {}, &Keyframe::time_ms);
         std::vector<ReplayFile::Record> records;
-        size_t start = 0;
-        if (after != keyframes.begin()) {
-            const auto& keyframe = *std::prev(after);
-            records = JoinRecords(contents.table, keyframe.world, keyframe.time_ms);
-            start = keyframe.record_index;
+        if (after == keyframes.begin()) {
+            for (size_t i = 0; i < contents.records.size() && contents.records[i].time_ms <= time_ms; i++) {
+                records.push_back(contents.records[i]);
+            }
+            return records;
         }
-        for (auto i = start; i < contents.records.size() && contents.records[i].time_ms <= time_ms; i++) {
-            records.push_back(contents.records[i]);
+        const auto& keyframe = *std::prev(after);
+        records = JoinRecords(contents.table, keyframe.world, keyframe.time_ms);
+        const auto controlled = keyframe.world.ControlledAgent();
+        for (auto i = keyframe.record_index; i < contents.records.size() && contents.records[i].time_ms <= time_ms; i++) {
+            if (Streamed(contents.table, contents.records[i], controlled)) {
+                records.push_back(contents.records[i]);
+            }
         }
         return records;
     }
@@ -1308,6 +1460,8 @@ namespace ReplayState {
                 check.join_records = i;
             }
         }
+        const auto first_reporter = std::ranges::find(messages, uint16_t{AgentReporter}, &Message::id);
+        const auto reported = first_reporter != messages.end() ? first_reporter->U(0) : 0;
         bool instance_info = false;
         bool manifest_phase = false;
         std::map<uint32_t, uint32_t> alive_teams;
@@ -1344,7 +1498,7 @@ namespace ReplayState {
                     return m.id == AgentCreate;
                 });
                 const auto own_row = (IsRow(message) || id == CharPlayerCreate) && next_create != messages.end() && next_create->U(CreateAgent) == agent_id;
-                if (own_row) {
+                if (own_row || IsCharacterMessageOf(message, reported)) {
                     continue;
                 }
                 if (id == CharPlayerCreate) {
@@ -1392,6 +1546,7 @@ namespace ReplayState {
                     break;
             }
         }
+        std::ranges::move(CheckClientNeeds(messages), std::back_inserter(check.failures));
         return check;
     }
 }

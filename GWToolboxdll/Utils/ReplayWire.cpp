@@ -120,6 +120,7 @@ namespace ReplayWire {
         }
         plan.start_ms = start->time_ms;
         plan.duration_ms = records.back().time_ms - plan.start_ms;
+        plan.controlled_agent = world.ControlledAgent();
         const auto join = ReplayState::JoinRecords(contents.table, world, plan.start_ms);
         for (const auto& record : join) {
             if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message)) {
@@ -153,10 +154,11 @@ namespace ReplayWire {
             }
         }
         for (auto record = start; record != records.end(); ++record) {
-            if (ReplayState::KindOf(record->MessageId()) == ReplayState::Kind::Private) {
+            if (!ReplayState::Streamed(contents.table, *record, plan.controlled_agent)) {
                 plan.private_records_dropped++;
                 continue;
             }
+            plan.own_records_streamed += ReplayState::KindOf(record->MessageId()) == ReplayState::Kind::Private;
             Append(plan.posts, Stage::Stream, record->time_ms - plan.start_ms, record->body);
         }
         return plan;

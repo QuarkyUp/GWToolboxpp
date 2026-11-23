@@ -43,6 +43,8 @@ namespace ReplayWire {
         uint32_t duration_ms = 0;
         size_t skeleton_records = 0;
         size_t private_records_dropped = 0;
+        size_t own_records_streamed = 0;
+        uint32_t controlled_agent = 0;
         std::vector<Post> posts;
         std::string error;
     };

@@ -36,6 +36,9 @@ namespace ReplayState {
     enum class Kind { Unknown, State, Transient, Private };
     Kind KindOf(uint16_t message_id);
     const char* KindName(Kind kind);
+    bool IsCharacterMessageOf(const Message& message, uint32_t agent_id);
+    bool Streamed(const ReplayFile::MessageTable& table, const ReplayFile::Record& record, uint32_t controlled_agent);
+    std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
     constexpr uint32_t default_keyframe_interval_ms = 10000;
 
@@ -50,6 +53,7 @@ namespace ReplayState {
         [[nodiscard]] uint32_t Clock() const { return clock; }
         [[nodiscard]] size_t AgentCount() const { return agents.size(); }
         [[nodiscard]] uint32_t LayoutErrors() const { return layout_errors; }
+        [[nodiscard]] uint32_t ControlledAgent() const;
 
     private:
         using Key = std::vector<uint32_t>;
@@ -70,11 +74,20 @@ namespace ReplayState {
             float energy = 1.f;
         };
 
+        struct Character {
+            Message attribute_state;
+            std::map<uint16_t, Message> latest;
+            std::map<uint32_t, Message> attribute_updates;
+        };
+
         void Tick(uint32_t milliseconds);
         void ApplyToAgent(Agent& agent, const Message& message);
         void JoinAgent(const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const;
         void JoinItem(uint32_t item_id, std::vector<Message>& out, std::set<Key>& emitted) const;
         [[nodiscard]] std::set<uint32_t> ShownItems() const;
+        [[nodiscard]] bool Alive(uint32_t agent_id) const;
+        [[nodiscard]] uint32_t ReportedAgent() const;
+        [[nodiscard]] uint32_t LeftOutAgent() const;
 
         const ReplayFile::MessageTable* table;
         uint32_t clock = 0;
@@ -83,6 +96,7 @@ namespace ReplayState {
         std::vector<Message> entry;
         std::map<Key, Message> instance;
         std::map<uint32_t, Agent> agents;
+        std::map<uint32_t, Character> characters;
         std::map<uint32_t, Message> players;
         std::map<uint32_t, uint32_t> player_flags;
         std::map<uint32_t, std::map<uint16_t, Message>> items;
