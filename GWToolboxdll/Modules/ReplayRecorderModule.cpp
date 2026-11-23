@@ -312,6 +312,7 @@ namespace {
     using Goodbye_pt = void(__cdecl*)(uint32_t reason);
     using InstanceAck_pt = void(__cdecl*)(uint8_t* mission);
     using MapLoaded_pt = void(__cdecl*)();
+    using WorldMapToggle_pt = void(__cdecl*)(uint32_t game_view, int open);
     using PostNetEvent_pt = uint32_t(__cdecl*)(void* context, uint32_t connection, uint32_t kind, const void* data, uint32_t size);
 
     constexpr uint32_t replay_connection_id = 0x7E500001;
@@ -332,6 +333,15 @@ namespace {
     constexpr auto load_timeout = std::chrono::seconds(120);
     constexpr auto close_timeout = std::chrono::seconds(20);
     const std::vector<uint32_t> transfer_fields = {0x1a6, 0x1805, 0x404, 0x104, 0x204, 0x104, 0x404, 0x104};
+    constexpr uint32_t viewpoint_message_id = 172;
+    const std::vector<uint32_t> viewpoint_fields = {viewpoint_message_id, 0x10, 0x104};
+    constexpr auto restart_after_ms = 3000u;
+
+    struct ViewpointMessage {
+        uint32_t header = viewpoint_message_id;
+        uint32_t agent = 0;
+        uint32_t select = 0;
+    };
 
     struct TransferMessage {
         uint32_t header = GAME_SMSG_TRANSFER_GAME_SERVER_INFO;
@@ -374,6 +384,8 @@ namespace {
     InstanceAck_pt InstanceAck_Ret = nullptr;
     MapLoaded_pt MapLoaded_Func = nullptr;
     MapLoaded_pt MapLoaded_Ret = nullptr;
+    WorldMapToggle_pt WorldMapToggle_Func = nullptr;
+    WorldMapToggle_pt WorldMapToggle_Ret = nullptr;
     PostNetEvent_pt PostNetEvent_Func = nullptr;
     uint8_t** game_connection_global = nullptr;
     void** net_context_global = nullptr;
@@ -387,6 +399,13 @@ namespace {
     ReplayWire::Plan plan;
     ReplayWire::Rc4 send_cipher;
     std::filesystem::path playing_path;
+    ReplayObserve::Row playing_row;
+    std::atomic_bool playback_ended = false;
+    std::atomic_bool restart_pending = false;
+    bool viewpoint_available = false;
+    std::atomic_uint32_t followed_agent = 0;
+    uint32_t last_target = 0;
+    bool world_map_refusal_logged = false;
     TransferMessage transfer;
     bool transfer_due = false;
     bool connection_open = false;
@@ -527,9 +546,40 @@ namespace {
         GW::Hook::LeaveHook();
     }
 
+    void __cdecl OnWorldMapToggle(const uint32_t game_view, const int open)
+    {
+        GW::Hook::EnterHook();
+        const auto char_context = GW::GetCharContext();
+        const auto left_map = char_context ? GW::Map::GetMapInfo(char_context->current_map_id) : nullptr;
+        const auto replay_map = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(playing_row.header.map_id));
+        // The world map draws the world of the map left for the replay (+0x238) over the explored areas the replay's s2c 139 gave, and asserts they match (GmMapView.cpp:1731).
+        if (open && playback != Playback::Off && !(left_map && replay_map && left_map->continent == replay_map->continent)) {
+            if (!world_map_refusal_logged) {
+                world_map_refusal_logged = true;
+                Log::Info("Replay Recorder: the world map stays closed during this replay: it would show the continent of map %u, the one left for the replay, over the explored areas of map %u's",
+                          char_context ? static_cast<uint32_t>(char_context->current_map_id) : 0, playing_row.header.map_id);
+                Log::FlushFile();
+            }
+            return GW::Hook::LeaveHook();
+        }
+        WorldMapToggle_Ret(game_view, open);
+        GW::Hook::LeaveHook();
+    }
+
+    void FollowViewpoint(const uint32_t agent_id)
+    {
+        ViewpointMessage message{.agent = agent_id};
+        emulating_rows = true;
+        GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
+        emulating_rows = false;
+        followed_agent = agent_id;
+        LogPlayback(std::format("the view follows agent {} (s2c 172 emulated, as an observer's server sends it)", agent_id));
+    }
+
     void DisarmPlayback()
     {
-        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func)}) {
+        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func),
+                                  reinterpret_cast<void*>(WorldMapToggle_Func)}) {
             if (hooked) {
                 GW::Hook::RemoveHook(hooked);
             }
@@ -538,6 +588,8 @@ namespace {
         Goodbye_Func = nullptr;
         InstanceAck_Func = nullptr;
         MapLoaded_Func = nullptr;
+        WorldMapToggle_Func = nullptr;
+        viewpoint_available = false;
         playback_armed = false;
     }
 
@@ -561,6 +613,8 @@ namespace {
         const auto instance_ack = find("\x55\x8B\xEC\x8B\x45\x08\x8B\x88\x90\x01\x00\x00\x8B\xC1\x25\xC0\x00\x00\x00\x3C\xC0\x75\x00\xF6\xC1\x01", "xxxxxxxxxxxxxxxxxxxxxx?xxx");
         const auto map_loaded = find("\x55\x8B\xEC\x81\xEC\x48\x01\x00\x00\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x8D\x45\xE8\xC7\x45\xE4\x90\x00\x00\x00", "xxxxxxxxxx????xxxxxxxxxxxxxxx");
         const auto transfer_handler = find("\x55\x8B\xEC\x8B\x45\x08\x83\xEC\x08\x8B\x40\x20\x84\xC0\x79\x00\x83\xC8\x80\x56\x50\xE8", "xxxxxxxxxxxxxxx?xxxxxx");
+        const auto world_map_toggle = find("\x55\x8B\xEC\x56\x57\x8B\x7D\x08\x68\x95\x00\x00\x00\x57\xE8\x00\x00\x00\x00\x83\xC4\x08\x8B\xF0", "xxxxxxxxxxxxxxx????xxxxx");
+        const auto observe_agent = find("\x55\x8B\xEC\xE8\x00\x00\x00\x00\xFF\x75\x08\x8B\x48\x2C\x81\xC1\x44\x06\x00\x00\xE8\x00\x00\x00\x00\x83\x7D\x0C\x00", "xxxx????xxxxxxxxxxxx????xxxxx");
         const std::pair<const char*, bool> checks[] = {
             {"the game connect", game_connect != 0},
             {"the game connection's goodbye", goodbye != 0},
@@ -571,6 +625,7 @@ namespace {
             {"the instance acknowledgement", instance_ack != 0},
             {"the map loaded message", map_loaded != 0},
             {"the transfer handler", transfer_handler != 0},
+            {"the world map's toggle", world_map_toggle != 0},
             {"the Observe window's hook", ObserveGame_Func != nullptr},
             {"the game's properties", GameProps_Func != nullptr},
             {"the transfer message's layout", message_table.size() > GAME_SMSG_TRANSFER_GAME_SERVER_INFO && message_table[GAME_SMSG_TRANSFER_GAME_SERVER_INFO] == transfer_fields},
@@ -587,16 +642,26 @@ namespace {
         Goodbye_Func = reinterpret_cast<Goodbye_pt>(goodbye);
         InstanceAck_Func = reinterpret_cast<InstanceAck_pt>(instance_ack);
         MapLoaded_Func = reinterpret_cast<MapLoaded_pt>(map_loaded);
+        WorldMapToggle_Func = reinterpret_cast<WorldMapToggle_pt>(world_map_toggle);
         if (GW::Hook::CreateHook(&GameConnect_Func, OnGameConnect, &GameConnect_Ret) != 0 || GW::Hook::CreateHook(&Goodbye_Func, OnGoodbye, &Goodbye_Ret) != 0 ||
-            GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 || GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0) {
+            GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 || GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0 ||
+            GW::Hook::CreateHook(&WorldMapToggle_Func, OnWorldMapToggle, &WorldMapToggle_Ret) != 0) {
             DisarmPlayback();
             return "Playback not available: its hooks could not be made";
         }
-        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func)}) {
+        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func),
+                                  reinterpret_cast<void*>(WorldMapToggle_Func)}) {
             GW::Hook::EnableHooks(hooked);
         }
+        const auto handlers = GetStoCHandlerArray();
+        const auto viewpoint_handler = handlers && handlers->size() > viewpoint_message_id ? reinterpret_cast<uintptr_t>((*handlers)[viewpoint_message_id].handler_func) : 0;
+        // s2c 172's handler passes {agent, u8} to the char client's observe call, which sets the viewpoint the camera follows (0x00811a20, x23-live, x25-live).
+        viewpoint_available = observe_agent && viewpoint_handler && message_table[viewpoint_message_id] == viewpoint_fields &&
+                              memcmp(reinterpret_cast<const void*>(viewpoint_handler), "\x55\x8B\xEC\x8B\x45\x08\xFF\x70\x08\xFF\x70\x04\xE8", 13) == 0 &&
+                              GW::Scanner::FunctionFromNearCall(viewpoint_handler + 12) == observe_agent;
         playback_armed = true;
-        return "Ready: Observe on one of your recordings plays it";
+        return viewpoint_available ? "Ready: Observe on one of your recordings plays it"
+                                   : "Ready: Observe on one of your recordings plays it (following other agents is not available: s2c 172 is not the viewpoint message in this client)";
     }
 
     void StartPlayback(const ReplayObserve::Row& row)
@@ -617,6 +682,11 @@ namespace {
         }
         plan = std::move(made);
         playing_path = row.path;
+        playing_row = row;
+        playback_ended = false;
+        followed_agent = plan.controlled_agent;
+        last_target = 0;
+        world_map_refusal_logged = false;
         next_post = 0;
         played_ms = 0;
         playback_paused = false;
@@ -699,18 +769,33 @@ namespace {
             case Playback::Playing: {
                 const auto elapsed = std::chrono::duration<double, std::milli>(now - last_update).count();
                 last_update = now;
-                if (!playback_paused) {
-                    played_ms += elapsed * playback_speed;
+                if (stop) {
+                    Log::Info("Replay Recorder: %s", restart_pending ? "playback restarting: back to the outpost, then the same recording from its start" : "playback stopped: back to the outpost");
+                    Log::FlushFile();
+                    StopObserving();
+                    return;
                 }
-                for (; next_post < plan.posts.size() && plan.posts[next_post].time_ms <= played_ms && !stop; next_post++) {
+                if (!playback_paused) {
+                    played_ms = std::min(played_ms + elapsed * playback_speed, static_cast<double>(plan.duration_ms));
+                }
+                for (; next_post < plan.posts.size() && plan.posts[next_post].time_ms <= played_ms; next_post++) {
                     auto bytes = plan.posts[next_post].bytes;
                     send_cipher.Apply(bytes.data(), bytes.size());
                     PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
                 }
-                if (next_post == plan.posts.size() || stop) {
-                    Log::Info("Replay Recorder: %s", stop ? "playback stopped: back to the outpost" : "the replay has ended: back to the outpost");
+                if (next_post == plan.posts.size() && !playback_ended) {
+                    playback_ended = true;
+                    playback_paused = true;
+                    played_ms = plan.duration_ms;
+                    Log::Info("Replay Recorder: the replay has ended: paused on its last moment until Stop or Restart");
                     Log::FlushFile();
-                    StopObserving();
+                }
+                const auto target = GW::Agents::GetTargetId();
+                if (viewpoint_available && settings.follow_selected_agent && target != last_target) {
+                    last_target = target;
+                    if (target && target != followed_agent && GW::Agents::GetAgentByID(target)) {
+                        FollowViewpoint(target);
+                    }
                 }
                 return;
             }
@@ -846,9 +931,64 @@ void ReplayRecorderModule::Initialize()
     RegisterCallbacks();
 }
 
+ReplayRecorderModule::PlaybackView ReplayRecorderModule::GetPlayback() const
+{
+    const auto stage = playback.load();
+    return {
+        .active = stage != Playback::Off || restart_pending,
+        .playing = stage == Playback::Playing,
+        .ended = playback_ended,
+        .paused = playback_paused,
+        .restarting = restart_pending,
+        .can_follow = viewpoint_available,
+        .speed = playback_speed,
+        .played_ms = static_cast<uint32_t>(played_ms),
+        .length_ms = plan.duration_ms,
+        .recorder_agent = plan.controlled_agent,
+        .followed_agent = followed_agent,
+        .name = TextUtils::WStringToString(playing_path.filename().wstring()),
+        .status = playback_status,
+    };
+}
+
+void ReplayRecorderModule::SetPlaybackPaused(const bool paused)
+{
+    playback_paused = paused && !playback_ended;
+}
+
+void ReplayRecorderModule::SetPlaybackSpeed(const int speed)
+{
+    playback_speed = std::clamp(speed, 1, 8);
+}
+
+void ReplayRecorderModule::StopPlayback()
+{
+    restart_pending = false;
+    playback_stop_requested = true;
+}
+
+void ReplayRecorderModule::RestartPlayback()
+{
+    restart_pending = true;
+    playback_stop_requested = true;
+}
+
+void ReplayRecorderModule::FollowAgent(const uint32_t agent_id)
+{
+    if (viewpoint_available && playback == Playback::Playing && agent_id) {
+        FollowViewpoint(agent_id);
+    }
+}
+
+bool* ReplayRecorderModule::FollowSelectedAgent()
+{
+    return &settings.follow_selected_agent;
+}
+
 void ReplayRecorderModule::SignalTerminate()
 {
     playback_stop_requested = true;
+    restart_pending = false;
     GW::StoC::RemoveCallbacks(&stoc_hook_entry);
     GW::StoC::RemoveCallbacks(&observe_hook_entry);
     DropListedRows();
@@ -894,6 +1034,15 @@ void ReplayRecorderModule::Update(float)
     }
     UpdatePlayback();
     const auto play = settings.play_from_observe_window && settings.list_in_observe_window && ObserveGame_Func;
+    if (restart_pending && playback == Playback::Off) {
+        if (!play || !playback_armed) {
+            restart_pending = false;
+        }
+        else if (GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && !GW::Map::GetIsObserving() && GW::Map::GetInstanceTime() > restart_after_ms) {
+            restart_pending = false;
+            StartPlayback(playing_row);
+        }
+    }
     if (play && !playback_armed && playback_status.empty()) {
         playback_status = ArmPlayback();
         LogPlayback(playback_status);
@@ -960,26 +1109,12 @@ void ReplayRecorderModule::DrawSettingsInternal()
         ImGui::TextDisabled("%s", observe_status.c_str());
     }
     ImGui::Checkbox("Play recordings from the Observe window", &settings.play_from_observe_window);
-    ImGui::ShowHelp("Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. Stop observing (B, then Yes) brings you back to your outpost. Needs the list above.");
+    ImGui::ShowHelp("Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. The Replay window shows while it plays; its Stop, or stop observing (B, then Yes), brings you back to your outpost. Needs the list above.");
     if (!playback_status.empty()) {
         ImGui::TextDisabled("%s", playback_status.c_str());
     }
-    if (playback == Playback::Playing) {
-        ImGui::Text("%s / %s", TextUtils::WStringToString(ReplayObserve::Duration(static_cast<uint32_t>(played_ms))).c_str(), TextUtils::WStringToString(ReplayObserve::Duration(plan.duration_ms)).c_str());
-        ImGui::SameLine();
-        if (ImGui::Button(playback_paused ? "Resume" : "Pause")) {
-            playback_paused = !playback_paused;
-        }
-        for (const auto speed : {1, 2, 4}) {
-            ImGui::SameLine();
-            if (ImGui::RadioButton(std::format("x{}", speed).c_str(), playback_speed == speed)) {
-                playback_speed = speed;
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Stop")) {
-            playback_stop_requested = true;
-        }
+    if (playback != Playback::Off) {
+        ImGui::TextDisabled("A replay is playing: its controls are in the Replay window.");
     }
     if (writer.IsOpen()) {
         ImGui::Text("Recording %s: %u messages, %llu KB, %u layout errors", RecordingName().c_str(), header.record_count, writer.Size() / 1024, header.layout_errors);

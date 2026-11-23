@@ -76,6 +76,7 @@
 #include <Windows/PartyStatisticsWindow.h>
 #include <Windows/Pathfinding/PathfindingWindow.h>
 #include <Windows/PconsWindow.h>
+#include <Windows/ReplayWindow.h>
 #include <Windows/RerollWindow.h>
 #include <Windows/TradeWindow.h>
 #include <Windows/TravelWindow.h>
@@ -251,6 +252,7 @@ namespace {
         ObserverTargetWindow::Instance(),
         ObserverPartyWindow::Instance(),
         ObserverExportWindow::Instance(),
+        ReplayWindow::Instance(),
         CompletionWindow::Instance(),
         RerollWindow::Instance(),
         PartyStatisticsWindow::Instance(),
