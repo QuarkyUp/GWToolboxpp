@@ -1,0 +1,68 @@
+---
+title: "Replay Recorder"
+description: "Record what the game server sends in PvE explorable areas, one file per instance, for replays; its settings and its file format."
+section: features
+---
+
+import ToolboxPath from '../../components/ToolboxPath.astro';
+
+All settings for this feature live under <ToolboxPath steps={["Settings", "Replay Recorder"]} />. The module is off by default: turn it on under <ToolboxPath steps={["Settings", "Toolbox Modules"]} />.
+
+The Replay Recorder saves every message the game server sends while you are in a PvE map, from entering the map until leaving it, with the time each one arrived. It only reads what the client already received and changes nothing in the game. PvP maps and observed matches are never recorded. A recording is the raw material for replays: nothing in the toolbox plays them back yet.
+
+A recording starts when you enter a map, so enable the module before you travel or zone. Leaving the map, logging out or a minute without any message from the server ends it.
+
+## Settings
+
+- **Record explorable areas** — record explorable areas and missions (on by default).
+- **Record outposts** — also record outposts and towns.
+- **Keep other players' names and chat out of recordings** — on by default. Other players' names become `Player 1`, `Player 2`... (the same player keeps the same label within a recording) and player chat and player speech bubbles are left out. Every name the server sends as plain text is relabelled this way, guild names included; your own character's name, NPC chat and system messages are kept.
+- **Folder** — where recordings go. Empty means the `replays` folder inside the toolbox's settings folder; **Open** shows it in Explorer.
+- **Size cap per recording (MB)** — a recording stops growing at this size and is marked as capped.
+
+The panel shows the recording in progress (messages, size, layout errors) or the last one saved. A solo hour in an explorable area is about 120,000 to 150,000 messages, 2 to 3 MB.
+
+## Reading a recording
+
+`replay_check`, built with `python scripts/build.py --target replay_check`, prints a recording's header and the count and bytes of each message id:
+
+```
+replay_check <recording.gwrec>
+replay_check --self-test <folder>
+```
+
+`--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written.
+
+## File format
+
+Each recording is a `.gwrec` file named after its start time and map, e.g. `2026-11-23_14-05-12_map148.gwrec`. All numbers are little-endian. Version 1 is not compressed and has no index.
+
+**Header** (96 bytes, rewritten when the recording ends):
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 8 | magic `GWTBREC\0` |
+| 8 | 2 | format version (1) |
+| 10 | 2 | header size (96) |
+| 12 | 4 | client build (the game's version) |
+| 16 | 8 | digest of the message table (FNV-1a 64 over its bytes) |
+| 24 | 8 | start time, Unix milliseconds, UTC |
+| 32 | 4 | duration, milliseconds |
+| 36 | 4 | map id |
+| 40 | 4 | the map's region type |
+| 44 | 4 | 1 for an explorable area, 0 for an outpost |
+| 48 | 4 | district |
+| 52 | 4 | server region |
+| 56 | 4 | language |
+| 60 | 4 | record count |
+| 64 | 4 | layout errors: messages saved as their id alone |
+| 68 | 4 | flags: 1 names stripped, 2 chat dropped, 4 complete, 8 size cap reached |
+| 72 | 24 | toolbox version, NUL-terminated |
+
+A file without the *complete* flag was cut short (the game closed or crashed): its header's counts and duration are zero, and its records are still readable up to the last whole one.
+
+**Message table**, right after the header: a `u32` count of server message ids, then for each id a `u32` count of field descriptors and the descriptors (`u32` each), as the client held them when recording. Its first descriptor is the message id's own. This makes every file readable without the client that recorded it.
+
+**Records**, until the end of the file: a `u32` time in milliseconds since the start, a `u16` length, then the message as the server sent it on the wire: a `u16` message id followed by its fields, packed with no padding. Ids, floats and 4-byte numbers take 4 bytes; numbers 1, 2 or 4 bytes as their descriptor says; a blob its bytes; a text a `u16` length then that many UTF-16 units; an array a `u16` count then its items; a repeated group a `u8` count then the remaining fields once per repetition. The server's transfer to the next map (message 422, which carries its address and keys) is never recorded.
+
+[back](./)

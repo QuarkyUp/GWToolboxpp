@@ -200,5 +200,6 @@ add_subdirectory(Core)
 add_subdirectory(RestClient)
 add_subdirectory(GWToolbox)
 add_subdirectory(bake_pathing)
+add_subdirectory(replay_check)
 
 endif() # EMSCRIPTEN
