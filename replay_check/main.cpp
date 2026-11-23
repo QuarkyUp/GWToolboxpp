@@ -1,4 +1,5 @@
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayObserve.h>
 #include <Utils/ReplayState.h>
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -780,12 +782,216 @@ namespace {
         }
     }
 
+    uint64_t NowUnixMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    struct RowsProof {
+        size_t rows = 0;
+        size_t layout_errors = 0;
+        size_t disallowed_types = 0;
+        size_t keys_out_of_range = 0;
+        size_t duplicate_keys = 0;
+    };
+
+    RowsProof ProveRows(const ReplayFile::MessageTable& table, const ReplayObserve::Scan& scan, const bool verbose)
+    {
+        RowsProof proof;
+        std::set<uint32_t> keys;
+        if (verbose) {
+            printf("%10s %6s %5s %9s %10s %9s  %s\n", "key", "map", "type", "category", "age (min)", "length", "check against the client's 414 table");
+        }
+        for (const auto& row : scan.rows) {
+            const auto& message = row.message;
+            const auto error = ReplayObserve::CheckRow(table, message);
+            proof.rows++;
+            proof.layout_errors += !error.empty();
+            const auto category = ReplayObserve::Category(message.type, message.title);
+            proof.disallowed_types += !ReplayObserve::IsAllowedType(message.type) || category == 9;
+            proof.keys_out_of_range += !ReplayObserve::IsOurKey(message.key);
+            proof.duplicate_keys += !keys.insert(message.key).second;
+            if (verbose) {
+                printf("%#10x %6u %5u %9u %10u %9ls  %s\n", message.key, message.map_id, message.type, category, message.age_minutes, ReplayObserve::Duration(row.header.duration_ms).c_str(), error.empty() ? "valid" : error.c_str());
+            }
+        }
+        if (verbose) {
+            for (const auto& [path, reason] : scan.left_out) {
+                printf("left out %ls: %s\n", path.filename().c_str(), reason.c_str());
+            }
+        }
+        return proof;
+    }
+
+    int Rows(const std::filesystem::path& folder, const uint32_t client_build)
+    {
+        std::filesystem::path reference_path;
+        ReplayFile::Header reference;
+        std::error_code error_code;
+        for (const auto& entry : std::filesystem::directory_iterator(folder, error_code)) {
+            ReplayFile::Header header;
+            std::string error;
+            if (entry.path().extension() == L".gwrec" && ReplayFile::ReadHeader(entry.path(), header, error) && (header.flags & ReplayFile::Complete) && (!client_build || header.client_build == client_build) &&
+                (reference_path.empty() || header.start_time_unix_ms > reference.start_time_unix_ms)) {
+                reference_path = entry.path();
+                reference = header;
+            }
+        }
+        if (reference_path.empty()) {
+            printf("%ls: no complete recording%s to take the client's message table from\n", folder.c_str(), client_build ? std::format(" of client build {}", client_build).c_str() : "");
+            return 1;
+        }
+        ReplayFile::Contents contents;
+        std::string error;
+        if (!ReplayFile::Read(reference_path, contents, error)) {
+            printf("%ls: %s\n", reference_path.c_str(), error.c_str());
+            return 1;
+        }
+        const auto& fields = contents.table.size() > ReplayObserve::row_message_id ? contents.table[ReplayObserve::row_message_id] : std::vector<uint32_t>();
+        std::string descriptors;
+        for (const auto descriptor : fields) {
+            descriptors += std::format(" {:#x}", descriptor);
+        }
+        printf("client build %u; the 414 table from %ls:%s\n\n", contents.header.client_build, reference_path.filename().c_str(), descriptors.c_str());
+        const auto scan = ReplayObserve::ScanFolder(folder, contents.header.client_build, contents.header.table_digest, {}, NowUnixMs());
+        const auto proof = ProveRows(contents.table, scan, true);
+        const auto passed = proof.rows && !proof.layout_errors && !proof.disallowed_types && !proof.keys_out_of_range && !proof.duplicate_keys;
+        printf(
+            "\nrows %zu, left out %zu; layout errors %zu, types not allowed %zu, keys outside %#x to %#x %zu, keys not unique %zu: %s\n", proof.rows, scan.left_out.size(), proof.layout_errors, proof.disallowed_types, ReplayObserve::first_key,
+            ReplayObserve::first_key + ReplayObserve::key_span - 1, proof.keys_out_of_range, proof.duplicate_keys, passed ? "passed" : "FAILED"
+        );
+        return passed ? 0 : 1;
+    }
+
+    const std::vector<uint32_t> live_row_fields = {0x19e, 0x404, 0x204, 0x204, 0x104, 0x104, 0x104, 0x20c, 0x104, 0x104, 0x104, 0x104, 0x104, 0x104, 0x104, 0x204, 0x104, 0x3017};
+
+    void TestRows(const std::filesystem::path& folder)
+    {
+        const auto rows_folder = folder / L"rows";
+        std::error_code error_code;
+        std::filesystem::remove_all(rows_folder, error_code);
+        std::filesystem::create_directories(rows_folder, error_code);
+        ReplayFile::MessageTable table(488);
+        for (uint32_t message_id = 0; message_id < table.size(); message_id++) {
+            table[message_id] = {message_id};
+        }
+        table[ReplayObserve::row_message_id] = live_row_fields;
+        const std::vector<ReplayFile::Record> records = {{0, {12, 0}}, {40, {12, 0}}};
+        const auto now = NowUnixMs();
+        auto header = SyntheticHeader(table);
+        header.client_build = 39167;
+        header.flags |= ReplayFile::Complete;
+        header.record_count = static_cast<uint32_t>(records.size());
+        const auto write = [&](const wchar_t* name, const ReplayFile::Header& written, const ReplayFile::MessageTable& written_table, const bool close) {
+            Check(WriteRecording(rows_folder / name, written, written_table, records, close), "a rows recording is written");
+        };
+        const std::pair<uint32_t, uint32_t> listed[] = {{148, 47800}, {430, 3 * 3600000 + 125000}, {857, 61000}, {148, 1000}, {639, 600000}};
+        for (size_t i = 0; i < std::size(listed); i++) {
+            auto row_header = header;
+            row_header.map_id = listed[i].first;
+            row_header.duration_ms = listed[i].second;
+            row_header.start_time_unix_ms = now - (i + 1) * 3600000;
+            write(std::format(L"listed-{}.gwrec", i).c_str(), row_header, table, true);
+        }
+        auto other_build = header;
+        other_build.client_build = 39112;
+        other_build.start_time_unix_ms = now - 100 * 3600000ull;
+        write(L"other-build.gwrec", other_build, table, true);
+        auto unfinished = header;
+        unfinished.flags &= ~ReplayFile::Complete;
+        write(L"unfinished.gwrec", unfinished, table, false);
+        auto other_table = table;
+        other_table[ReplayObserve::row_message_id].push_back(0x404);
+        auto other_table_header = header;
+        other_table_header.table_digest = ReplayFile::TableDigest(other_table);
+        write(L"other-table.gwrec", other_table_header, other_table, true);
+        auto empty = header;
+        empty.record_count = 0;
+        Check(WriteRecording(rows_folder / L"empty.gwrec", empty, table, {}, true), "an empty recording is written");
+        if (const auto file = _wfopen((rows_folder / L"not-a-recording.gwrec").c_str(), L"wb")) {
+            fwrite("not a recording", 1, 15, file);
+            fclose(file);
+        }
+        if (const auto file = _wfopen((rows_folder / L"notes.txt").c_str(), L"wb")) {
+            fclose(file);
+        }
+
+        const std::set<uint32_t> server_keys = {ReplayObserve::first_key, ReplayObserve::first_key + 2};
+        const auto scan = ReplayObserve::ScanFolder(rows_folder, 39167, ReplayFile::TableDigest(table), server_keys, now);
+        Check(scan.rows.size() == std::size(listed) && scan.left_out.size() == 5, "the rows folder gives five rows and leaves five files out");
+        if (scan.rows.empty()) {
+            return;
+        }
+        const auto proof = ProveRows(table, scan, false);
+        Check(!proof.layout_errors && !proof.disallowed_types && !proof.keys_out_of_range && !proof.duplicate_keys, "every row is valid by the live 414 table, its type allowed, its key ours and unique");
+        Check(
+            std::ranges::none_of(
+                scan.rows,
+                [&server_keys](const ReplayObserve::Row& row) {
+                    return server_keys.contains(row.message.key);
+                }
+            ),
+            "no row takes a key a server row of the same list took"
+        );
+        Check(
+            std::ranges::is_sorted(
+                scan.rows, std::ranges::greater(),
+                [](const ReplayObserve::Row& row) {
+                    return row.header.start_time_unix_ms;
+                }
+            ),
+            "the rows are the newest first"
+        );
+        Check(scan.rows.size() > 1 && scan.rows[0].message.age_minutes == 60 && scan.rows[1].message.age_minutes == 120, "a row's age is the minutes since its recording began");
+        const auto left_out_for = [&scan](const wchar_t* name) {
+            const auto found = std::ranges::find(scan.left_out, std::filesystem::path(name), [](const ReplayObserve::LeftOut& left_out) {
+                return left_out.path.filename();
+            });
+            return found == scan.left_out.end() ? std::string("listed") : found->reason;
+        };
+        Check(left_out_for(L"other-build.gwrec") == "recorded on client build 39112, this client is build 39167", "another build's recording is left out, the builds named");
+        Check(left_out_for(L"unfinished.gwrec").starts_with("unfinished"), "an unfinished recording is left out");
+        Check(left_out_for(L"other-table.gwrec") == "its message table is not this client's", "a recording of another message table is left out");
+        Check(left_out_for(L"empty.gwrec") == "no messages", "an empty recording is left out");
+        Check(left_out_for(L"not-a-recording.gwrec") == "not a recording (no magic)", "a file failing the header check is left out");
+        Check(
+            left_out_for(L"notes.txt") == "listed" && std::ranges::none_of(
+                                                          scan.rows,
+                                                          [](const ReplayObserve::Row& row) {
+                                                              return row.path.extension() != L".gwrec";
+                                                          }
+                                                      ),
+            "files other than recordings are not looked at"
+        );
+
+        const auto row = scan.rows.front().message;
+        Check(!ReplayObserve::CheckRow(other_table, row).empty(), "a 414 table with one more field refuses the row");
+        auto cut_table = table;
+        cut_table[ReplayObserve::row_message_id].pop_back();
+        Check(!ReplayObserve::CheckRow(cut_table, row).empty(), "a 414 table without the team name refuses the row");
+        auto busy_table = table;
+        busy_table[ReplayObserve::rows_committed_message_id].push_back(0x404);
+        Check(!ReplayObserve::CheckRow(busy_table, row).empty(), "a 415 carrying fields refuses the row");
+        for (const auto type : {6u, 10u, 13u}) {
+            auto refused = row;
+            refused.type = type;
+            Check(!ReplayObserve::CheckRow(table, refused).empty(), std::format("type {} is refused", type).c_str());
+        }
+        auto outside = row;
+        outside.key = ReplayObserve::first_key + ReplayObserve::key_span;
+        Check(!ReplayObserve::CheckRow(table, outside).empty(), "a key outside our range is refused");
+        auto wide = row;
+        wide.map_id = 0x10000;
+        Check(!ReplayObserve::CheckRow(table, wide).empty(), "a map id the 414 cannot carry is refused");
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
         std::filesystem::create_directories(folder, error_code);
         TestPacking();
         TestWorld(folder);
+        TestRows(folder);
 
         std::mt19937 random(20261123);
         const auto table = SyntheticTable(random);
@@ -837,15 +1043,21 @@ int wmain(const int argc, const wchar_t* argv[])
     if (argc == 3 && wcscmp(argv[1], L"--self-test") == 0) {
         return SelfTest(argv[2]);
     }
+    if ((argc == 3 || argc == 4) && wcscmp(argv[1], L"--rows") == 0) {
+        return Rows(argv[2], argc == 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 0);
+    }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
     const auto arguments = command.empty() ? 1 : command == L"--state" ? 2 : command == L"--join" ? 3 : command == L"--check-join" ? 1 : command == L"--keyframes" ? 3 : 0;
     if (!arguments || argc != 2 + (command.empty() ? 0 : arguments)) {
-        printf("usage: replay_check <recording.gwrec>\n"
-               "       replay_check --state <recording.gwrec> <ms>\n"
-               "       replay_check --join <recording.gwrec> <ms> <out.gwrec>\n"
-               "       replay_check --check-join <recording.gwrec>\n"
-               "       replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>\n"
-               "       replay_check --self-test <folder>\n");
+        printf(
+            "usage: replay_check <recording.gwrec>\n"
+            "       replay_check --state <recording.gwrec> <ms>\n"
+            "       replay_check --join <recording.gwrec> <ms> <out.gwrec>\n"
+            "       replay_check --check-join <recording.gwrec>\n"
+            "       replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>\n"
+            "       replay_check --rows <folder> [client build]\n"
+            "       replay_check --self-test <folder>\n"
+        );
         return 2;
     }
     const auto path = command.empty() ? argv[1] : argv[2];
