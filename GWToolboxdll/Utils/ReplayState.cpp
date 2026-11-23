@@ -298,14 +298,15 @@ namespace ReplayState {
         }
 
         struct Decoder {
-            const std::vector<uint8_t>& body;
+            const uint8_t* body;
+            size_t body_size;
             Message& out;
             size_t offset = 2;
             bool ok = true;
 
             uint32_t Take(const size_t size)
             {
-                if (offset + size > body.size()) {
+                if (offset + size > body_size) {
                     ok = false;
                     return 0;
                 }
@@ -572,19 +573,24 @@ namespace ReplayState {
         Set(field, std::bit_cast<uint32_t>(value), item);
     }
 
-    bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out)
+    size_t DecodePrefix(const ReplayFile::MessageTable& table, const uint8_t* bytes, const size_t size, Message& out)
     {
         out = {};
-        if (body.size() < 2) {
-            return false;
+        if (size < 2) {
+            return 0;
         }
-        out.id = static_cast<uint16_t>(body[0] | body[1] << 8);
+        out.id = static_cast<uint16_t>(bytes[0] | bytes[1] << 8);
         if (out.id >= table.size() || table[out.id].empty()) {
-            return false;
+            return 0;
         }
-        Decoder decoder{body, out};
+        Decoder decoder{bytes, std::min(size, ReplayFile::max_body_size), out};
         const auto& descriptors = table[out.id];
-        return decoder.Walk(descriptors.data() + 1, descriptors.size() - 1) && decoder.offset == body.size();
+        return decoder.Walk(descriptors.data() + 1, descriptors.size() - 1) ? decoder.offset : 0;
+    }
+
+    bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out)
+    {
+        return !body.empty() && DecodePrefix(table, body.data(), body.size(), out) == body.size();
     }
 
     bool Encode(const ReplayFile::MessageTable& table, const Message& message, std::vector<uint8_t>& out)

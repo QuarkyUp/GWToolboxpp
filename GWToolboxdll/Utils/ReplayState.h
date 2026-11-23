@@ -28,6 +28,7 @@ namespace ReplayState {
         bool operator==(const Message&) const = default;
     };
 
+    size_t DecodePrefix(const ReplayFile::MessageTable& table, const uint8_t* bytes, size_t size, Message& out);
     bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out);
     bool Encode(const ReplayFile::MessageTable& table, const Message& message, std::vector<uint8_t>& out);
     std::vector<uint32_t> NamedAgents(const ReplayFile::MessageTable& table, const Message& message);
