@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -15,6 +16,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -534,11 +536,13 @@ namespace {
         {170, {0x10, 0x404, 0x404}},
         {182, {0x10, 0x404}},
         {183, {0x10, 0x104, 0x104, 0x104}},
-        {218,{0x10, 0x82b, 0x6, 0x82b, 0x6, 0x104}},
+        {218, {0x10, 0x82b, 0x6, 0x82b, 0x6, 0x104}},
         {240, {0x10, 0x404}},
         {241, {0x10, 0x404}},
         {242, {0x404}},
         {263, {0x10, 0x404, 0x404, 0x104, 0x2017}},
+        {280, {0x204, 0x1005, 0x104}},
+        {289, {0x204, 0x1005, 0x2017, 0x104}},
         {277, {0x404, 0x404}},
         {318, {0x204, 0x404, 0x204, 0x104}},
         {319, {0x204, 0x104, 0x104, 0x204, 0x104, 0x404}},
@@ -600,13 +604,13 @@ namespace {
         write(390, {});
         write(381, {Text(L"Recorder")});
         write(410, {N(1), N(148), N(1), N(1), N(0), N(0), N(0)});
+        write(324, {N(1), N(0)});
+        write(328, {N(1), N(0)});
+        write(319, {N(1), N(2), N(0), N(1), N(9), N(0)});
         for (uint32_t item = 100; item < 105; item++) {
             write(353, {N(item), N(item * 7), N(2), N(0), N(0), N(0), N(1), N(0), N(10), N(item), N(1), Text(L"\x108\x107item\x1"), N(1), N(0x2400)});
             write(318, {N(1), N(item), N(1), N(item - 100)});
         }
-        write(324, {N(1), N(0)});
-        write(328, {N(1), N(0)});
-        write(319, {N(1), N(2), N(0), N(1), N(9), N(0)});
         write(319, {N(1), N(1), N(1), N(2), N(20), N(104)});
         write(324, {N(2), N(0)});
         write(328, {N(2), N(1)});
@@ -668,6 +672,8 @@ namespace {
         write(460, {N(1), N(2), N(0)});
         write(468, {N(1)});
         write(435, {N(1), N(0)});
+        write(289, {N(1), Bytes(16, 3), Text(L"Guild"), N(1)});
+        write(280, {N(1), Bytes(16, 3), N(3)});
 
         uint32_t next_agent = 60;
         uint32_t next_effect = 1000;
@@ -976,6 +982,9 @@ namespace {
         auto other_table_header = header;
         other_table_header.table_digest = ReplayFile::TableDigest(other_table);
         write(L"other-table.gwrec", other_table_header, other_table, true);
+        auto outpost = header;
+        outpost.is_explorable = 0;
+        write(L"outpost.gwrec", outpost, table, true);
         auto empty = header;
         empty.record_count = 0;
         Check(WriteRecording(rows_folder / L"empty.gwrec", empty, table, {}, true), "an empty recording is written");
@@ -989,7 +998,7 @@ namespace {
 
         const std::set<uint32_t> server_keys = {ReplayObserve::first_key, ReplayObserve::first_key + 2};
         const auto scan = ReplayObserve::ScanFolder(rows_folder, 39167, ReplayFile::TableDigest(table), server_keys, now);
-        Check(scan.rows.size() == std::size(listed) && scan.left_out.size() == 5, "the rows folder gives five rows and leaves five files out");
+        Check(scan.rows.size() == std::size(listed) && scan.left_out.size() == 6, "the rows folder gives five rows and leaves six files out, an outpost's among them");
         if (scan.rows.empty()) {
             return;
         }
@@ -1056,6 +1065,134 @@ namespace {
         Check(!ReplayObserve::CheckRow(table, wide).empty(), "a map id the 414 cannot carry is refused");
     }
 
+    std::vector<ReplayState::Message> Fed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan)
+    {
+        std::vector<ReplayState::Message> fed;
+        for (const auto& post : plan.posts) {
+            std::string error;
+            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
+                ReplayState::Decode(contents.table, body, fed.emplace_back());
+            }
+        }
+        return fed;
+    }
+
+    size_t JoinMessages(const ReplayWire::Plan& plan)
+    {
+        return std::accumulate(plan.posts.begin(), plan.posts.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
+            return sum + (post.stage == ReplayWire::Stage::Stream ? 0 : post.records);
+        });
+    }
+
+    std::string OrderSummary(const std::vector<ReplayState::OrderFailure>& failures, const size_t join_messages)
+    {
+        std::map<std::tuple<bool, uint16_t, ReplayState::IdKind>, size_t> counts;
+        for (const auto& failure : failures) {
+            counts[{failure.record >= join_messages, failure.field.message, failure.field.kind}]++;
+        }
+        std::string summary;
+        for (const auto& [key, count] : counts) {
+            const auto& [streamed, message_id, kind] = key;
+            summary += std::format("{}{} {} {} x{}", summary.empty() ? "" : ", ", streamed ? "stream" : "join", message_id, ReplayState::IdKindName(kind), count);
+        }
+        return summary.empty() ? "none" : summary;
+    }
+
+    std::string ChangeText(const ReplayWire::Change& change)
+    {
+        return change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("records {} to {} left out: {}", change.record, change.record + change.count - 1, change.why) : std::format("record {}: 410's observer byte set: {}", change.record, change.why);
+    }
+
+    std::vector<std::string> ProveVerbatim(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan)
+    {
+        std::vector<std::string> failures;
+        const auto& records = contents.records;
+        const auto index_of = [&records](const uint16_t id, const size_t from) {
+            for (auto i = from; i < records.size(); i++) {
+                if (records[i].MessageId() == id) {
+                    return i;
+                }
+            }
+            return records.size();
+        };
+        const auto load = index_of(406, 0);
+        const auto connect = index_of(31, load);
+        if (connect >= records.size()) {
+            return {"the recording has no 406 followed by a 31"};
+        }
+        const auto head = index_of(380, 0) < load ? index_of(380, 0) : 0;
+        auto second_load = records.size();
+        for (auto i = connect + 1; i < records.size() && second_load == records.size(); i++) {
+            if (const auto id = records[i].MessageId(); id == 380 || id == 406 || id == 410) {
+                second_load = i;
+            }
+        }
+        std::vector<bool> left_out(records.size(), false);
+        std::set<size_t> changed;
+        for (const auto& change : plan.changes) {
+            if (change.kind == ReplayWire::ChangeKind::ObserverByte) {
+                changed.insert(change.record);
+                continue;
+            }
+            for (auto i = change.record; i < change.record + change.count && i < records.size(); i++) {
+                left_out[i] = true;
+                if (i >= head && i < second_load) {
+                    failures.push_back(std::format("record {} (message {}) is left out, and it is neither before the connection's first 380 nor from a second instance load", i, records[i].MessageId()));
+                }
+            }
+        }
+        const auto entry_ms = records[connect].time_ms;
+        size_t next = 0;
+        for (size_t p = 0; p < plan.posts.size(); p++) {
+            const auto& post = plan.posts[p];
+            std::string error;
+            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
+                while (next < records.size() && left_out[next]) {
+                    next++;
+                }
+                if (next >= records.size()) {
+                    failures.push_back(std::format("post {} feeds more messages than the recording holds", p));
+                    return failures;
+                }
+                const auto i = next++;
+                const auto& record = records[i];
+                const auto stage = i < load ? ReplayWire::Stage::BeforeLoad : i < connect ? ReplayWire::Stage::Load : record.time_ms <= entry_ms ? ReplayWire::Stage::Entry : ReplayWire::Stage::Stream;
+                const auto time_ms = stage == ReplayWire::Stage::Stream ? record.time_ms - entry_ms : 0;
+                if (post.stage != stage || post.time_ms != time_ms) {
+                    failures.push_back(std::format("record {} (message {}) is fed {} at {} ms; the recording puts it {} at {} ms", i, record.MessageId(), ReplayWire::StageName(post.stage), post.time_ms, ReplayWire::StageName(stage), time_ms));
+                }
+                if (body == record.body) {
+                    if (changed.contains(i)) {
+                        failures.push_back(std::format("record {} is listed as changed and is fed as recorded", i));
+                    }
+                    continue;
+                }
+                if (!changed.contains(i)) {
+                    failures.push_back(std::format("record {} (message {}) is fed with other bytes than recorded, and no change lists it", i, record.MessageId()));
+                    continue;
+                }
+                ReplayState::Message fed;
+                ReplayState::Message recorded;
+                const auto differing = body.size() == record.body.size() ? std::inner_product(body.begin(), body.end(), record.body.begin(), size_t{0}, std::plus<>(), std::not_equal_to<>()) : SIZE_MAX;
+                const auto decoded = ReplayState::Decode(contents.table, body, fed) && ReplayState::Decode(contents.table, record.body, recorded);
+                recorded.Set(5, 1);
+                if (record.MessageId() != 410 || differing != 1 || !decoded || fed.U(5) != 1 || fed != recorded) {
+                    failures.push_back(std::format("record {} (message {}): its change is not 410's observer byte set to 1, alone", i, record.MessageId()));
+                }
+            }
+            if (!error.empty()) {
+                failures.push_back(std::format("post {} does not cut into messages ({})", p, error));
+            }
+        }
+        while (next < records.size() && left_out[next]) {
+            next++;
+        }
+        if (next != records.size()) {
+            failures.push_back(std::format("records from {} on are neither fed nor listed as left out", next));
+        }
+        return failures;
+    }
+
     struct WireProof {
         size_t posts = 0;
         size_t records = 0;
@@ -1063,10 +1200,9 @@ namespace {
         std::string error;
     };
 
-    WireProof ProveWire(const ReplayFile::Contents& contents, const uint32_t seed)
+    WireProof ProveWire(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t seed)
     {
         WireProof proof;
-        const auto plan = ReplayWire::MakePlan(contents);
         if (!plan.error.empty()) {
             proof.error = plan.error;
             return proof;
@@ -1119,22 +1255,10 @@ namespace {
                 return proof;
             }
         }
-        std::vector<std::vector<uint8_t>> streamed;
-        for (const auto& record : contents.records) {
-            if (record.time_ms >= plan.start_ms && ReplayState::Streamed(contents.table, record, plan.controlled_agent)) {
-                streamed.push_back(record.body);
-            }
-        }
-        const auto stream_records = std::accumulate(plan.posts.begin(), plan.posts.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
-            return sum + (post.stage == ReplayWire::Stage::Stream ? post.records : 0);
-        });
-        if (stream_records > streamed.size() || !std::equal(bodies.end() - static_cast<std::ptrdiff_t>(stream_records), bodies.end(), streamed.end() - static_cast<std::ptrdiff_t>(stream_records))) {
-            proof.error = "the stream's messages are not the recording's records from the start on, byte for byte";
-        }
         return proof;
     }
 
-    bool ProveFeed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms, const bool verbose)
+    bool ProveFeed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms, const bool verbose, const bool verbatim)
     {
         if (!plan.error.empty()) {
             if (verbose) {
@@ -1144,14 +1268,29 @@ namespace {
         }
         size_t failures = 0;
         const auto fail = [&failures, verbose](const std::string& what) {
-            failures++;
-            if (verbose) {
+            if (verbose && failures < 20) {
                 printf("  FAILED: %s\n", what.c_str());
             }
+            failures++;
         };
+        if (verbose && verbatim) {
+            printf(
+                "the recording as recorded from record %zu (%u ms) to record %zu, its stream timed from its 31 at %u ms, %u ms played from there; map type %u%s; controlled agent %u; the recorder's own records kept %zu\n", plan.first_record, plan.start_ms,
+                plan.end_record, plan.entry_ms, plan.duration_ms, plan.map_type, plan.map_type == ReplayWire::game_map_type ? "" : " (not a game map's: the toolbox does not play it)", plan.controlled_agent, plan.own_records_streamed
+            );
+            printf("changes from the recorded bytes: %zu\n", plan.changes.size());
+            for (const auto& change : plan.changes) {
+                printf("  %s\n", ChangeText(change).c_str());
+            }
+            printf("\n");
+        }
+        else if (verbose) {
+            printf(
+                "a join at %u ms of the recording, %u ms played from there; inventory skeleton %zu records; private records left out of the stream %zu; controlled agent %u, its own character records streamed %zu\n\n", plan.start_ms, plan.duration_ms,
+                plan.skeleton_records, plan.private_records_dropped, plan.controlled_agent, plan.own_records_streamed
+            );
+        }
         if (verbose) {
-            printf("start at %u ms of the recording, %u ms played from there; inventory skeleton %zu records; private records left out of the stream %zu; controlled agent %u, its own character records streamed %zu\n\n",
-                   plan.start_ms, plan.duration_ms, plan.skeleton_records, plan.private_records_dropped, plan.controlled_agent, plan.own_records_streamed);
             printf("%6s  %-38s %9s %8s %6s  %s\n", "post", "stage (posted when)", "time ms", "records", "bytes", "first message ids");
         }
         auto stage = ReplayWire::Stage::BeforeLoad;
@@ -1160,7 +1299,6 @@ namespace {
         size_t shown_records = 0;
         size_t shown_bytes = 0;
         std::map<ReplayWire::Stage, size_t> per_stage;
-        std::vector<ReplayState::Message> fed;
         bool observer_info = false;
         for (size_t i = 0; i < plan.posts.size(); i++) {
             const auto& post = plan.posts[i];
@@ -1182,9 +1320,8 @@ namespace {
                 fail(std::format("post {} does not cut into its {} messages ({})", i, post.records, error));
             }
             for (const auto& body : bodies) {
-                auto& message = fed.emplace_back();
-                const auto decoded = ReplayState::Decode(contents.table, body, message);
-                observer_info |= decoded && post.stage == ReplayWire::Stage::BeforeLoad && message.id == 410 && message.U(5) == 1;
+                ReplayState::Message message;
+                observer_info |= ReplayState::Decode(contents.table, body, message) && post.stage == ReplayWire::Stage::BeforeLoad && message.id == 410 && message.U(5) == 1;
             }
             stage = post.stage;
             time_ms = post.time_ms;
@@ -1203,7 +1340,7 @@ namespace {
                 printf("%6zu  %-38s %9u %8u %6zu %s%s\n", i, ReplayWire::StageName(post.stage), post.time_ms, post.records, post.bytes.size(), ids.c_str(), bodies.size() > 6 ? " ..." : "");
             }
         }
-        for (const auto required : {ReplayWire::Stage::BeforeLoad, ReplayWire::Stage::Load, ReplayWire::Stage::Entry, ReplayWire::Stage::Stream}) {
+        for (const auto required : {ReplayWire::Stage::BeforeLoad, ReplayWire::Stage::Load, ReplayWire::Stage::Entry}) {
             if (!per_stage[required]) {
                 fail(std::format("no records {}", ReplayWire::StageName(required)));
             }
@@ -1211,15 +1348,152 @@ namespace {
         if (!observer_info) {
             fail("no 410 with its observer byte set before 406");
         }
+        const auto fed = Fed(contents, plan);
         for (const auto& need : ReplayState::CheckClientNeeds(fed)) {
             fail(std::format("what the client needs: {}", need));
         }
+        const auto order = ReplayState::CheckOrder(contents.table, fed);
+        for (const auto& failure : order) {
+            fail(std::format("the order of real loads: {}", ReplayState::Describe(failure)));
+        }
+        const auto verbatim_failures = verbatim ? ProveVerbatim(contents, plan) : std::vector<std::string>{};
+        for (const auto& failure : verbatim_failures) {
+            fail(std::format("the recording as recorded: {}", failure));
+        }
         if (verbose) {
-            printf("\nup to %u ms: %zu posts, %zu records, %zu bytes; the whole plan: %zu posts (join %zu + %zu + %zu records, stream %zu records)\n", until_ms, shown, shown_records, shown_bytes, plan.posts.size(),
-                   per_stage[ReplayWire::Stage::BeforeLoad], per_stage[ReplayWire::Stage::Load], per_stage[ReplayWire::Stage::Entry], per_stage[ReplayWire::Stage::Stream]);
+            printf(
+                "\nup to %u ms: %zu posts, %zu records, %zu bytes; the whole plan: %zu posts (%zu + %zu + %zu records in the load's stages, stream %zu records)\n", until_ms, shown, shown_records, shown_bytes, plan.posts.size(),
+                per_stage[ReplayWire::Stage::BeforeLoad], per_stage[ReplayWire::Stage::Load], per_stage[ReplayWire::Stage::Entry], per_stage[ReplayWire::Stage::Stream]
+            );
+            printf("the order of real loads: %zu failures (%s)\n", order.size(), OrderSummary(order, JoinMessages(plan)).c_str());
+            if (verbatim) {
+                printf("byte for byte the recording but for the changes listed: %s\n", verbatim_failures.empty() ? "yes" : std::format("no, {} failures", verbatim_failures.size()).c_str());
+            }
             printf("feed: %s\n", failures ? "FAILED" : "passed");
         }
         return !failures;
+    }
+
+    std::string JoinTime(const uint32_t join_ms)
+    {
+        return join_ms == UINT32_MAX ? "the end" : std::format("{} ms", join_ms);
+    }
+
+    bool ProveOrder(const ReplayFile::Contents& contents)
+    {
+        const auto plan = ReplayWire::MakePlan(contents);
+        if (!plan.error.empty()) {
+            printf("the plan: %s\norder: FAILED\n", plan.error.c_str());
+            return false;
+        }
+        const auto order = ReplayState::CheckOrder(contents.table, Fed(contents, plan));
+        printf("the plan (the recording as recorded): order failures %zu (%s)\n", order.size(), OrderSummary(order, JoinMessages(plan)).c_str());
+        for (const auto join_ms : {10000u, 30000u, 60000u, UINT32_MAX}) {
+            const auto join = ReplayWire::MakeJoinPlan(contents, join_ms);
+            if (!join.error.empty()) {
+                printf("a join at %s: %s\n", JoinTime(join_ms).c_str(), join.error.c_str());
+                continue;
+            }
+            const auto fed = Fed(contents, join);
+            const auto failures = ReplayState::CheckOrder(contents.table, fed);
+            const auto needs = ReplayState::CheckClientNeeds(fed);
+            printf(
+                "a join at %s (its 30 at %u ms): %zu join messages, %zu streamed; order failures %zu (%s); what the client needs, failures %zu\n", JoinTime(join_ms).c_str(), join.start_ms, JoinMessages(join), fed.size() - JoinMessages(join),
+                failures.size(), OrderSummary(failures, JoinMessages(join)).c_str(), needs.size()
+            );
+        }
+        printf("order: %s\n", order.empty() ? "passed" : "FAILED");
+        return order.empty();
+    }
+
+    int Mine(const std::vector<std::filesystem::path>& paths)
+    {
+        struct Seen {
+            size_t count = 0;
+            size_t first = 0;
+            std::set<size_t> files;
+        };
+        std::map<ReplayState::IdField, Seen> seen;
+        for (size_t file = 0; file < paths.size(); file++) {
+            ReplayFile::Contents contents;
+            std::string error;
+            if (!ReplayFile::Read(paths[file], contents, error)) {
+                printf("%ls: %s\n", paths[file].c_str(), error.c_str());
+                return 1;
+            }
+            const auto plan = ReplayWire::MakePlan(contents);
+            std::set<std::pair<ReplayState::IdKind, uint32_t>> carried;
+            for (auto i = plan.error.empty() ? plan.first_record : 0; i < contents.records.size(); i++) {
+                ReplayState::Message message;
+                if (!ReplayState::Decode(contents.table, contents.records[i].body, message)) {
+                    continue;
+                }
+                for (const auto& field : ReplayState::IdFields(contents.table, message.id)) {
+                    if (field.field >= message.fields.size()) {
+                        continue;
+                    }
+                    for (const auto id : message.fields[field.field].numbers) {
+                        if (!id) {
+                            continue;
+                        }
+                        auto& counted = seen[field];
+                        counted.count++;
+                        counted.files.insert(file);
+                        counted.first += carried.insert({field.kind, id}).second;
+                    }
+                }
+            }
+        }
+        size_t disagreements = 0;
+        for (auto kind = ReplayState::IdKind::Agent; kind <= ReplayState::IdKind::Skill; kind = static_cast<ReplayState::IdKind>(static_cast<int>(kind) + 1)) {
+            std::string bringers;
+            std::string after;
+            for (const auto& [field, counted] : seen) {
+                if (field.kind != kind) {
+                    continue;
+                }
+                if (counted.first) {
+                    bringers += std::format(" {}.{} ({} of {})", field.message, field.field, counted.first, counted.count);
+                }
+                else {
+                    after += std::format(" {}.{} ({} in {} files)", field.message, field.field, counted.count, counted.files.size());
+                }
+                if ((counted.first > 0) != ReplayState::BringsIdsIn(field)) {
+                    disagreements++;
+                    printf(
+                        "  %s %u.%u: %s in these recordings, %s in the toolbox's rules\n", ReplayState::IdKindName(kind), field.message, field.field, counted.first ? "brings ids in" : "never brings one in",
+                        ReplayState::BringsIdsIn(field) ? "brings ids in" : "does not"
+                    );
+                }
+            }
+            printf(
+                "%s ids%s\n  brought in by (message.field: the times it brought one in, of its uses):%s\n  only after them:%s\n", ReplayState::IdKindName(kind), ReplayState::OrderChecked(kind) ? "" : " (not checked: the game's own data)",
+                bringers.empty() ? " none" : bringers.c_str(), after.empty() ? " none" : after.c_str()
+            );
+        }
+        printf("mined from %zu recordings: the toolbox's rules %s\n", paths.size(), disagreements ? std::format("disagree on {} fields", disagreements).c_str() : "are these");
+        return disagreements ? 1 : 0;
+    }
+
+    ReplayWire::Plan Rebuilt(const ReplayFile::Contents& contents, const ReplayWire::Plan& from, const std::function<void(std::vector<std::vector<uint8_t>>&)>& change)
+    {
+        std::vector<std::vector<uint8_t>> bodies;
+        std::vector<std::pair<ReplayWire::Stage, uint32_t>> places;
+        for (const auto& post : from.posts) {
+            std::string error;
+            for (auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
+                bodies.push_back(std::move(body));
+                places.emplace_back(post.stage, post.time_ms);
+            }
+        }
+        change(bodies);
+        auto mutant = from;
+        mutant.posts.clear();
+        for (size_t i = 0; i < bodies.size(); i++) {
+            const auto& [stage, time_ms] = places[std::min(i, places.size() - 1)];
+            mutant.posts.push_back({stage, time_ms, 1, bodies[i]});
+        }
+        return mutant;
     }
 
     void TestWire(const std::filesystem::path& folder)
@@ -1240,17 +1514,82 @@ namespace {
         if (plan.posts.empty()) {
             return;
         }
-        Check(plan.skeleton_records == 3, "the inventory skeleton is the first inventory's 324, 328 and equipped bag");
-        Check(plan.private_records_dropped > 0, "private records are left out of the stream");
-        Check(plan.controlled_agent == 10 && plan.own_records_streamed > 0, "the controlled character's own character records stay in the stream");
-        Check(ProveFeed(contents, plan, UINT32_MAX, false), "the synthetic world's feed holds its stages in order, each post cut into its messages, and what the client needs");
-        auto without_own = plan;
+        const auto observer = std::ranges::find(plan.changes, ReplayWire::ChangeKind::ObserverByte, &ReplayWire::Change::kind);
+        Check(
+            plan.first_record == 1 && plan.changes.size() == 2 && plan.changes.front().kind == ReplayWire::ChangeKind::LeftOut && plan.changes.front().count == 1 && observer != plan.changes.end() && contents.records[observer->record].MessageId() == 410,
+            "the plan is the recording from its 380 on, the 30 before it left out and 410's observer byte set, nothing else changed"
+        );
+        Check(plan.controlled_agent == 10 && plan.map_type == ReplayWire::game_map_type, "the plan names the recorder's character and a game map");
+        Check(ProveFeed(contents, plan, UINT32_MAX, false, true), "the synthetic world's plan is the recording byte for byte but for its listed changes, its stages in order, what the client needs and the order of real loads");
+        const auto proof = ProveWire(contents, plan, 20261125);
+        Check(proof.error.empty() && proof.records > 0, std::format("the synthetic world's wire round trip is byte for byte ({})", proof.error).c_str());
+
+        const auto guild_first = Rebuilt(contents, plan, [](std::vector<std::vector<uint8_t>>& bodies) {
+            const auto guild = std::ranges::find_if(bodies, [](const std::vector<uint8_t>& body) {
+                return (body[0] | body[1] << 8) == 280;
+            });
+            if (guild != bodies.end()) {
+                std::rotate(bodies.begin(), guild, guild + 1);
+            }
+        });
+        const auto guild_failures = ReplayState::CheckOrder(contents.table, Fed(contents, guild_first));
+        Check(
+            std::ranges::any_of(
+                guild_failures,
+                [](const ReplayState::OrderFailure& failure) {
+                    return failure.field.message == 280 && failure.field.kind == ReplayState::IdKind::Guild;
+                }
+            ) && !ProveFeed(contents, guild_first, UINT32_MAX, false, true),
+            "a plan with its guild message (280) moved first fails the order of real loads"
+        );
+        Check(
+            !ProveVerbatim(
+                 contents, Rebuilt(
+                               contents, plan,
+                               [](std::vector<std::vector<uint8_t>>& bodies) {
+                                   bodies.back().back() ^= 1;
+                               }
+                           )
+            ).empty(),
+            "a plan with one byte changed and not listed is not the recording"
+        );
+        Check(
+            !ProveVerbatim(
+                 contents, Rebuilt(
+                               contents, plan,
+                               [](std::vector<std::vector<uint8_t>>& bodies) {
+                                   bodies.erase(bodies.begin() + static_cast<std::ptrdiff_t>(bodies.size() / 2));
+                               }
+                           )
+            ).empty(),
+            "a plan with one record dropped and not listed is not the recording"
+        );
+
+        const auto join = ReplayWire::MakeJoinPlan(contents, 0);
+        Check(join.error.empty() && join.skeleton_records == 3, "a join plan's inventory skeleton is the first inventory's 324, 328 and equipped bag");
+        Check(join.private_records_dropped > 0, "a join plan leaves private records out of the stream");
+        Check(join.controlled_agent == 10 && join.own_records_streamed > 0, "a join plan keeps the controlled character's own character records in the stream");
+        Check(ProveFeed(contents, join, UINT32_MAX, false, false), "the synthetic world's join plan holds its stages in order, each post cut into its messages, what the client needs and the order of real loads");
+        for (const auto join_ms : {10000u, 30000u, 60000u, UINT32_MAX}) {
+            const auto later = ReplayWire::MakeJoinPlan(contents, join_ms);
+            const auto failures = ReplayState::CheckOrder(contents.table, Fed(contents, later));
+            Check(
+                later.error.empty() && std::ranges::none_of(
+                                           failures,
+                                           [](const ReplayState::OrderFailure& failure) {
+                                               return failure.field.kind == ReplayState::IdKind::Guild;
+                                           }
+                                       ),
+                std::format("a join at {} brings its guilds in before their 280 ({})", JoinTime(join_ms), OrderSummary(failures, JoinMessages(later))).c_str()
+            );
+        }
+        auto without_own = join;
         for (auto& post : without_own.posts) {
             std::string split_error;
             std::vector<uint8_t> kept;
             post.records = 0;
             for (const auto& body : ReplayWire::Split(contents.table, post.bytes, split_error)) {
-                if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && ReplayState::IsCharacterMessageOf(message, plan.controlled_agent)) {
+                if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && ReplayState::IsCharacterMessageOf(message, join.controlled_agent)) {
                     continue;
                 }
                 kept.insert(kept.end(), body.begin(), body.end());
@@ -1258,9 +1597,7 @@ namespace {
             }
             post.bytes = std::move(kept);
         }
-        Check(!ProveFeed(contents, without_own, UINT32_MAX, false), "a plan whose 34 names an agent without its attribute state fails the feed check");
-        const auto proof = ProveWire(contents, 20261125);
-        Check(proof.error.empty() && proof.records > 0, std::format("the synthetic world's wire round trip is byte for byte ({})", proof.error).c_str());
+        Check(!ProveFeed(contents, without_own, UINT32_MAX, false, false), "a plan whose 34 names an agent without its attribute state fails the feed check");
 
         ReplayWire::Rc4 sender;
         sender.Init(key, sizeof(key));
@@ -1335,8 +1672,12 @@ int wmain(const int argc, const wchar_t* argv[])
     if ((argc == 3 || argc == 4) && wcscmp(argv[1], L"--rows") == 0) {
         return Rows(argv[2], argc == 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 0);
     }
+    if (argc >= 3 && wcscmp(argv[1], L"--mine") == 0) {
+        return Mine({argv + 2, argv + argc});
+    }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
-    const auto arguments = command.empty() ? 1 : command == L"--state" ? 2 : command == L"--join" ? 3 : command == L"--check-join" ? 1 : command == L"--keyframes" ? 3 : command == L"--wire" ? 1 : command == L"--feed" ? 2 : 0;
+    const auto single = command == L"--check-join" || command == L"--wire" || command == L"--order";
+    const auto arguments = command.empty() || single ? 1 : command == L"--state" || command == L"--feed" ? 2 : command == L"--join" || command == L"--keyframes" ? 3 : 0;
     if (!arguments || argc != 2 + (command.empty() ? 0 : arguments)) {
         printf(
             "usage: replay_check <recording.gwrec>\n"
@@ -1346,6 +1687,8 @@ int wmain(const int argc, const wchar_t* argv[])
             "       replay_check --keyframes <recording.gwrec> <interval ms> <sample ms>\n"
             "       replay_check --wire <recording.gwrec>\n"
             "       replay_check --feed <recording.gwrec> <ms>\n"
+            "       replay_check --order <recording.gwrec>\n"
+            "       replay_check --mine <recording.gwrec>...\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );
@@ -1373,13 +1716,16 @@ int wmain(const int argc, const wchar_t* argv[])
         return check.failures.empty() ? 0 : 1;
     }
     if (command == L"--wire") {
-        const auto proof = ProveWire(contents, 20261123);
+        const auto proof = ProveWire(contents, ReplayWire::MakePlan(contents), 20261123);
         printf("wire: %zu posts, %zu messages, %zu bytes encrypted post by post, decrypted, cut back into messages and encoded again: %s%s\n", proof.posts, proof.records, proof.bytes,
                proof.error.empty() ? "passed, byte for byte" : "FAILED: ", proof.error.c_str());
         return proof.error.empty() ? 0 : 1;
     }
     if (command == L"--feed") {
-        return ProveFeed(contents, ReplayWire::MakePlan(contents), static_cast<uint32_t>(_wtoi(argv[3])), true) ? 0 : 1;
+        return ProveFeed(contents, ReplayWire::MakePlan(contents), static_cast<uint32_t>(_wtoi(argv[3])), true, true) ? 0 : 1;
+    }
+    if (command == L"--order") {
+        return ProveOrder(contents) ? 0 : 1;
     }
     if (command == L"--keyframes") {
         const auto proof = ProveKeyframes(contents, static_cast<uint32_t>(_wtoi(argv[3])), std::max(1u, static_cast<uint32_t>(_wtoi(argv[4]))), true);

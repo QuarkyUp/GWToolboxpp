@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <ranges>
 #include <utility>
 
 namespace ReplayWire {
@@ -16,9 +17,13 @@ namespace ReplayWire {
             ItemInventoryAddBag = 319,
             ItemInventoryCreate = 324,
             ItemInventoryEquipSetActivate = 328,
+            MissionInstanceLoadHead = 380,
             MissionLoadMap = 406,
+            MissionInstanceInfo = 410,
         };
         constexpr uint32_t equipped_bag_type = 2;
+        constexpr size_t instance_info_map_type = 2;
+        constexpr size_t instance_info_observer = 5;
 
         void Append(std::vector<Post>& posts, const Stage stage, const uint32_t time_ms, const std::vector<uint8_t>& body)
         {
@@ -102,10 +107,80 @@ namespace ReplayWire {
     {
         Plan plan;
         const auto& records = contents.records;
+        const auto find = [&records](const uint16_t id, const size_t from, const size_t to) {
+            for (auto i = from; i < to; i++) {
+                if (records[i].MessageId() == id) {
+                    return i;
+                }
+            }
+            return to;
+        };
+        const auto load = find(MissionLoadMap, 0, records.size());
+        const auto connect = find(AgentConnect, load, records.size());
+        if (connect >= records.size()) {
+            plan.error = "no instance load in the recording (no 406 followed by a 31)";
+            return plan;
+        }
+        if (const auto head = find(MissionInstanceLoadHead, 0, load); head < load && head > 0) {
+            plan.first_record = head;
+            plan.changes.push_back({ChangeKind::LeftOut, 0, head, "they came on the previous map's connection, after its transfer and before this connection's first message (380)"});
+        }
+        plan.end_record = records.size();
+        for (auto i = connect + 1; i < records.size(); i++) {
+            const auto id = records[i].MessageId();
+            if (id == MissionInstanceLoadHead || id == MissionInstanceInfo || id == MissionLoadMap) {
+                plan.end_record = i;
+                plan.changes.push_back({ChangeKind::LeftOut, i, records.size() - i, "a second instance load: the game would load a map it never asked for"});
+                break;
+            }
+        }
+        plan.start_ms = records[plan.first_record].time_ms;
+        plan.entry_ms = records[connect].time_ms;
+        plan.duration_ms = records[plan.end_record - 1].time_ms - plan.entry_ms;
+        bool observer = false;
+        for (auto i = plan.first_record; i < plan.end_record; i++) {
+            ReplayState::Message message;
+            if (!ReplayState::Decode(contents.table, records[i].body, message)) {
+                plan.error = std::format("record {} (message {}) does not decode against the file's table: the game would read the next message's bytes as its fields", i, records[i].MessageId());
+                return plan;
+            }
+            auto body = records[i].body;
+            if (message.id == MissionInstanceInfo && i < load) {
+                observer = true;
+                plan.map_type = message.U(instance_info_map_type);
+                if (message.U(instance_info_observer) != 1) {
+                    message.Set(instance_info_observer, 1);
+                    if (!ReplayState::Encode(contents.table, message, body)) {
+                        plan.error = "410 does not encode with its observer byte set";
+                        return plan;
+                    }
+                    plan.changes.push_back({ChangeKind::ObserverByte, i, 1, "the game enters observer mode and keeps the map it came from to go back to (410's handler)"});
+                }
+            }
+            if (message.id == AgentReporter && !plan.controlled_agent) {
+                plan.controlled_agent = message.U(0);
+            }
+            plan.own_records_streamed += ReplayState::KindOf(message.id) == ReplayState::Kind::Private;
+            const auto stage = i < load ? Stage::BeforeLoad : i < connect ? Stage::Load : records[i].time_ms <= plan.entry_ms ? Stage::Entry : Stage::Stream;
+            Append(plan.posts, stage, stage == Stage::Stream ? records[i].time_ms - plan.entry_ms : 0, body);
+        }
+        if (!observer) {
+            plan.error = "no 410 before the 406";
+        }
+        return plan;
+    }
+
+    Plan MakeJoinPlan(const ReplayFile::Contents& contents, const uint32_t time_ms)
+    {
+        Plan plan;
+        const auto& records = contents.records;
         const auto reporter = std::ranges::find(records, uint16_t{AgentReporter}, &ReplayFile::Record::MessageId);
-        const auto start = std::find_if(reporter, records.end(), [](const ReplayFile::Record& record) {
-            return record.MessageId() == AgentAdvance;
+        auto start = std::find_if(reporter, records.end(), [time_ms](const ReplayFile::Record& record) {
+            return record.MessageId() == AgentAdvance && record.time_ms >= time_ms;
         });
+        if (const auto last = std::ranges::find(records | std::views::reverse, uint16_t{AgentAdvance}, &ReplayFile::Record::MessageId); start == records.end() && last.base() > reporter) {
+            start = std::prev(last.base());
+        }
         if (start == records.end()) {
             plan.error = "no instance entry in the recording (no 34 followed by a 30)";
             return plan;
@@ -119,6 +194,9 @@ namespace ReplayWire {
             return plan;
         }
         plan.start_ms = start->time_ms;
+        plan.entry_ms = plan.start_ms;
+        plan.first_record = static_cast<size_t>(start - records.begin());
+        plan.end_record = records.size();
         plan.duration_ms = records.back().time_ms - plan.start_ms;
         plan.controlled_agent = world.ControlledAgent();
         const auto join = ReplayState::JoinRecords(contents.table, world, plan.start_ms);

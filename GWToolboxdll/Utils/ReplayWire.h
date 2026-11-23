@@ -38,17 +38,37 @@ namespace ReplayWire {
         std::vector<uint8_t> bytes;
     };
 
+    enum class ChangeKind : uint8_t {
+        LeftOut,
+        ObserverByte,
+    };
+
+    struct Change {
+        ChangeKind kind = ChangeKind::LeftOut;
+        size_t record = 0;
+        size_t count = 1;
+        std::string why;
+    };
+
     struct Plan {
         uint32_t start_ms = 0;
+        uint32_t entry_ms = 0;
         uint32_t duration_ms = 0;
+        size_t first_record = 0;
+        size_t end_record = 0;
         size_t skeleton_records = 0;
         size_t private_records_dropped = 0;
         size_t own_records_streamed = 0;
         uint32_t controlled_agent = 0;
+        uint32_t map_type = 0;
+        std::vector<Change> changes;
         std::vector<Post> posts;
         std::string error;
     };
 
+    constexpr uint32_t game_map_type = 1;
+
     Plan MakePlan(const ReplayFile::Contents& contents);
+    Plan MakeJoinPlan(const ReplayFile::Contents& contents, uint32_t time_ms);
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 }

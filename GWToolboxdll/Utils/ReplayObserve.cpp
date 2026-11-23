@@ -58,6 +58,7 @@ namespace ReplayObserve {
                           : !(header.flags & ReplayFile::Complete)             ? "unfinished: still being recorded, or the recording stopped before its end"
                           : !header.record_count                               ? "no messages"
                           : !header.map_id || header.map_id > 0xFFFF           ? std::format("map {} is not a map", header.map_id)
+                          : !header.is_explorable                              ? "an outpost: the observer's party window asserts the observed map is a game map"
                                                                                : std::string();
             if (reason.empty()) {
                 scan.rows.push_back(std::move(row));

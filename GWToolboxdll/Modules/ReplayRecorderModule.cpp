@@ -322,7 +322,8 @@ namespace {
     constexpr uint32_t net_event_data = 8;
     constexpr uint32_t mission_context_offset = 0x44;
     constexpr uint32_t mission_flags_offset = 0x190;
-    constexpr uint32_t mission_game_type_offset = 0x194;
+    constexpr uint32_t mission_join_value_offset = 0x194;
+    constexpr uint32_t mission_join_map_offset = 0x198;
     constexpr uint32_t instance_acknowledged = 0xC0;
     constexpr uint32_t msgconn_mode_offset = 0x60;
     constexpr uint32_t msgconn_receive_cipher_offset = 0x7C;
@@ -604,6 +605,9 @@ namespace {
         std::string error;
         auto made = ReplayFile::Read(row.path, contents, error) ? ReplayWire::MakePlan(contents) : ReplayWire::Plan{.error = error};
         const auto name = TextUtils::WStringToString(row.path.filename().wstring());
+        if (made.error.empty() && made.map_type != ReplayWire::game_map_type) {
+            made.error = std::format("its map type is {}, not a game map's: the observer's party window asserts the observed map is one", made.map_type);
+        }
         if (!made.error.empty()) {
             playback_status = std::format("{} cannot be played: {}", name, made.error);
             Log::Error("Replay Recorder: %s", playback_status.c_str());
@@ -619,17 +623,28 @@ namespace {
         transfer = {};
         const uint8_t loopback[] = {address_family_ipv4, 0, closed_port >> 8, closed_port & 0xFF, 127, 0, 0, 1};
         memcpy(transfer.address, loopback, sizeof(loopback));
-        // The game type reaches only the connect data our connect hook never sends, and the client's reconnect record.
+        // MissionClient::GameJoin keeps the 422's +0x1c at +0x194; it reaches only the connect data our hook never sends and the reconnect record.
         const auto mission = *reinterpret_cast<uint8_t**>(GameProps_Func() + mission_context_offset);
-        transfer.game_type = *reinterpret_cast<uint32_t*>(mission + mission_game_type_offset);
+        transfer.game_type = *reinterpret_cast<uint32_t*>(mission + mission_join_value_offset);
+        const auto joined_map = *reinterpret_cast<uint32_t*>(mission + mission_join_map_offset);
         transfer.territory = contents.header.region;
         transfer.map_id = contents.header.map_id;
         transfer.map_type = contents.header.is_explorable;
         transfer.key = RandomBytes()();
         transfer_due = true;
         playback_status = std::format("Playing {}", name);
-        LogPlayback(std::format("{}: {} posts from {} ms of the recording, {} ms long, controlled agent {}, {} of its own records in the stream; transfer to map {}, game type {}", playback_status,
-                                plan.posts.size(), plan.start_ms, plan.duration_ms, plan.controlled_agent, plan.own_records_streamed, transfer.map_id, transfer.game_type));
+        std::string changes;
+        for (const auto& change : plan.changes) {
+            changes += change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("; left out: {} records from record {} ({})", change.count, change.record, change.why)
+                                                                      : std::format("; record {}: 410's observer byte set ({})", change.record, change.why);
+        }
+        LogPlayback(
+            std::format(
+                "{}: {} posts, the recording as recorded from record {} ({} ms), its stream timed from its 31 at {} ms, {} ms long, controlled agent {}, {} of the recorder's own records{}", playback_status, plan.posts.size(), plan.first_record,
+                plan.start_ms, plan.entry_ms, plan.duration_ms, plan.controlled_agent, plan.own_records_streamed, changes
+            )
+        );
+        LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, joined_map, static_cast<uint32_t>(GW::Map::GetMapID())));
         EnterStage(Playback::Transfer);
     }
 
