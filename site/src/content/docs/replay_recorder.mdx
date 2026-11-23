@@ -42,7 +42,8 @@ While a recording plays, the settings panel shows its time, **Pause** and **Resu
 
 How it works, and what reaches the server:
 - The toolbox gives the game a transfer to a game server of its own making (the loopback address and a closed port), then takes over the connection the game opens for it: the game gets a connection with no network socket, the kind its own playback code runs on, and everything the game sends on it goes nowhere. The game server you were on gets the game's usual goodbye before a transfer.
-- The recording is fed into that connection as the server's own bytes: first the start of the instance, rebuilt from the recording at its first moment (see [Restoring any moment](#restoring-any-moment)) and an empty inventory for the observer, each part when the game asks for the next (after it acknowledges the instance, then after it has loaded the map), then the recording itself at its recorded times. The recorder's own inventory, skills and other private messages are left out.
+- The recording is fed into that connection as the server's own bytes: first the start of the instance, rebuilt from the recording at its first moment (see [Restoring any moment](#restoring-any-moment)) and an empty inventory for the observer, each part when the game asks for the next (after it acknowledges the instance, then after it has loaded the map), then the recording itself at its recorded times. The recorder's inventory and other private messages are left out, except what the game needs for the character it gives the viewer: its attribute state, attributes, professions and skill bar (see [the join](#restoring-any-moment)).
+- Each step of a playback (the transfer, the connection ready, each part of the start fed, the end) is written to the toolbox's log file as it happens.
 - Nothing of the replay is sent to ArenaNet's servers. Your account's login connection stays as it is; stop observing is the only message it gets, the same one as after any observed match.
 - Each game function the toolbox uses is found by its code when the setting is turned on. If one is missing (a game update), nothing is hooked, playback stays off and the panel says which one; the rows are still listed. With the setting off, nothing of playback is hooked.
 
@@ -67,9 +68,9 @@ replay_check --self-test <folder>
 - `--check-join` checks a recording against what the client asserts when it enters an instance (below).
 - `--keyframes` proves a recording's joins. For each keyframe, the state rebuilt from its join and the records after it must equal the whole stream's state at every sample time. Each keyframe's join must pass `--check-join`. A seek between two keyframes must give the stream's state. Every record must decode against the file's table and encode back to its bytes.
 - `--wire` checks a recording's playback on the wire: the plan the toolbox feeds (the start rebuilt, then the recording) is encrypted post by post with an RC4 state, decrypted, cut back into messages by the file's table and encoded again, and must come back byte for byte, its stream equal to the recording's records.
-- `--feed` prints that plan up to a time: each post in order with when it is sent (after the connection is ready, after the game acknowledges the instance, after the map is loaded, or its time in the recording), its message count, size and first message ids (no names), and checks the stages' order, the 410's observer byte and that every post cuts into its messages.
+- `--feed` prints that plan up to a time: each post in order with when it is sent (after the connection is ready, after the game acknowledges the instance, after the map is loaded, or its time in the recording), its message count, size and first message ids (no names), and checks the stages' order, the 410's observer byte, that every post cuts into its messages and, over the whole plan, what the game asserts for characters (as `--check-join`).
 - `--rows` lists the rows the Observe window would get from a folder (key, map, type, category, age, length; no names) and the files left out with their reasons. Each row must pack and read back by the 414 layout of the newest recording (or the newest of the given client build), its type must be one the window has a category for, and its key must be in the toolbox's range and unique.
-- `--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written. It also writes a synthetic instance (players, NPCs, a gadget, an item on the ground, moves, effects, damage, deaths and returns) and runs the `--keyframes` proof on it, with keyframes every 10 s and every second, then the `--feed` and `--wire` proofs (the RC4 step checked against the textbook cipher).
+- `--self-test` writes synthetic recordings into the folder with the module's own writer, reads them back and checks that every record, the header and the message table come back exactly as written. It also writes a synthetic instance (players, NPCs, a gadget, an item on the ground, moves, effects, damage, deaths and returns, the recorder's character messages and a hero's) and runs the `--keyframes` proof on it, with keyframes every 10 s and every second, then the `--feed` and `--wire` proofs (the RC4 step checked against the textbook cipher). A plan with the recorder's character messages taken out must fail `--feed`, and a recording with no 55 for the recorder's character must give a join without its 34, 89 and 32.
 
 ## Restoring any moment
 
@@ -89,14 +90,14 @@ A replay that starts in the middle of a recording, or seeks, cannot feed the cli
 - Item details (353, 350, 346, 314, 309), sent again only for the items ever shown (worn, 110 and 111; held, 109; on the ground; in a weapon set, 327) and for the items never put in the recorder's inventory (318).
 
 **The join** at a time is, in order:
-1. 380, 390, 381, and 410 with its observer byte set; 409, 407 and 408; 428; the quests; 406; 430; 242.
+1. 380, 390, 381, and 410 with its observer byte set; 409, 407 and 408; 428; the quests; 406; 430; 242; then the recorder's character, as the entry sends it: its attribute state (55, with the later 56 and 57 in it), professions (183, 182), skill bar (218, marked to be made), attributes (58) and the changes since (59).
 2. 31 with the clock; the details of those items.
 3. The recorder's own row (89) and agent, then every agent that is not a player's. Each agent comes as the entry sends it: its definitions, its rows, 32, its items, its equipment and state, its health and energy, its effects with their remaining time.
 4. 34 for the recorder's character, which the viewer controls.
 5. The other players' rows and agents; the walks under way and the upkeeps.
 6. The players' flags, the rest of the instance and the party; 186 and 398; 366 and 404.
 
-Private messages are never in a join: the viewer's client would show the recorder's inventory, skills and attributes as its own.
+Private messages are not in a join, but for the recorder's character above. The game keeps an attribute state for each character, made only by 55, and asserts it exists when 34 makes that character the one it controls (its skill list reads every attribute of the controlled character and of every active hero) and when 56 to 59 or 183 come. Without it the viewer's game stops on the join. If a recording holds no 55 for the recorder's character, the join leaves out its 34, 89 and 32: the viewer then has no character of its own. The heroes' private messages stay out: the game reads their attribute states only for heroes made active (114, which needs the hero's 115), and neither is sent. After a join, the stream carries the recorder's character messages (55 to 59, 182, 183, 218) and no other private message.
 
 **Keyframes**: the state is kept every N seconds of the recording (10 by default), in memory, at the first 30 after each multiple; the file format does not change. A seek to a time is the nearest keyframe's join, then the records from that keyframe to the time.
 
@@ -104,7 +105,8 @@ Private messages are never in a join: the viewer's client would show the recorde
 - 410 before 408, and 409 before 407.
 - No agent message (32 to 47) before 31.
 - 242 before 34, and the reporter's agent created as a player first (89, then 32) with 242's team token.
-- No message naming an agent that is not alive, except the rows the entry sends just before an agent's own 32.
+- What the game asserts for characters: one 55 an agent; 56 to 59 and 183 after it; a hero's 115 before its 114; at 34, an attribute state for the agent and for every active hero.
+- No message naming an agent that is not alive, except the rows the entry sends just before an agent's own 32, and the recorder's character messages before 31.
 - Every record decodes against the file's table and encodes back to its bytes.
 
 After the join, the stream's own character-client messages about agents not created are counted rather than failed, because the game server sends them. So are player rows naming an agent out of the world: the server sends those too, and the client keeps them.
@@ -114,10 +116,9 @@ After the join, the stream's own character-client messages about agents not crea
 Every server message id is one of these (`replay_check <recording>` prints each id's kind):
 - **State**, what the join restores (above): 30-34, 36-47, 53, 60, 62-66, 68, 72, 73, 76, 77, 80-84, 86, 87, 89, 90, 107, 109-112, 141, 154-156, 159, 162, 163, 166, 170, 174, 176, 177, 186, 240-242, 263, 270, 273, 277, 280, 284, 288, 289, 302, 309, 314, 346, 350, 353, 366, 380, 381, 390, 398, 404, 406-410, 428, 430, 435, 446, 447, 451, 460, 467, 468, 474. Some kinds within these are one-off and dropped: 159's other kinds (attacks, casts, animations), 162's kinds 52 and 63, 163's kinds 52 and 61.
 - **Transient**, safe to drop at a join: 12 and 13 (ping), 35, 52, 61, 69 and 71 (the client only posts them to its interface), 70 (a screen shake), 93, 94, 96 and 97 (chat), 160, 161, 164, 165 and 226-228 (attacks, casts, projectiles, speech), 345 (a pick-up).
-- **Private**, the recorder's own and never in a join: 15, 48-51, 54-59, 75, 78, 92 (acted on only for the controlled character), 101, 115, 116, 124-126, 128, 129, 131, 132, 138-140, 181-183, 195-197, 202-204, 218, 219, 221, 224, 229, 230, 233-239, 243-246, 313, 318-321, 324, 327, 328, 331, 333, 335, 337 and 479-481. These are the inventory, gold, skill bars, attributes, titles, account, heroes' builds, explored map, dialogs, windows and party search.
-- **Unknown**, dropped from a join: 74, 114, 153, 167, 207 and 360, seen in recordings but not understood. Each handler calls one function that was not read:
+- **Private**, the recorder's own and not in a join but for the recorder's character (above): 15, 48-51, 54-59, 75, 78, 92 (acted on only for the controlled character), 101, 114 (a hero made active), 115, 116, 124-126, 128, 129, 131, 132, 138-140, 181-183, 195-197, 202-204, 218, 219, 221, 224, 229, 230, 233-239, 243-246, 313, 318-321, 324, 327, 328, 331, 333, 335, 337 and 479-481. These are the inventory, gold, skill bars, attributes, titles, account, heroes' builds, explored map, dialogs, windows and party search.
+- **Unknown**, dropped from a join: 74, 153, 167, 207 and 360, seen in recordings but not understood. Each handler calls one function that was not read:
   - 74 and 153 call 0x0059b2e0, then post a frame message.
-  - 114 calls 0x0081c100. It comes with the heroes' private messages before 31.
   - 167 calls one of two functions, by the agent's kind. It mostly names agents that are not created.
   - 207 calls 0x00820040.
   - 360 calls a function of the agent view, by the agent's model kind.
