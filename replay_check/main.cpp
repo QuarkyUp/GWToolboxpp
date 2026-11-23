@@ -1098,11 +1098,6 @@ namespace {
         return summary.empty() ? "none" : summary;
     }
 
-    std::string ChangeText(const ReplayWire::Change& change)
-    {
-        return change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("records {} to {} left out: {}", change.record, change.record + change.count - 1, change.why) : std::format("record {}: 410's observer byte set: {}", change.record, change.why);
-    }
-
     std::vector<std::string> ProveVerbatim(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan)
     {
         std::vector<std::string> failures;
@@ -1280,7 +1275,9 @@ namespace {
             );
             printf("changes from the recorded bytes: %zu\n", plan.changes.size());
             for (const auto& change : plan.changes) {
-                printf("  %s\n", ChangeText(change).c_str());
+                const auto text = change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("records {} to {} left out: {}", change.record, change.record + change.count - 1, change.why)
+                                                                                 : std::format("record {}: 410's observer byte set: {}", change.record, change.why);
+                printf("  %s\n", text.c_str());
             }
             printf("\n");
         }
