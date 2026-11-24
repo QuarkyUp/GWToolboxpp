@@ -100,6 +100,7 @@ namespace ReplayFile {
     constexpr wchar_t own_name_placeholder[] = L"Recorder";
     constexpr wchar_t literal_start = 0x107;
     constexpr wchar_t literal_end = 0x1;
+    constexpr size_t guild_tag_length = 5;
 
     bool IsPlainText(std::wstring_view text);
     bool IsPlaceholder(std::wstring_view text);

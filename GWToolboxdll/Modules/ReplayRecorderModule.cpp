@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include <GWCA/Context/CharContext.h>
+#include <GWCA/Context/GuildContext.h>
 #include <GWCA/Context/ItemContext.h>
 #include <GWCA/Context/PreGameContext.h>
 #include <GWCA/Context/WorldContext.h>
@@ -8,6 +9,7 @@
 #include <GWCA/Constants/UIMessages.h>
 
 #include <GWCA/GameEntities/Agent.h>
+#include <GWCA/GameEntities/Guild.h>
 #include <GWCA/GameEntities/Hero.h>
 #include <GWCA/GameEntities/Item.h>
 #include <GWCA/GameEntities/Map.h>
@@ -17,6 +19,7 @@
 #include <GWCA/GameEntities/Player.h>
 #include <GWCA/GameEntities/Quest.h>
 #include <GWCA/GameEntities/Skill.h>
+#include <GWCA/GameEntities/Title.h>
 
 #include <GWCA/Managers/AgentMgr.h>
 #include <GWCA/Managers/EffectMgr.h>
@@ -80,6 +83,7 @@ namespace {
         CharHeroDataAdd = 115,
         CharToClient153 = 153,
         CharAgentUpdateNpcName = 155,
+        CharAgentMorale = 156,
         CharNotifyDword = 159,
         CharAgentAttrUpdateFloat = 162,
         CharAgentUpdateProfession = 166,
@@ -97,7 +101,12 @@ namespace {
         CharPlayerAttrMaxImperial = 237,
         CharAgentInitialEffects = 240,
         CharPlayerTeam = 242,
+        CharTitleRankData = 243,
         CharTitleRankDisplay = 244,
+        CharTitleTrackInfo = 246,
+        GuildAssign = 280,
+        GuildAllianceInfo = 288,
+        GuildGeneralInfo = 289,
         ItemCustomize = 314,
         ItemInventoryCreate = 324,
         ItemProfession = 346,
@@ -635,6 +644,83 @@ namespace {
             apply(make(CharUpdateAgentPartysize, {player.player_number, player.party_size}));
             apply(make(CharPlayerLink, {player.player_number, player.party_leader_player_number}));
             apply(make(CharTitleRankDisplay, {player.player_number, player.active_title_tier}));
+        }
+        constexpr size_t morale_rows_at_most = 64;
+        constexpr uint32_t lowest_morale = 40;
+        constexpr uint32_t highest_morale = 110;
+        size_t morale_rows = 0;
+        for (const auto& morale : world_context->morale_table) {
+            if (++morale_rows > morale_rows_at_most) {
+                break;
+            }
+            if (is_character(morale.agent_id) && morale.morale >= lowest_morale && morale.morale <= highest_morale) {
+                apply(make(CharAgentMorale, {morale.agent_id, morale.morale}));
+            }
+        }
+        for (uint32_t index = 0; index < world_context->titles.size(); index++) {
+            const auto& title = world_context->titles[index];
+            auto track = make(
+                CharTitleTrackInfo,
+                {index, title.props, title.current_points, title.current_title_tier_index, title.points_needed_current_rank, title.h0010, title.next_title_tier_index, title.points_needed_next_rank, title.max_title_rank, title.max_title_tier_index}
+            );
+            if (track.fields.size() > 10 && title.points_desc) {
+                track.fields[10].text = title.points_desc;
+            }
+            apply(track);
+        }
+        for (uint32_t index = 0; index < world_context->title_tiers.size(); index++) {
+            const auto& tier = world_context->title_tiers[index];
+            auto rank = make(CharTitleRankData, {index, tier.props, tier.tier_number});
+            if (rank.fields.size() > 3 && tier.tier_name_enc) {
+                rank.fields[3].text = tier.tier_name_enc;
+            }
+            apply(rank);
+        }
+        if (const auto guild_context = GW::GetGuildContext()) {
+            const auto set_key = [](Message& message, const GW::GHKey& key) {
+                for (size_t i = 0; i < sizeof(key); i++) {
+                    message.Set(1, reinterpret_cast<const uint8_t*>(&key)[i], i);
+                }
+            };
+            for (const auto guild : guild_context->guilds) {
+                if (!guild) {
+                    continue;
+                }
+                const auto own = guild->index == guild_context->player_guild_index;
+                auto info = ReplayState::Blank(message_table, own ? GuildGeneralInfo : GuildAllianceInfo);
+                if (info.fields.size() < (own ? 19u : 15u)) {
+                    continue;
+                }
+                // 288 and 289 keep their last field as bits 4 and 8 of the entry's +0x8c, and 289 its sixth at +0xac past GWCA's Guild (k09).
+                const auto entry = reinterpret_cast<const uint8_t*>(guild);
+                const auto entry_flags = *reinterpret_cast<const uint32_t*>(entry + 0x8C);
+                const auto& cape = guild->cape;
+                std::vector<uint32_t> values = {guild->features};
+                if (own) {
+                    values.push_back(*reinterpret_cast<const uint32_t*>(entry + 0xAC));
+                }
+                values.insert(values.end(), {cape.cape_bg_color, cape.cape_detail_color, cape.cape_emblem_color, cape.cape_shape, cape.cape_detail, cape.cape_emblem, cape.cape_trim, guild->faction, guild->faction_point});
+                if (own) {
+                    values.insert(values.end(), {guild->qualifier_point, guild->rating, guild->rank});
+                }
+                values.push_back((entry_flags & 4 ? 1u : 0u) | (entry_flags & 8 ? 2u : 0u));
+                info.Set(0, guild->index);
+                set_key(info, guild->key);
+                info.fields[2].text.assign(guild->name, wcsnlen(guild->name, std::size(guild->name)));
+                info.fields[3].text.assign(guild->tag, wcsnlen(guild->tag, ReplayFile::guild_tag_length));
+                for (size_t i = 0; i < values.size(); i++) {
+                    info.Set(4 + i, values[i]);
+                }
+                apply(info);
+            }
+            if (guild_context->player_guild_index) {
+                auto assign = make(GuildAssign, {guild_context->player_guild_index});
+                if (assign.fields.size() > 2) {
+                    set_key(assign, guild_context->player_gh_key);
+                    assign.Set(2, guild_context->player_guild_rank);
+                    apply(assign);
+                }
+            }
         }
         if (const auto party_effects = GW::Effects::GetPartyEffectsArray()) {
             for (const auto& effects : *party_effects) {
