@@ -55,6 +55,16 @@ namespace ReplayState {
     std::vector<Message> ItemReport(const ReplayFile::MessageTable& table, const ClientItem& item);
 
     std::string FieldAssert(const Message& message);
+
+    class ClientAgents {
+    public:
+        std::string Breaks(const Message& message);
+
+    private:
+        std::set<uint32_t> created;
+        std::set<uint32_t> attack_intervals;
+    };
+
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
     enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };

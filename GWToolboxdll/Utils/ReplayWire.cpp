@@ -116,8 +116,13 @@ namespace ReplayWire {
             plan.error = "the keyframe has no 406 followed by a 31";
             return plan;
         }
+        ReplayState::ClientAgents agents;
         for (size_t i = 0; i < messages.size(); i++) {
-            if (const auto broken = ReplayState::FieldAssert(messages[i]); !broken.empty()) {
+            auto broken = ReplayState::FieldAssert(messages[i]);
+            if (broken.empty()) {
+                broken = agents.Breaks(messages[i]);
+            }
+            if (!broken.empty()) {
                 plan.error = std::format("the keyframe's message {} (id {}) breaks an assert of the game's: {}", i, messages[i].id, broken);
                 return plan;
             }
@@ -214,6 +219,10 @@ namespace ReplayWire {
                 }
                 left_out->count++;
                 continue;
+            }
+            if (const auto broken = agents.Breaks(message); !broken.empty()) {
+                plan.error = std::format("record {} (message {}) breaks an assert of the game's: {}", i, message.id, broken);
+                return plan;
             }
             flush();
             order.Bring(contents.table, message);

@@ -77,6 +77,7 @@ namespace ReplayState {
             CharAgentUpdateNpcName = 155,
             CharAgentMorale = 156,
             CharNotifyDword = 159,
+            CharAgentAttrUpdateIntTarget = 160,
             CharAgentAttrUpdateFloat = 162,
             CharAgentAttrUpdateFloatTarget = 163,
             CharAgentUpdateProfession = 166,
@@ -102,6 +103,7 @@ namespace ReplayState {
             CharPlayerTeam = 242,
             CharTitleRankData = 243,
             CharTitleRankDisplay = 244,
+            CharTitleUpdate = 245,
             CharTitleTrackInfo = 246,
             GadgetClassDefine = 263,
             PropAnimate = 270,
@@ -167,6 +169,8 @@ namespace ReplayState {
 
         enum Notice : uint32_t {
             CharacterNotice0 = 0,
+            AttackStarted = 4,
+            AttackSkillActivated = 50,
             CharacterNotice14 = 14,
             CharacterNotice15 = 15,
             AuraAdded = 6,
@@ -211,6 +215,7 @@ namespace ReplayState {
         constexpr uint32_t item_code_terminator = 0xC0000000;
         constexpr uint32_t no_formula = 0x5E5;
         constexpr uint32_t any_profession = 11;
+        constexpr size_t title_points_field = 2;
         constexpr IdField named_id_fields[] = {
             {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},      {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
             {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},     {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
@@ -906,6 +911,11 @@ namespace ReplayState {
                     return "f4, the position, is AGENT_INVALID_POSITION (AgMsg.cpp:252)";
                 }
                 return message.F(create_team_radius) > message.F(create_radius) ? "f12, the team radius, is past f10, the bounding radius (AgAgent.cpp:156)" : "";
+            case CharAttackInterval:
+                if (message.F(1) == 0.f) {
+                    return "f1, the attack interval, is 0: CCharAgent::SetAttackInterval asserts base (AvChar.cpp:7207)";
+                }
+                return message.F(2) == 0.f ? "f2, the attack modifier, is 0: CCharAgent::SetAttackInterval asserts modifier (AvChar.cpp:7208)" : "";
             case CharQuestGeneralInfo:
                 return message.U(1) & quest_description_filled ? "f1, the quest's state, holds the bit the client sets once it has the description (ChCliApi.cpp:702)" : "";
             case CharNpcModel:
@@ -931,13 +941,47 @@ namespace ReplayState {
         }
     }
 
+    std::string ClientAgents::Breaks(const Message& message)
+    {
+        const auto agent_id = message.U(0);
+        switch (message.id) {
+            case AgentCreate:
+                attack_intervals.erase(agent_id);
+                return created.insert(agent_id).second ? "" : std::format("agent {} created again before its 33: the client asserts !array[agent] (AgAgent.cpp:162)", agent_id);
+            case AgentDestroy:
+                created.erase(agent_id);
+                attack_intervals.erase(agent_id);
+                return "";
+            case CharAttackInterval:
+                if (!created.contains(agent_id)) {
+                    return std::format("agent {} has no 32 before its attack interval: AvCharSetAttackInterval asserts its agent view (AvApi.cpp:750)", agent_id);
+                }
+                attack_intervals.insert(agent_id);
+                return "";
+            case CharAgentAttrUpdateIntTarget: {
+                const auto kind = message.U(0);
+                const auto attacker = message.U(1);
+                if (!created.contains(attacker) || attack_intervals.contains(attacker)) {
+                    return "";
+                }
+                // Only 53 sets an agent view's attack interval: CCharAgent's constructor leaves it 0.
+                if (kind == AttackStarted) {
+                    return std::format("agent {} starts an attack with no attack interval (53) since its 32: ProcessActionAttackWarmup asserts m_attackInterval (AvChar.cpp:4791)", attacker);
+                }
+                return kind == AttackSkillActivated ? std::format("agent {} starts an attack skill with no attack interval (53) since its 32: its swing's length is that interval", attacker) : "";
+            }
+            default:
+                return "";
+        }
+    }
+
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages)
     {
         std::vector<std::string> failures;
         std::set<uint32_t> attribute_states;
         std::set<uint32_t> hero_data;
         std::set<uint32_t> active_heroes;
-        std::set<uint32_t> created_agents;
+        ClientAgents agents;
         std::set<uint32_t> inventories;
         std::set<uint32_t> team_rows;
         std::optional<uint32_t> party_building;
@@ -951,13 +995,10 @@ namespace ReplayState {
             if (const auto broken = FieldAssert(message); !broken.empty()) {
                 fail(i, message.id, broken);
             }
-            if (message.id == AgentCreate && !created_agents.insert(agent_id).second) {
-                fail(i, message.id, std::format("agent {} created again before its 33: the client asserts !array[agent] (AgAgent.cpp:162)", agent_id));
+            if (const auto broken = agents.Breaks(message); !broken.empty()) {
+                fail(i, message.id, broken);
             }
-            else if (message.id == AgentDestroy) {
-                created_agents.erase(agent_id);
-            }
-            else if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
+            if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
                 fail(i, message.id, "a second account name: the client asserts !context->acctNameData (ChCliApi.cpp:385)");
             }
             else if (message.id == ItemInventoryCreate && !inventories.insert(agent_id).second) {
@@ -1219,6 +1260,11 @@ namespace ReplayState {
             case CharMapInit:
                 if (!map_init.empty()) {
                     map_init.push_back(message);
+                }
+                return;
+            case CharTitleUpdate:
+                if (const auto found = instance.find({CharTitleTrackInfo, message.U(0)}); found != instance.end()) {
+                    found->second.Set(title_points_field, message.U(1));
                 }
                 return;
             case ItemCount:

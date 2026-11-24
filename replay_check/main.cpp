@@ -297,6 +297,7 @@ namespace {
         {44, {0x404, 0x12, 0x204}},
         {46, {0x404, 0x404, 0x404}},
         {47, {0x404, 0x404}},
+        {53, {0x10, 0x404, 0x404}},
         {55, {0x10, 0x104, 0x104}},
         {56, {0x10, 0x104}},
         {57, {0x10, 0x104}},
@@ -318,6 +319,7 @@ namespace {
         {154, {0x10, 0x404}},
         {155, {0x10, 0x2017}},
         {159, {0x404, 0x10, 0x404}},
+        {160, {0x404, 0x10, 0x10, 0x404}},
         {162, {0x404, 0x10, 0x404}},
         {163, {0x404, 0x10, 0x10, 0x404}},
         {170, {0x10, 0x404, 0x404}},
@@ -489,9 +491,17 @@ namespace {
         uint32_t next_effect = 1000;
         std::vector<std::pair<uint32_t, uint32_t>> effects;
         std::vector<std::pair<uint32_t, uint32_t>> upkeeps;
+        constexpr uint32_t fight_start = 50;
+        constexpr uint32_t attack_every = 7;
         for (uint32_t tick = 0; tick < 600; tick++) {
             write.time_ms += 100;
             write(30, {N(100)});
+            if (tick == fight_start) {
+                write(53, {N(recorder), N(std::bit_cast<uint32_t>(1.33f)), N(std::bit_cast<uint32_t>(1.f))});
+            }
+            if (tick > fight_start && tick % attack_every == 0 && !others.empty()) {
+                write(160, {N(tick % 3 ? 4 : 50), N(recorder), N(others[tick % others.size()]), N(0)});
+            }
             const auto events = random() % 6;
             for (uint32_t e = 0; e < events && !others.empty(); e++) {
                 const auto agent = random() % 4 == 0 ? recorder : others[random() % others.size()];
@@ -785,6 +795,36 @@ namespace {
         return starts;
     }
 
+    std::vector<std::pair<size_t, std::string>> StreamNeeds(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe)
+    {
+        constexpr uint16_t load_ids[] = {380, 406, 410};
+        std::vector<std::pair<size_t, std::string>> failures;
+        ReplayState::Order order;
+        ReplayState::ClientAgents agents;
+        for (const auto& message : Decoded(contents.table, keyframe.records)) {
+            order.Bring(contents.table, message);
+            agents.Breaks(message);
+        }
+        const auto chapter = static_cast<size_t>(std::ranges::upper_bound(contents.chapters, keyframe.record_index, {}, &ReplayFile::Chapter::first_record) - contents.chapters.begin() - 1);
+        for (auto i = keyframe.record_index; i < contents.ChapterEnd(chapter) && !std::ranges::contains(load_ids, contents.records[i].MessageId()); i++) {
+            ReplayState::Message message;
+            if (!ReplayState::Decode(contents.table, contents.records[i].body, message)) {
+                continue;
+            }
+            // The plan leaves out a record naming an id the start has not brought in, but brings an item's details before it.
+            if (std::ranges::any_of(order.Unbrought(contents.table, message), [](const std::pair<ReplayState::IdField, uint32_t>& field) {
+                    return field.first.kind != ReplayState::IdKind::Item;
+                })) {
+                continue;
+            }
+            order.Bring(contents.table, message);
+            if (const auto broken = agents.Breaks(message); !broken.empty()) {
+                failures.emplace_back(i, std::format("(message {}): {}", message.id, broken));
+            }
+        }
+        return failures;
+    }
+
     struct Leaks {
         size_t bag_content = 0;
         size_t unshown_items = 0;
@@ -950,7 +990,6 @@ namespace {
         {42, "a move in progress: the snapshot writes the agent where it stands; it waits there until its next move"},
         {43, "a move's pace: not read; its next move gives it again"},
         {46, "a rotation in progress: the 32 carries the agent's facing now"},
-        {53, "an agent's attack pace: not read; its attacks play at their default pace until the stream's next 53"},
         {55, "the attribute points: not in GWCA; the attribute window, which an observer does not have (5c)"},
         {59, "an attribute changed after the load: the 58 written from GWCA holds its level"},
         {60, "a player's row flags: not read; the party window's, which observers replace with ObservedPartiesHud (5c)"},
@@ -988,9 +1027,11 @@ namespace {
         {284, "not read: no field, its purpose unknown"},
         {302, "not read: a guild value of unknown purpose"},
         {314, {"the item's customizer through the names settings: memory's text is the recorder's where the stream's 314 names another, a placeholder either way; the item's description, which observers have no window for", {1}}},
+        {346, {"an item's profession, written with its details: missing with its 353 (an item no agent wears now)", {}}},
         {353, {"an item no agent wears now (a hero's other weapon set) is not written, the plan bringing its details from the stream when a record shows it again; an item described again (354) is written as a 353", {}}},
         {354, {"an item described again after the load (354): the snapshot writes the client's details as a 353", {}}},
-        {406, {"the spawn and facing: the controlled agent's place and facing now; the server's time: the recorder's clock as a FILETIME (k02)", {1, 3, 5}}},
+        {360, {"a drop's fall from the agent it came from (360's handler hands both agents to the agent view's drop, f09): a keyframe's ground item lies where it fell", {}}},
+        {406, {"the spawn, its plane and facing: the controlled agent's place and facing now; the server's time: the recorder's clock as a FILETIME (k02)", {1, 2, 3, 5}}},
         {407, "the manifest's chunks: absent from 12 of 18 loads at hand, which loaded (session 7)"},
         {408, "the manifest's hash: 0, as in gwlab's loads, which loaded (session 7)"},
         {409, "the manifest's phases: written as gwlab's loads have them, which loaded (session 7)"},
@@ -1122,8 +1163,41 @@ namespace {
                     message.Set(1, message.U(1) & 0x7FFFFFFF);
                 }
             }
+            // Memory holds an attribute's level after its 59s, where the model keeps the 58 and each 59 apart.
+            const auto fold_attribute_updates = [](std::vector<ReplayState::Message>& messages) {
+                std::map<uint32_t, std::vector<ReplayState::Message>> updates;
+                for (const auto& message : messages) {
+                    if (message.id == 59) {
+                        updates[message.U(0)].push_back(message);
+                    }
+                }
+                for (auto& message : messages) {
+                    if (message.id != 58 || message.fields.size() < 2 || !updates.contains(message.U(0))) {
+                        continue;
+                    }
+                    auto& words = message.fields[1].numbers;
+                    const auto count = words.size() / 3;
+                    std::map<uint32_t, std::pair<uint32_t, uint32_t>> levels;
+                    for (size_t i = 0; i < count; i++) {
+                        levels[words[i]] = {words[count + i], words[2 * count + i]};
+                    }
+                    for (const auto& update : updates[message.U(0)]) {
+                        levels[update.U(1)] = {update.U(2), update.U(3)};
+                    }
+                    std::erase_if(levels, [](const auto& level) {
+                        return !level.second.second;
+                    });
+                    words.clear();
+                    std::ranges::copy(levels | std::views::keys, std::back_inserter(words));
+                    std::ranges::transform(levels | std::views::values, std::back_inserter(words), &std::pair<uint32_t, uint32_t>::first);
+                    std::ranges::transform(levels | std::views::values, std::back_inserter(words), &std::pair<uint32_t, uint32_t>::second);
+                }
+            };
+            auto snapshot = Decoded(contents.table, keyframe.records);
+            fold_attribute_updates(model);
+            fold_attribute_updates(snapshot);
             printf("\nkeyframe %zu (%s, at %u ms): the snapshot from memory against the model of the stream up to it (records %zu to %zu)\n", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms, load->head, keyframe.record_index);
-            passed &= PrintComparison(Compare(model, Decoded(contents.table, keyframe.records)), keyframe_differences);
+            passed &= PrintComparison(Compare(model, snapshot), keyframe_differences);
         }
         std::map<std::string, size_t> broken;
         for (size_t k = 0; k < contents.keyframes.size(); k++) {
@@ -1136,13 +1210,20 @@ namespace {
             for (const auto& failure : ReplayState::CheckClientNeeds(Decoded(contents.table, records))) {
                 broken[std::format("keyframe {}: {}", k + 1, failure.substr(failure.find('(')))]++;
             }
+            std::map<std::string, std::pair<size_t, size_t>> unset;
+            for (const auto& [record, failure] : StreamNeeds(contents, contents.keyframes[k])) {
+                unset.try_emplace(failure, record, 0).first->second.second++;
+            }
+            for (const auto& [failure, first] : unset) {
+                broken[std::format("keyframe {}, the stream it feeds, from record {}: {}", k + 1, first.first, failure)] = first.second;
+            }
         }
         for (const auto& message : Decoded(contents.table, contents.records)) {
             if (const auto failure = ReplayState::FieldAssert(message); !failure.empty()) {
                 broken[std::format("the stream: (message {}): {}", message.id, failure)]++;
             }
         }
-        printf("\nthe game's asserts on the keyframes' messages and the stream's fields: %s\n", broken.empty() ? "none broken" : "broken");
+        printf("\nthe game's asserts on the keyframes' messages, the stream each feeds and the stream's fields: %s\n", broken.empty() ? "none broken" : "broken");
         for (const auto& [what, count] : broken) {
             printf("  %zu x %s\n", count, what.c_str());
         }
@@ -1879,6 +1960,53 @@ namespace {
             }
         }
         Check(!ReplayWire::MakeKeyframePlan(v2, no_map_file).error.empty(), "a keyframe whose 406 names no map file is refused: the game's map load asserts on it");
+
+        constexpr uint32_t fighter = 10;
+        const auto& mid_fight = v2.keyframes[1];
+        ReplayState::World snapshot(v2.table);
+        size_t model_intervals = 0;
+        for (const auto& message : Decoded(v2.table, mid_fight.records)) {
+            if (message.id == 53) {
+                model_intervals++;
+                continue;
+            }
+            snapshot.Apply(message);
+        }
+        snapshot.Apply(ReplayState::Message{53, {N(fighter), N(std::bit_cast<uint32_t>(1.33f)), N(std::bit_cast<uint32_t>(1.f))}});
+        auto from_writer = mid_fight;
+        from_writer.records = ReplayState::JoinRecords(v2.table, snapshot, mid_fight.time_ms);
+        const auto written_messages = Decoded(v2.table, from_writer.records);
+        const auto created_at = std::ranges::find_if(written_messages, [](const ReplayState::Message& message) {
+            return message.id == 32 && message.U(0) == fighter;
+        });
+        const auto interval_at = std::ranges::find_if(written_messages, [](const ReplayState::Message& message) {
+            return message.id == 53;
+        });
+        const auto attacks_after = std::ranges::count_if(v2.records.begin() + static_cast<std::ptrdiff_t>(mid_fight.record_index), v2.records.begin() + static_cast<std::ptrdiff_t>(v2.ChapterEnd(0)), [&](const ReplayFile::Record& record) {
+            ReplayState::Message message;
+            return ReplayState::Decode(v2.table, record.body, message) && message.id == 160 && message.U(0) == 4 && message.U(1) == fighter;
+        });
+        Check(
+            model_intervals == 1 && attacks_after > 0 && created_at < interval_at && interval_at != written_messages.end() && ReplayWire::MakeKeyframePlan(v2, from_writer).error.empty() && ReplayState::CheckClientNeeds(written_messages).empty() &&
+                StreamNeeds(v2, from_writer).empty(),
+            std::format("a keyframe taken in a fight, the attacker's 53 written after its 32 as the fixed writer does, plays its stream's {} attacks with no assert broken", attacks_after).c_str()
+        );
+        auto unset = mid_fight;
+        std::erase_if(unset.records, [](const ReplayFile::Record& record) {
+            return record.MessageId() == 53;
+        });
+        const auto unset_plan = ReplayWire::MakeKeyframePlan(v2, unset);
+        const auto unset_needs = StreamNeeds(v2, unset);
+        Check(
+            unset_plan.error.contains("(message 160)") && unset_plan.error.contains("agent 10 starts an attack") && unset_plan.error.contains("AvChar.cpp:4791") && !unset_needs.empty() &&
+                std::ranges::all_of(
+                    unset_needs,
+                    [](const std::pair<size_t, std::string>& need) {
+                        return need.second.contains("(message 160)") && need.second.contains("agent 10 ");
+                    }
+                ),
+            "a keyframe taken in a fight with no 53, as the writer before made them, is refused and fails the check, by record and agent"
+        );
 
         const ReplayState::ClientItem client_item = {
             .item_id = 100,

@@ -64,6 +64,7 @@ namespace {
         AgentCreate = 32,
         AgentReporter = 34,
         CharAccountNameData = 48,
+        CharAttackInterval = 53,
         CharAttributeState = 55,
         CharAttributes = 58,
         CharEffectUpkeepAdded = 63,
@@ -107,6 +108,7 @@ namespace {
         GuildAssign = 280,
         GuildAllianceInfo = 288,
         GuildGeneralInfo = 289,
+        ItemAssign = 309,
         ItemInventoryCreate = 324,
         ItemInventoryEquipSetActivate = 328,
         MissionAccessRights = 366,
@@ -169,6 +171,7 @@ namespace {
     uint32_t keyframe_count = 0;
     uint32_t chapter_count = 0;
     uint32_t chapter_map_file = 0;
+    GW::Packet::StoC::PostProcess post_process{};
 
     using AgentNotifyParams_pt = int(__cdecl*)(uint32_t agent_id, uint32_t* definition, uint8_t** params);
     AgentNotifyParams_pt AgentNotifyParams_Func = nullptr;
@@ -420,13 +423,13 @@ namespace {
         }
         apply(load_map);
         apply(make(CharPlayerTeam, {world_context->playerTeamToken}));
-        // The team row as every explorable load at hand has it (no outpost's has one), and the zeros of 107 and 404 as every load.
+        // The team row as every explorable load at hand has it (no outpost's has one), and the zero of 404 as every load.
         const auto explorable = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable;
         if (auto team = make(MissionTeam, {1, world_context->playerTeamToken, 64, 0, 2}); explorable && team.fields.size() > 5) {
             team.fields[5].text = char_context->player_name;
             apply(team);
         }
-        apply(make(CharPostProcess, {0, 0}));
+        apply(make(CharPostProcess, {post_process.level, post_process.tint}));
         apply(make(MissionToClient404, {0}));
 
         const auto is_character = [world_context](const uint32_t agent_id) {
@@ -564,10 +567,19 @@ namespace {
             }
             if (item) {
                 apply_all(ItemDetails(item->item_id));
+                if (item->owner) {
+                    // All 13 309s at hand carry 600.0.
+                    constexpr float assignment_seconds = 600.f;
+                    apply(make(ItemAssign, {item->item_id, item->owner, std::bit_cast<uint32_t>(assignment_seconds)}));
+                }
             }
             apply(create);
             if (!living) {
                 continue;
+            }
+            // The agent view keeps 53's interval and modifier at +0xEC and +0xF0, and asserts the interval before an attack's warmup.
+            if (living->weapon_attack_speed != 0.f && living->attack_speed_modifier != 0.f) {
+                apply(make(CharAttackInterval, {agent->agent_id, std::bit_cast<uint32_t>(living->weapon_attack_speed), std::bit_cast<uint32_t>(living->attack_speed_modifier)}));
             }
             apply(make(CharAgentAttrUpdateFloat, {health_value, agent->agent_id, std::bit_cast<uint32_t>(living->hp)}));
             if (living->hp_pips) {
@@ -844,6 +856,7 @@ namespace {
         }
         inventory_filter.emplace(message_table);
         has_pending_chat = false;
+        post_process = {};
         keyframe_count = 0;
         chapter_count = 0;
         recording_start = last_record_at = last_flush_at = Clock::now();
@@ -922,6 +935,9 @@ namespace {
         }
         if (packet->header == MissionLoadMap) {
             chapter_map_file = static_cast<const GW::Packet::StoC::InstanceLoadFile*>(packet)->map_fileID;
+        }
+        if (packet->header == CharPostProcess) {
+            post_process = *static_cast<const GW::Packet::StoC::PostProcess*>(packet);
         }
         const auto time_ms = ElapsedMs(recording_start);
         if (header.flags & ReplayFile::ChatDropped) {
