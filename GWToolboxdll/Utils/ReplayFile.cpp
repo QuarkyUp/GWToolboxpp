@@ -89,8 +89,8 @@ namespace ReplayFile {
             HeaderReader header_reader{bytes + sizeof(magic)};
             uint16_t stored_size = 0;
             VisitHeader(header_reader, out, version, stored_size);
-            if (version < first_format_version || version > format_version || stored_size != header_size) {
-                error = std::format("format version {} with a header of {} bytes, expected {} to {} and {}", version, stored_size, first_format_version, format_version, header_size);
+            if (version != format_version || stored_size != header_size) {
+                error = std::format("format version {} with a header of {} bytes, expected {} and {}", version, stored_size, format_version, header_size);
                 return false;
             }
             return true;
@@ -302,7 +302,8 @@ namespace ReplayFile {
         }
         fclose(file);
 
-        if (!ParseHeader(bytes.data(), bytes.size(), out.header, out.version, error)) {
+        uint16_t version = 0;
+        if (!ParseHeader(bytes.data(), bytes.size(), out.header, version, error)) {
             return false;
         }
 
@@ -347,7 +348,6 @@ namespace ReplayFile {
 
         size_t record_count = 0;
         uint32_t keyframe_messages = 0;
-        const auto with_meta = out.version > first_format_version;
         while (remaining()) {
             if (remaining() < record_prefix_size) {
                 out.truncated_tail = true;
@@ -366,11 +366,11 @@ namespace ReplayFile {
             const auto body = bytes.data() + offset;
             const auto message_id = static_cast<uint16_t>(Get(body, 2));
             offset += body_size;
-            if (with_meta && !keyframe_messages && message_id == chapter_entry_id && body_size == chapter_entry_size) {
+            if (!keyframe_messages && message_id == chapter_entry_id && body_size == chapter_entry_size) {
                 out.chapters.push_back({record_count, time_ms, static_cast<uint32_t>(Get(body + 2, 4)), static_cast<uint32_t>(Get(body + 6, 4)), static_cast<uint32_t>(Get(body + 10, 4))});
                 continue;
             }
-            if (with_meta && !keyframe_messages && message_id == keyframe_entry_id && body_size == keyframe_entry_size) {
+            if (!keyframe_messages && message_id == keyframe_entry_id && body_size == keyframe_entry_size) {
                 out.keyframes.push_back({record_count, time_ms, static_cast<KeyframeKind>(body[2]), {}});
                 keyframe_messages = static_cast<uint32_t>(Get(body + 3, 4));
                 continue;
@@ -394,7 +394,8 @@ namespace ReplayFile {
             out.truncated_tail = true;
         }
         if (out.chapters.empty() || out.chapters.front().first_record) {
-            out.chapters.insert(out.chapters.begin(), {0, 0, out.header.map_id, out.header.is_explorable, out.header.map_region_type});
+            error = "its stream does not begin with a chapter";
+            return false;
         }
         if ((out.header.flags & Complete) && out.header.record_count != record_count) {
             error = std::format("the header counts {} records, the file holds {}", out.header.record_count, record_count);
@@ -404,8 +405,6 @@ namespace ReplayFile {
     }
 
     namespace {
-        constexpr wchar_t literal_start = 0x107;
-        constexpr wchar_t literal_end = 0x1;
         constexpr uint32_t tag_capacity = 6;
         constexpr uint32_t guild_name_min_capacity = 32;
         constexpr uint16_t account_name_message = 48;
@@ -414,14 +413,24 @@ namespace ReplayFile {
         constexpr uint16_t instance_player_name_message = 381;
         constexpr uint16_t guild_messages[] = {282, 288, 289, 291, 376, 431};
         constexpr uint16_t guild_tag_messages[] = {96, 282, 288, 289, 291, 376, 431};
-
-        bool IsPlainText(const std::wstring_view text)
-        {
-            return !text.empty() && std::ranges::all_of(text, [](const wchar_t c) {
-                return c >= 0x20 && c < 0x100;
-            });
-        }
+        constexpr std::wstring_view numbered_placeholders[] = {L"Player ", L"Mercenary ", L"Guild ", L"G"};
     } // namespace
+
+    bool IsPlainText(const std::wstring_view text)
+    {
+        return !text.empty() && std::ranges::all_of(text, [](const wchar_t c) {
+            return c >= 0x20 && c < 0x100;
+        });
+    }
+
+    bool IsPlaceholder(const std::wstring_view text)
+    {
+        return text == own_name_placeholder || std::ranges::any_of(numbered_placeholders, [text](const std::wstring_view prefix) {
+                   return text.size() > prefix.size() && text.starts_with(prefix) && std::ranges::all_of(text.substr(prefix.size()), [](const wchar_t c) {
+                              return c >= L'0' && c <= L'9';
+                          });
+               });
+    }
 
     NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name) : other_players(other_players), own_names(own_names)
     {

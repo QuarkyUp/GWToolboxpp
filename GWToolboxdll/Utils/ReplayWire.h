@@ -66,7 +66,6 @@ namespace ReplayWire {
 
     constexpr uint32_t game_map_type = 1;
 
-    Plan MakePlan(const ReplayFile::Contents& contents, size_t chapter);
     Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe);
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 } // namespace ReplayWire

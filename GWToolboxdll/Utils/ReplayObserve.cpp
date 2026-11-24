@@ -70,39 +70,31 @@ namespace ReplayObserve {
                 scan.left_out.push_back({entry.path(), std::move(reason)});
                 continue;
             }
+            Row row{entry.path(), index.header, 0, std::nullopt, 0, {}};
             for (size_t chapter = 0; chapter < index.chapters.size(); chapter++) {
                 const auto& opened = index.chapters[chapter];
                 const auto end = index.ChapterEnd(chapter);
-                if (!opened.map_id || opened.map_id > 0xFFFF || end == opened.first_record) {
-                    continue;
-                }
-                const auto duration_ms = index.records[end - 1].time_ms - std::min(index.records[end - 1].time_ms, opened.time_ms);
-                const auto row = [&](const Start start, const size_t keyframe) {
-                    scan.rows.push_back({entry.path(), index.header, chapter, keyframe, start, duration_ms, {}});
-                    scan.rows.back().header.start_time_unix_ms += opened.time_ms;
-                    scan.rows.back().header.map_id = opened.map_id;
-                };
-                if (!opened.is_explorable) {
-                    row(Start::Outpost, 0);
-                    continue;
-                }
+                row.maps += opened.first_record < end && (chapter == 0 || opened.map_id != index.chapters[chapter - 1].map_id);
                 const auto first_keyframe = std::ranges::find_if(index.keyframes, [&](const ReplayFile::Keyframe& keyframe) {
                     return keyframe.record_index >= opened.first_record && keyframe.record_index < end;
                 });
-                const auto begun_mid_map = first_keyframe != index.keyframes.end() && first_keyframe->kind == ReplayFile::KeyframeKind::Start;
-                if (!begun_mid_map) {
-                    row(Start::Load, 0);
-                }
-                if (first_keyframe != index.keyframes.end()) {
-                    row(Start::Keyframe, static_cast<size_t>(first_keyframe - index.keyframes.begin()));
+                if (!row.keyframe && opened.is_explorable && opened.map_id <= 0xFFFF && first_keyframe != index.keyframes.end()) {
+                    row.chapter = chapter;
+                    row.keyframe = static_cast<size_t>(first_keyframe - index.keyframes.begin());
                 }
             }
+            row.header.map_id = index.chapters[row.chapter].map_id;
+            if (!row.header.map_id || row.header.map_id > 0xFFFF) {
+                scan.left_out.push_back({entry.path(), std::format("its map {} cannot be listed", row.header.map_id)});
+                continue;
+            }
+            scan.rows.push_back(std::move(row));
         }
         std::ranges::sort(scan.rows, [](const Row& a, const Row& b) {
-            return a.header.start_time_unix_ms != b.header.start_time_unix_ms ? a.header.start_time_unix_ms > b.header.start_time_unix_ms : a.path != b.path ? a.path < b.path : a.start < b.start;
+            return a.header.start_time_unix_ms != b.header.start_time_unix_ms ? a.header.start_time_unix_ms > b.header.start_time_unix_ms : a.path < b.path;
         });
         for (size_t i = max_rows; i < scan.rows.size(); i++) {
-            scan.left_out.push_back({scan.rows[i].path, std::format("older than the newest {} rows", max_rows)});
+            scan.left_out.push_back({scan.rows[i].path, std::format("older than the newest {} recordings", max_rows)});
         }
         scan.rows.resize(std::min(scan.rows.size(), max_rows));
 
@@ -124,8 +116,7 @@ namespace ReplayObserve {
             message.age_minutes = static_cast<uint32_t>(now_unix_ms > header.start_time_unix_ms ? std::min<uint64_t>((now_unix_ms - header.start_time_unix_ms) / 60000, 0xFFFF) : 0);
             message.team_count = 1;
             message.teams[0].team_id = 1;
-            const auto start = row.start == Start::Load ? L"from load" : row.start == Start::Keyframe ? L"keyframe" : L"outpost";
-            const auto name = std::format(L"\x108\x107Replay {} #{} {} ({})\x1", started_text, row.chapter + 1, start, Duration(row.duration_ms));
+            const auto name = std::format(L"\x108\x107Replay {}, {} {}, {}{}\x1", started_text, row.maps, row.maps == 1 ? L"map" : L"maps", Duration(header.duration_ms), row.keyframe ? L"" : L", outposts");
             wcsncpy(message.teams[0].name, name.c_str(), team_name_size - 1);
         }
         return scan;

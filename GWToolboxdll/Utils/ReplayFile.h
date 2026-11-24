@@ -12,7 +12,6 @@
 
 namespace ReplayFile {
     constexpr char magic[8] = {'G', 'W', 'T', 'B', 'R', 'E', 'C', '\0'};
-    constexpr uint16_t first_format_version = 1;
     constexpr uint16_t format_version = 2;
     constexpr uint16_t header_size = 96;
     constexpr size_t max_body_size = 0xFFFF;
@@ -83,7 +82,6 @@ namespace ReplayFile {
     };
 
     struct Contents {
-        uint16_t version = format_version;
         Header header;
         MessageTable table;
         std::vector<Record> records;
@@ -100,6 +98,11 @@ namespace ReplayFile {
     bool PackMessage(uint32_t message_id, const uint32_t* fields, uint32_t field_count, const uint8_t* decoded, std::vector<uint8_t>& out, const TextFilter& filter);
 
     constexpr wchar_t own_name_placeholder[] = L"Recorder";
+    constexpr wchar_t literal_start = 0x107;
+    constexpr wchar_t literal_end = 0x1;
+
+    bool IsPlainText(std::wstring_view text);
+    bool IsPlaceholder(std::wstring_view text);
 
     class NameStripper {
     public:

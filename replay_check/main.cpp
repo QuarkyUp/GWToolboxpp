@@ -245,7 +245,7 @@ namespace {
     bool WriteRecording(const std::filesystem::path& path, const ReplayFile::Header& header, const ReplayFile::MessageTable& table, const std::vector<ReplayFile::Record>& records, const bool close)
     {
         ReplayFile::Writer writer;
-        if (!writer.Open(path, header, table)) {
+        if (!writer.Open(path, header, table) || !writer.AppendChapter({0, 0, header.map_id, header.is_explorable, header.map_region_type})) {
             return false;
         }
         for (const auto& record : records) {
@@ -416,7 +416,7 @@ namespace {
         write(328, {N(1), N(0)});
         write(319, {N(1), N(2), N(0), N(1), N(9), N(0)});
         for (uint32_t item = 100; item < 105; item++) {
-            write(353, {N(item), N(item * 7), N(2), N(0), N(0), N(0), N(1), N(0), N(10), N(item), N(1), Text(L"\x108\x107item\x1"), N(1), N(0x2400)});
+            write(353, {N(item), N(item * 7), N(2), N(0), N(0), N(0), N(1), N(0), N(10), N(item), N(1), Text(L"\x108\x107Player 3\x1"), N(1), N(0x2400)});
             write(318, {N(1), N(item), N(1), N(item - 100)});
         }
         write(319, {N(1), N(1), N(1), N(2), N(20), N(104)});
@@ -431,7 +431,7 @@ namespace {
         write(408, {N(1), N(2), N(3)});
         write(428, {N(7)});
         write(406, {N(0x1234), point(), N(0), N(1), N(0), Bytes(8, 1)});
-        write(430, {N(1), N(players_team), N(0), N(1), N(2), Text(L"Team")});
+        write(430, {N(1), N(players_team), N(0), N(1), N(2), Text(L"Recorder")});
         write(242, {N(players_team)});
         write(55, {N(recorder), N(5), N(30)});
         write(183, {N(recorder), N(1), N(2), N(0)});
@@ -480,7 +480,7 @@ namespace {
         write(460, {N(1), N(2), N(0)});
         write(468, {N(1)});
         write(435, {N(1), N(0)});
-        write(289, {N(1), Bytes(16, 3), Text(L"Guild"), N(1)});
+        write(289, {N(1), Bytes(16, 3), Text(L"Guild 1"), N(1)});
         write(280, {N(1), Bytes(16, 3), N(3)});
 
         uint32_t next_agent = 60;
@@ -566,7 +566,7 @@ namespace {
                         write(241, {N(agent), N(random() % 2 ? 0x10 : 0)});
                         break;
                     case 20:
-                        write(93, {Text(L"chat")});
+                        write(93, {Text(L"\x8104")});
                         write(12, {});
                         write(218, {N(recorder), {{1, 2, 3}, {}}, {{0, 0, 0}, {}}, N(0)});
                         write(59, {N(recorder), N(17), N(5), N(7)});
@@ -736,30 +736,49 @@ namespace {
         return found;
     }
 
+    ReplayFile::Keyframe ModelKeyframe(const ReplayFile::Contents& contents, const size_t chapter, const uint32_t time_ms)
+    {
+        ReplayState::World world(contents.table);
+        auto i = contents.chapters[chapter].first_record;
+        const auto end = contents.ChapterEnd(chapter);
+        for (; i < end && (contents.records[i].time_ms < time_ms || contents.records[i].MessageId() != 30); i++) {
+            world.Apply(contents.records[i]);
+        }
+        if (i == end && i > contents.chapters[chapter].first_record) {
+            i--;
+        }
+        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, ReplayState::JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms)};
+    }
+
     struct Starts {
         std::vector<std::string> names;
         std::vector<ReplayWire::Plan> plans;
-        std::vector<bool> from_load;
-        std::vector<size_t> chapters;
+        size_t file_keyframes = 0;
+
+        [[nodiscard]] bool Refused(const size_t start) const
+        {
+            if (!plans[start].error.empty()) {
+                printf("%s: refused, the toolbox does not play it: %s%s\n", names[start].c_str(), plans[start].error.c_str(), start < file_keyframes ? " (--compare tells why)" : "");
+            }
+            return !plans[start].error.empty();
+        }
     };
 
     Starts PlayableStarts(const ReplayFile::Contents& contents)
     {
         Starts starts;
-        for (size_t chapter = 0; chapter < contents.chapters.size(); chapter++) {
-            if (RealLoad(contents, chapter)) {
-                starts.names.push_back(std::format("chapter {} from its load", chapter + 1));
-                starts.plans.push_back(ReplayWire::MakePlan(contents, chapter));
-                starts.from_load.push_back(true);
-                starts.chapters.push_back(chapter);
-            }
-        }
         for (size_t k = 0; k < contents.keyframes.size(); k++) {
             const auto& keyframe = contents.keyframes[k];
             starts.names.push_back(std::format("keyframe {} ({}) at {} ms", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms));
             starts.plans.push_back(ReplayWire::MakeKeyframePlan(contents, keyframe));
-            starts.from_load.push_back(false);
-            starts.chapters.push_back(0);
+        }
+        starts.file_keyframes = starts.plans.size();
+        for (size_t chapter = 0; chapter < contents.chapters.size(); chapter++) {
+            if (const auto load = RealLoad(contents, chapter)) {
+                const auto keyframe = ModelKeyframe(contents, chapter, contents.records[load->end - 1].time_ms);
+                starts.names.push_back(std::format("chapter {}: the model's keyframe after its load, at {} ms", chapter + 1, keyframe.time_ms));
+                starts.plans.push_back(ReplayWire::MakeKeyframePlan(contents, keyframe));
+            }
         }
         return starts;
     }
@@ -898,12 +917,102 @@ namespace {
         {350, "a bag's item: left out by the no-inventory rule"},
         {353, "a bag's item: left out by the no-inventory rule"},
         {354, "a bag's item: left out by the no-inventory rule"},
+        {113, "once, in an outpost's load: not kept by the model, so a keyframe built from it leaves it out; outposts are not played (session 10)"},
         {479, "the party search list: an outpost's window, not kept by the model"},
         {480, "the party search list: an outpost's window, not kept by the model"},
         {481, "the party search list: an outpost's window, not kept by the model"},
     };
 
-    bool PrintComparison(const std::map<uint32_t, Difference>& differences, const bool listed_only)
+    const std::map<uint32_t, const char*> keyframe_differences = {
+        {31, "the clock: the model's 31 is the stream's clock at its last 30, the snapshot's the client's instance time"},
+        {32,
+         "gadgets (chests, doors, shrines) are left out: their classes (263) are not in GWCA; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
+        {36, "an agent's class change since its 32: the snapshot writes the agent as the client holds it"},
+        {37, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
+        {38, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
+        {39, "an agent's speed change: not read; its next move gives it again"},
+        {41, "a move in progress: the snapshot writes the agent where it stands; it waits there until its next move"},
+        {42, "a move in progress: the snapshot writes the agent where it stands; it waits there until its next move"},
+        {43, "a move's pace: not read; its next move gives it again"},
+        {46, "a rotation in progress: the 32 carries the agent's facing now"},
+        {53, "an agent's attack pace: not read; its attacks play at their default pace until the stream's next 53"},
+        {55, "the attribute points: not in GWCA; the attribute window, which an observer does not have (5c)"},
+        {58, "made before 7b's fix: attributes were not written; now from GWCA's PartyAttribute (ids, base, levels)"},
+        {59, "an attribute changed after the load: the 58 written from GWCA holds its level"},
+        {60, "a player's row flags: not read; the party window's, which observers replace with ObservedPartiesHud (5c)"},
+        {63, "made before 7b's fix: a maintained enchantment was written as 65 alone; now 63 and 65 from GWCA's buffs"},
+        {65, "made before 7b's fix: effects without a duration were written as 66; now as the 65 the stream sends (no 66 at hand has no duration)"},
+        {66, "made before 7b's fix: effects without a duration were written as 66; a periodic keyframe's durations are the client's remaining time"},
+        {72, "a cape shown: not read; capes hidden until the stream's next 72"},
+        {76, "quest descriptions: the quest log's text, which an observer does not have (5c)"},
+        {80, "made before 7b's fix: the client's own bit 0 of a quest's state was written"},
+        {81, "a quest's marker sent after the load: the 83 written holds the marker the client keeps"},
+        {83, "made before 7b's fix: every quest got a marker, set or not; now only quests with a marker"},
+        {86, "made before 7b's fix: only the NPCs present were defined; now every NPC the client holds"},
+        {87, "made before 7b's fix: only the NPCs present were defined; now every NPC the client holds"},
+        {89, "made before 7b's fix: the sixth field, 0xCCCCCCCC in all 280 player rows at hand (the server's unset bytes), was 0"},
+        {101, "made before 7b's fix: not written; now [hero, 0] as in every load at hand"},
+        {107, "made before 7b's fix: not written; now [0, 0] as in every load at hand"},
+        {109, "made before 7b's fix: weapons were read from the agent view; now the char client's slots (k04, k05)"},
+        {110, "made before 7b's fix: what agents wear was read from the agent view, filled only once models load and in another slot order; now the char client's slots (k04, k05), for players only as the stream sends"},
+        {114, "made before 7b's fix: the hero's behaviour was 0; now GWCA's HeroFlag::hero_behavior"},
+        {115, "a hero's six values (115's array) are not read: the hero panel's"},
+        {116, "mercenaries' 116 is not written: their 115 is the hero data their 114 needs (5c)"},
+        {124, "not read: unknown purpose, no use of it seen in the observer's view (session 7)"},
+        {125, "not read: unknown purpose, no use of it seen in the observer's view (session 7)"},
+        {138, "the explored areas: not written; the world map stays closed in replays (OnWorldMapToggle)"},
+        {139, "the explored areas: not written; the world map stays closed in replays (OnWorldMapToggle)"},
+        {141, "the mission map's points: the mission map stays closed in replays (6b, OnMissionMapCreate)"},
+        {154, "an agent's scale: not read; models at their default size"},
+        {155, "made before 7b's fix: NPCs named by their NPC's own name got a 155 too; a 155 sent after the load is in the snapshot's"},
+        {156, "morale: not read (GWCA's morale_table is used nowhere yet); the party window's, which observers replace with ObservedPartiesHud (5c)"},
+        {159, "notices 30 (guild), 0, 14 and 15 are not read; one-time notices are not kept"},
+        {162, "made before 7b's fix: characters' health, energy and regeneration were not written; a periodic keyframe's values are the client's"},
+        {166, "made before 7b's fix: agents with no profession got a 166"},
+        {170, "an ally added after the load: not read; missing from the party's allies until the stream's next 170"},
+        {177, "made before 7b's fix: not written; now GWCA's Player::party_leader_player_number"},
+        {181, "the recorder's interface preferences: not the viewer's"},
+        {182, "made before 7b's fix: characters with no unlocked profession got a 182"},
+        {186, "made before 7b's fix: not written; now as in every load at hand"},
+        {221, "the recorder's skill count: not read; the skills window's"},
+        {233, "heroes' skill points: not in GWCA (0 written)"},
+        {239, "the recorder's display settings: not the viewer's"},
+        {240, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
+        {241, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
+        {243, "titles: not read; the hero panel's"},
+        {246, "titles: not read; the hero panel's"},
+        {263, "gadget classes: not in GWCA; gadgets are left out until the stream sends them"},
+        {270, "props' animations: not in GWCA; props at their default state until the stream sends them"},
+        {273, "props' layers: not in GWCA; props at their default state until the stream sends them"},
+        {277, "gadgets' states: gadgets are left out (263)"},
+        {280, "guilds: not written; guild names and capes not shown"},
+        {284, "guilds: not written; guild names and capes not shown"},
+        {288, "guilds: not written; guild names and capes not shown"},
+        {289, "guilds: not written; guild names and capes not shown"},
+        {302, "guilds: not written; guild names and capes not shown"},
+        {314, "made before 7b's fix: worn items' customizer was not written; now GWCA's Item::customized"},
+        {324, "the recorder's own inventory: no kept message names it"},
+        {328, "the recorder's own weapon set: its inventory is not created (324)"},
+        {346, "made before 7b's fix: worn items' profession was not written; now GWCA's Item::profession"},
+        {353, "made before 7b's fix: worn items were missing with what they wore (110); a periodic keyframe's item values are the client's"},
+        {354, "an item's details reset after the load: the 353 written holds the client's"},
+        {380, "made before 7b's fix: the fields were read in memory order; 380's handler keeps them at +0x5c, +0x60, +0x54, +0x58 (gwlab's client-answers.md)"},
+        {404, "made before 7b's fix: not written; now [0] as in every load at hand"},
+        {406, "made before 7b's fix, the live test 6 crash: the map file was AreaInfo::file_id, 0 for PvE maps, which the map's load asserts (k01); the facing and the server's time were 0 (k02); its spawn is the controlled agent's place now"},
+        {407, "the manifest's chunks: absent from 12 of 18 loads at hand, which loaded (session 7)"},
+        {408, "the manifest's hash: 0, as in gwlab's loads, which loaded (session 7)"},
+        {409, "the manifest's phases: written as gwlab's loads have them, which loaded (session 7)"},
+        {428, "not read: gwlab's map 779 load had 0 and loaded (session 7)"},
+        {430, "made before 7b's fix: the team row was not written; now as the 5 loads at hand have it"},
+        {446, "made before 7b's fix: not written; now [0] as in every load at hand"},
+        {159 | 22 << 16, "a one-time notice: not kept"},
+    };
+
+    const std::map<uint16_t, const char*> keyframe_layout_errors = {
+        {353, "made before 7b's fix: an item's mods were written in its group's count field; now a count and one field per mod"},
+    };
+
+    bool PrintComparison(const std::map<uint32_t, Difference>& differences, const std::map<uint32_t, const char*>& reasons)
     {
         size_t unlisted = 0;
         size_t equal = 0;
@@ -921,23 +1030,56 @@ namespace {
             for (const auto& [field, count] : difference.fields) {
                 fields += std::format(" f{} x{}", field, count);
             }
-            const auto why = listed_differences.find(id);
-            unlisted += why == listed_differences.end();
+            const auto why = reasons.find(id);
+            unlisted += why == reasons.end();
             printf(
                 "%6s %8zu %8zu %8zu %8zu %8zu %8zu %s; %s\n", (id >> 16 ? std::format("{}/{}", id & 0xFFFF, id >> 16) : std::format("{}", id)).c_str(), difference.expected, difference.actual, difference.equal, difference.repeated, difference.missing,
-                difference.extra, fields.empty() ? " none" : fields.c_str(), why == listed_differences.end() ? "NOT LISTED" : why->second
+                difference.extra, fields.empty() ? " none" : fields.c_str(), why == reasons.end() ? "NOT LISTED" : why->second
             );
         }
-        printf(
-            "%zu of %zu messages equal, %zu repeats of a message the model keeps once (the latest, equal); %zu message ids differ %s\n", equal, expected, repeated, unlisted,
-            listed_only ? "with no reason listed" : "(a keyframe from memory: listed for the next session)"
-        );
+        printf("%zu of %zu messages equal, %zu repeats of a message the model keeps once (the latest, equal); %zu message ids differ with no reason listed\n", equal, expected, repeated, unlisted);
         return !unlisted;
+    }
+
+    struct NameCount {
+        size_t texts = 0;
+        size_t literals = 0;
+        size_t not_placeholders = 0;
+    };
+
+    constexpr uint16_t own_name_messages[] = {48, 49, 116, 381};
+
+    NameCount CountNames(const ReplayFile::MessageTable& table, const std::vector<ReplayFile::Record>& records, const uint32_t flags)
+    {
+        NameCount count;
+        for (const auto& message : Decoded(table, records)) {
+            const auto checked = (flags & ReplayFile::NamesStripped) || ((flags & ReplayFile::OwnNamesStripped) && std::ranges::contains(own_name_messages, message.id));
+            for (const auto& field : message.fields) {
+                const std::wstring_view text = field.text;
+                if (ReplayFile::IsPlainText(text)) {
+                    count.texts++;
+                    count.not_placeholders += checked && !ReplayFile::IsPlaceholder(text);
+                    continue;
+                }
+                for (auto start = text.find(ReplayFile::literal_start); start != std::wstring_view::npos; start = text.find(ReplayFile::literal_start, start + 1)) {
+                    const auto end = text.find(ReplayFile::literal_end, start + 1);
+                    if (end == std::wstring_view::npos) {
+                        break;
+                    }
+                    if (const auto literal = text.substr(start + 1, end - start - 1); ReplayFile::IsPlainText(literal)) {
+                        count.literals++;
+                        count.not_placeholders += checked && !ReplayFile::IsPlaceholder(literal);
+                    }
+                    start = end;
+                }
+            }
+        }
+        return count;
     }
 
     int ProveCompare(const ReplayFile::Contents& contents)
     {
-        printf("format version %u, %zu chapters, %zu keyframes, %zu records\n", contents.version, contents.chapters.size(), contents.keyframes.size(), contents.records.size());
+        printf("%zu chapters, %zu keyframes, %zu records\n", contents.chapters.size(), contents.keyframes.size(), contents.records.size());
         for (size_t c = 0; c < contents.chapters.size(); c++) {
             const auto& chapter = contents.chapters[c];
             printf("  chapter %zu: map %u, %s, from %u ms, records %zu to %zu\n", c + 1, chapter.map_id, chapter.is_explorable ? "explorable" : "outpost", chapter.time_ms, chapter.first_record, contents.ChapterEnd(c));
@@ -963,131 +1105,70 @@ namespace {
             }
             const auto built = world.Join();
             printf("\nchapter %zu: its real load (records %zu to %zu) against the model's join built from it: %zu messages built, layout errors %u\n", c + 1, load->head, load->end, built.size(), world.LayoutErrors());
-            passed &= PrintComparison(Compare(Decoded(contents.table, records), built), true);
+            passed &= PrintComparison(Compare(Decoded(contents.table, records), built), listed_differences);
             passed &= !world.LayoutErrors();
-            for (size_t k = 0; k < contents.keyframes.size(); k++) {
-                const auto& keyframe = contents.keyframes[k];
-                if (keyframe.kind != ReplayFile::KeyframeKind::AfterLoad || keyframe.record_index < load->end || keyframe.record_index > contents.ChapterEnd(c)) {
-                    continue;
+        }
+        for (size_t k = 0; k < contents.keyframes.size(); k++) {
+            const auto& keyframe = contents.keyframes[k];
+            const auto chapter = static_cast<size_t>(std::ranges::upper_bound(contents.chapters, keyframe.record_index, {}, &ReplayFile::Chapter::first_record) - contents.chapters.begin() - 1);
+            const auto load = RealLoad(contents, chapter);
+            if (keyframe.kind == ReplayFile::KeyframeKind::Start || !load || keyframe.record_index < load->end) {
+                printf(
+                    "\nkeyframe %zu (%s, at %u ms): %s\n", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms,
+                    keyframe.kind == ReplayFile::KeyframeKind::Start ? "the recording's start: no stream before it to model" : "no load of its map before it in the stream to model"
+                );
+                continue;
+            }
+            ReplayState::World stream(contents.table);
+            for (auto i = load->head; i < keyframe.record_index; i++) {
+                stream.Apply(contents.records[i]);
+            }
+            printf("\nkeyframe %zu (%s, at %u ms): the snapshot from memory against the model of the stream up to it (records %zu to %zu)\n", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms, load->head, keyframe.record_index);
+            passed &= PrintComparison(Compare(stream.Join(), Decoded(contents.table, keyframe.records)), keyframe_differences);
+        }
+        for (size_t k = 0; k < contents.keyframes.size(); k++) {
+            std::map<uint16_t, size_t> undecoded;
+            for (const auto& record : contents.keyframes[k].records) {
+                if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message)) {
+                    undecoded[record.MessageId()]++;
                 }
-                const std::vector<ReplayFile::Record> before(contents.records.begin() + static_cast<std::ptrdiff_t>(load->head), contents.records.begin() + static_cast<std::ptrdiff_t>(keyframe.record_index));
-                ReplayState::World stream(contents.table);
-                for (const auto& record : before) {
-                    stream.Apply(record);
-                }
-                printf("\nkeyframe %zu (after the load, at %u ms): the snapshot from memory against the model of the stream up to it (records %zu to %zu)\n", k + 1, keyframe.time_ms, load->head, keyframe.record_index);
-                PrintComparison(Compare(stream.Join(), Decoded(contents.table, keyframe.records)), false);
+            }
+            for (const auto& [id, count] : undecoded) {
+                const auto why = keyframe_layout_errors.find(id);
+                passed &= why != keyframe_layout_errors.end();
+                printf("keyframe %zu: %zu messages %u do not decode against the file's table; %s\n", k + 1, count, id, why == keyframe_layout_errors.end() ? "NOT LISTED" : why->second);
             }
         }
         const auto stream_leaks = CountLeaks(contents.table, contents.records);
         Leaks keyframe_leaks;
+        auto names = CountNames(contents.table, contents.records, contents.header.flags);
+        NameCount keyframe_names;
         for (const auto& keyframe : contents.keyframes) {
             const auto leaks = CountLeaks(contents.table, keyframe.records);
             keyframe_leaks.bag_content += leaks.bag_content;
             keyframe_leaks.unshown_items += leaks.unshown_items;
             keyframe_leaks.held_details += leaks.held_details;
+            const auto counted = CountNames(contents.table, keyframe.records, contents.header.flags);
+            keyframe_names.texts += counted.texts;
+            keyframe_names.literals += counted.literals;
+            keyframe_names.not_placeholders += counted.not_placeholders;
         }
-        const auto bags_passed = contents.version == ReplayFile::first_format_version || stream_leaks.Total() + keyframe_leaks.Total() == 0;
+        const auto bags_passed = stream_leaks.Total() + keyframe_leaks.Total() == 0;
         printf(
             "\nthe no-inventory rule: the stream holds %zu bag messages, %zu messages naming an item no agent wears, holds or has on the ground, %zu details of such items; the keyframes %zu, %zu and %zu: %s\n", stream_leaks.bag_content,
-            stream_leaks.unshown_items, stream_leaks.held_details, keyframe_leaks.bag_content, keyframe_leaks.unshown_items, keyframe_leaks.held_details,
-            contents.version == ReplayFile::first_format_version ? "a version 1 recording, made before the rule (session 9 converts them)"
-            : bags_passed                                        ? "passed"
-                                                                 : "FAILED"
+            stream_leaks.unshown_items, stream_leaks.held_details, keyframe_leaks.bag_content, keyframe_leaks.unshown_items, keyframe_leaks.held_details, bags_passed ? "passed" : "FAILED"
         );
-        printf("compare: %s\n", passed && bags_passed ? "passed" : "FAILED");
-        return passed && bags_passed ? 0 : 1;
-    }
-    std::vector<std::string> ProveVerbatim(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const size_t chapter)
-    {
-        std::vector<std::string> failures;
-        const auto& records = contents.records;
-        const auto begin = contents.chapters[chapter].first_record;
-        const auto end = contents.ChapterEnd(chapter);
-        const auto index_of = [&records, end](const uint16_t id, const size_t from) {
-            for (auto i = from; i < end; i++) {
-                if (records[i].MessageId() == id) {
-                    return i;
-                }
-            }
-            return end;
-        };
-        const auto load = index_of(406, begin);
-        const auto connect = index_of(31, load);
-        if (connect >= end) {
-            return {"the chapter has no 406 followed by a 31"};
-        }
-        const auto head = index_of(380, begin) < load ? index_of(380, begin) : begin;
-        auto second_load = end;
-        for (auto i = connect + 1; i < end && second_load == end; i++) {
-            if (const auto id = records[i].MessageId(); id == 380 || id == 406 || id == 410) {
-                second_load = i;
-            }
-        }
-        std::vector<bool> left_out(end, false);
-        std::set<size_t> changed;
-        for (const auto& change : plan.changes) {
-            if (change.kind == ReplayWire::ChangeKind::ObserverByte) {
-                changed.insert(change.record);
-                continue;
-            }
-            for (auto i = change.record; i < change.record + change.count && i < end; i++) {
-                left_out[i] = true;
-                if (i >= head && i < second_load) {
-                    failures.push_back(std::format("record {} (message {}) is left out, and it is neither before the connection's first 380 nor from a second instance load", i, records[i].MessageId()));
-                }
-            }
-        }
-        const auto entry_ms = records[connect].time_ms;
-        auto next = begin;
-        for (size_t p = 0; p < plan.posts.size(); p++) {
-            const auto& post = plan.posts[p];
-            std::string error;
-            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
-                while (next < end && left_out[next]) {
-                    next++;
-                }
-                if (next >= end) {
-                    failures.push_back(std::format("post {} feeds more messages than the recording holds", p));
-                    return failures;
-                }
-                const auto i = next++;
-                const auto& record = records[i];
-                const auto stage = i < load ? ReplayWire::Stage::BeforeLoad : i < connect ? ReplayWire::Stage::Load : record.time_ms <= entry_ms ? ReplayWire::Stage::Entry : ReplayWire::Stage::Stream;
-                const auto time_ms = stage == ReplayWire::Stage::Stream ? record.time_ms - entry_ms : 0;
-                if (post.stage != stage || post.time_ms != time_ms) {
-                    failures.push_back(std::format("record {} (message {}) is fed {} at {} ms; the recording puts it {} at {} ms", i, record.MessageId(), ReplayWire::StageName(post.stage), post.time_ms, ReplayWire::StageName(stage), time_ms));
-                }
-                if (body == record.body) {
-                    if (changed.contains(i)) {
-                        failures.push_back(std::format("record {} is listed as changed and is fed as recorded", i));
-                    }
-                    continue;
-                }
-                if (!changed.contains(i)) {
-                    failures.push_back(std::format("record {} (message {}) is fed with other bytes than recorded, and no change lists it", i, record.MessageId()));
-                    continue;
-                }
-                ReplayState::Message fed;
-                ReplayState::Message recorded;
-                const auto differing = body.size() == record.body.size() ? std::inner_product(body.begin(), body.end(), record.body.begin(), size_t{0}, std::plus<>(), std::not_equal_to<>()) : SIZE_MAX;
-                const auto decoded = ReplayState::Decode(contents.table, body, fed) && ReplayState::Decode(contents.table, record.body, recorded);
-                recorded.Set(5, 1);
-                if (record.MessageId() != 410 || differing != 1 || !decoded || fed.U(5) != 1 || fed != recorded) {
-                    failures.push_back(std::format("record {} (message {}): its change is not 410's observer byte set to 1, alone", i, record.MessageId()));
-                }
-            }
-            if (!error.empty()) {
-                failures.push_back(std::format("post {} does not cut into messages ({})", p, error));
-            }
-        }
-        while (next < end && left_out[next]) {
-            next++;
-        }
-        if (next != end) {
-            failures.push_back(std::format("records from {} on are neither fed nor listed as left out", next));
-        }
-        return failures;
+        const auto settings = contents.header.flags & ReplayFile::NamesStripped      ? "every plain text and name inside a game string"
+                              : contents.header.flags & ReplayFile::OwnNamesStripped ? "the recorder's, account's and mercenaries' names (48, 49, 116, 381)"
+                                                                                     : nullptr;
+        const auto names_passed = names.not_placeholders + keyframe_names.not_placeholders == 0;
+        printf(
+            "the names: the stream holds %zu plain texts and %zu names inside game strings, the keyframes %zu and %zu; %s: %s\n", names.texts, names.literals, keyframe_names.texts, keyframe_names.literals,
+            settings ? std::format("checked by the names settings ({}), {} not a placeholder", settings, names.not_placeholders + keyframe_names.not_placeholders).c_str() : "the names settings were off for this recording: not checked",
+            names_passed ? "passed" : "FAILED"
+        );
+        printf("compare: %s\n", passed && bags_passed && names_passed ? "passed" : "FAILED");
+        return passed && bags_passed && names_passed ? 0 : 1;
     }
 
     struct WireProof {
@@ -1155,7 +1236,7 @@ namespace {
         return proof;
     }
 
-    bool ProveFeed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms, const bool verbose, const std::optional<size_t> verbatim)
+    bool ProveFeed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms, const bool verbose)
     {
         if (!plan.error.empty()) {
             if (verbose) {
@@ -1170,20 +1251,7 @@ namespace {
             }
             failures++;
         };
-        if (verbose && verbatim) {
-            printf(
-                "the chapter as recorded from record %zu (%u ms) to record %zu, its stream timed from its 31 at %u ms, %u ms played from there; map type %u%s; controlled agent %u\n", plan.first_record, plan.start_ms, plan.end_record, plan.entry_ms,
-                plan.duration_ms, plan.map_type, plan.map_type == ReplayWire::game_map_type ? "" : " (not a game map's: the toolbox does not play it)", plan.controlled_agent
-            );
-            printf("changes from the recorded bytes: %zu\n", plan.changes.size());
-            for (const auto& change : plan.changes) {
-                const auto text = change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("records {} to {} left out: {}", change.record, change.record + change.count - 1, change.why)
-                                                                                 : std::format("record {}: 410's observer byte set: {}", change.record, change.why);
-                printf("  %s\n", text.c_str());
-            }
-            printf("\n");
-        }
-        else if (verbose) {
+        if (verbose) {
             printf(
                 "a keyframe at %u ms of the recording (%zu messages), then the stream from record %zu to %zu, %u ms played from there; map type %u; controlled agent %u; changes %zu\n\n", plan.start_ms, plan.keyframe_records, plan.first_record,
                 plan.end_record, plan.duration_ms, plan.map_type, plan.controlled_agent, plan.changes.size()
@@ -1255,19 +1323,12 @@ namespace {
         for (const auto& failure : order) {
             fail(std::format("the order of real loads: {}", ReplayState::Describe(failure)));
         }
-        const auto verbatim_failures = verbatim ? ProveVerbatim(contents, plan, *verbatim) : std::vector<std::string>{};
-        for (const auto& failure : verbatim_failures) {
-            fail(std::format("the recording as recorded: {}", failure));
-        }
         if (verbose) {
             printf(
                 "\nup to %u ms: %zu posts, %zu records, %zu bytes; the whole plan: %zu posts (%zu + %zu + %zu records in the load's stages, stream %zu records)\n", until_ms, shown, shown_records, shown_bytes, plan.posts.size(),
                 per_stage[ReplayWire::Stage::BeforeLoad], per_stage[ReplayWire::Stage::Load], per_stage[ReplayWire::Stage::Entry], per_stage[ReplayWire::Stage::Stream]
             );
             printf("the order of real loads: %zu failures (%s)\n", order.size(), OrderSummary(order, JoinMessages(plan)).c_str());
-            if (verbatim) {
-                printf("byte for byte the recording but for the changes listed: %s\n", verbatim_failures.empty() ? "yes" : std::format("no, {} failures", verbatim_failures.size()).c_str());
-            }
             printf("feed: %s\n", failures ? "FAILED" : "passed");
         }
         return !failures;
@@ -1276,20 +1337,6 @@ namespace {
     std::string JoinTime(const uint32_t join_ms)
     {
         return join_ms == UINT32_MAX ? "the end" : std::format("{} ms", join_ms);
-    }
-
-    ReplayFile::Keyframe ModelKeyframe(const ReplayFile::Contents& contents, const size_t chapter, const uint32_t time_ms)
-    {
-        ReplayState::World world(contents.table);
-        auto i = contents.chapters[chapter].first_record;
-        const auto end = contents.ChapterEnd(chapter);
-        for (; i < end && (contents.records[i].time_ms < time_ms || contents.records[i].MessageId() != 30); i++) {
-            world.Apply(contents.records[i]);
-        }
-        if (i == end && i > contents.chapters[chapter].first_record) {
-            i--;
-        }
-        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, ReplayState::JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms)};
     }
 
     size_t LeftOutRecords(const ReplayWire::Plan& plan)
@@ -1305,9 +1352,8 @@ namespace {
         const auto starts = PlayableStarts(contents);
         for (size_t s = 0; s < starts.plans.size(); s++) {
             const auto& plan = starts.plans[s];
-            if (!plan.error.empty()) {
-                printf("%s: %s\n", starts.names[s].c_str(), plan.error.c_str());
-                passed &= !starts.from_load[s];
+            if (starts.Refused(s)) {
+                passed &= s < starts.file_keyframes;
                 continue;
             }
             const auto fed = Fed(contents, plan);
@@ -1512,18 +1558,13 @@ namespace {
         ReplayFile::Contents contents;
         std::string error;
         Check(ReplayFile::Read(folder / L"self-test-world.gwrec", contents, error), "the synthetic world is read for the wire");
-        const auto plan = ReplayWire::MakePlan(contents, 0);
-        Check(plan.error.empty() && !plan.posts.empty(), std::format("the synthetic world has a feeder's plan ({})", plan.error).c_str());
+        const auto plan = ReplayWire::MakeKeyframePlan(contents, ModelKeyframe(contents, 0, 2100));
+        Check(plan.error.empty() && !plan.posts.empty(), std::format("the synthetic world has a feeder's plan from the model's keyframe after its load ({})", plan.error).c_str());
         if (plan.posts.empty()) {
             return;
         }
-        const auto observer = std::ranges::find(plan.changes, ReplayWire::ChangeKind::ObserverByte, &ReplayWire::Change::kind);
-        Check(
-            plan.first_record == 1 && plan.changes.size() == 2 && plan.changes.front().kind == ReplayWire::ChangeKind::LeftOut && plan.changes.front().count == 1 && observer != plan.changes.end() && contents.records[observer->record].MessageId() == 410,
-            "the plan is the recording from its 380 on, the 30 before it left out and 410's observer byte set, nothing else changed"
-        );
         Check(plan.controlled_agent == 10 && plan.map_type == ReplayWire::game_map_type, "the plan names the recorder's character and a game map");
-        Check(ProveFeed(contents, plan, UINT32_MAX, false, size_t{0}), "the synthetic world's plan is the recording byte for byte but for its listed changes, its stages in order, what the client needs and the order of real loads");
+        Check(ProveFeed(contents, plan, UINT32_MAX, false), "the synthetic world's plan holds its stages in order, what the client needs and the order of real loads");
         const auto proof = ProveWire(contents, plan, 20261125);
         Check(proof.error.empty() && proof.records > 0, std::format("the synthetic world's wire round trip is byte for byte ({})", proof.error).c_str());
 
@@ -1542,43 +1583,15 @@ namespace {
                 [](const ReplayState::OrderFailure& failure) {
                     return failure.field.message == 280 && failure.field.kind == ReplayState::IdKind::Guild;
                 }
-            ) && !ProveFeed(contents, guild_first, UINT32_MAX, false, size_t{0}),
+            ) && !ProveFeed(contents, guild_first, UINT32_MAX, false),
             "a plan with its guild message (280) moved first fails the order of real loads"
-        );
-        Check(
-            !ProveVerbatim(
-                 contents,
-                 Rebuilt(
-                     contents, plan,
-                     [](std::vector<std::vector<uint8_t>>& bodies) {
-                         bodies.back().back() ^= 1;
-                     }
-                 ),
-                 0
-            )
-                 .empty(),
-            "a plan with one byte changed and not listed is not the recording"
-        );
-        Check(
-            !ProveVerbatim(
-                 contents,
-                 Rebuilt(
-                     contents, plan,
-                     [](std::vector<std::vector<uint8_t>>& bodies) {
-                         bodies.erase(bodies.begin() + static_cast<std::ptrdiff_t>(bodies.size() / 2));
-                     }
-                 ),
-                 0
-            )
-                 .empty(),
-            "a plan with one record dropped and not listed is not the recording"
         );
 
         for (const auto join_ms : {10000u, 30000u, 60000u, UINT32_MAX}) {
             const auto keyframe_plan = ReplayWire::MakeKeyframePlan(contents, ModelKeyframe(contents, 0, join_ms));
             const auto failures = ReplayState::CheckOrder(contents.table, Fed(contents, keyframe_plan));
             Check(
-                keyframe_plan.error.empty() && failures.empty() && ProveFeed(contents, keyframe_plan, UINT32_MAX, false, std::nullopt) && ProveWire(contents, keyframe_plan, 20261126).error.empty(),
+                keyframe_plan.error.empty() && failures.empty() && ProveFeed(contents, keyframe_plan, UINT32_MAX, false) && ProveWire(contents, keyframe_plan, 20261126).error.empty(),
                 std::format("a keyframe built by the model at {} plays: its stages in order, what the client needs, the order of real loads and the wire ({})", JoinTime(join_ms), OrderSummary(failures, JoinMessages(keyframe_plan))).c_str()
             );
         }
@@ -1601,7 +1614,7 @@ namespace {
             }
             post.bytes = std::move(kept);
         }
-        Check(!ProveFeed(contents, without_state, UINT32_MAX, false, std::nullopt), "a plan whose 34 names an agent without its attribute state fails the feed check");
+        Check(!ProveFeed(contents, without_state, UINT32_MAX, false), "a plan whose 34 names an agent without its attribute state fails the feed check");
 
         ReplayWire::Rc4 sender;
         sender.Init(key, sizeof(key));
@@ -1636,13 +1649,28 @@ namespace {
         const auto write = [&](const wchar_t* name, const ReplayFile::Header& written, const ReplayFile::MessageTable& written_table, const bool close) {
             Check(WriteRecording(rows_folder / name, written, written_table, records, close), "a rows recording is written");
         };
+        const auto write_maps = [&](const wchar_t* name, ReplayFile::Header written, const std::vector<ReplayFile::Chapter>& chapters) {
+            ReplayFile::Writer writer;
+            auto ok = writer.Open(rows_folder / name, written, table);
+            for (const auto& chapter : chapters) {
+                ok &= writer.AppendChapter(chapter) && (!chapter.is_explorable || writer.AppendKeyframe(chapter.time_ms, ReplayFile::KeyframeKind::AfterLoad, {records.front()}));
+                for (const auto& record : records) {
+                    ok &= writer.Append(chapter.time_ms + record.time_ms, record.body.data(), record.body.size());
+                }
+            }
+            written.record_count = static_cast<uint32_t>(records.size() * chapters.size());
+            Check(ok && writer.Close(written), "a rows recording with maps and keyframes is written");
+        };
         const uint32_t listed[] = {148, 430, 857, 148, 639};
         for (size_t i = 0; i < std::size(listed); i++) {
             auto row_header = header;
             row_header.map_id = listed[i];
             row_header.start_time_unix_ms = now - (i + 1) * 3600000;
-            write(std::format(L"listed-{}.gwrec", i).c_str(), row_header, table, true);
+            write_maps(std::format(L"listed-{}.gwrec", i).c_str(), row_header, {{0, 0, listed[i], 1, 2}});
         }
+        auto two_maps = header;
+        two_maps.start_time_unix_ms = now - 70 * 3600000ull;
+        write_maps(L"two-maps.gwrec", two_maps, {{0, 0, 449, 0, 10}, {0, 1000, 448, 1, 2}});
         auto other_build = header;
         other_build.client_build = 39112;
         other_build.start_time_unix_ms = now - 100 * 3600000ull;
@@ -1672,16 +1700,20 @@ namespace {
 
         const std::set<uint32_t> server_keys = {ReplayObserve::first_key, ReplayObserve::first_key + 2};
         const auto scan = ReplayObserve::ScanFolder(rows_folder, 39167, ReplayFile::TableDigest(table), server_keys, now);
-        Check(scan.rows.size() == std::size(listed) + 1 && scan.left_out.size() == 5, "the rows folder gives five rows from their loads and an outpost's row, and leaves five files out");
+        Check(scan.rows.size() == std::size(listed) + 2 && scan.left_out.size() == 5, "the rows folder gives one row per recording (seven) and leaves five files out");
         if (scan.rows.empty()) {
             return;
         }
         const auto proof = ProveRows(table, scan, false);
         Check(!proof.layout_errors && !proof.disallowed_types && !proof.keys_out_of_range && !proof.duplicate_keys, "every row is valid by the live 414 table, its type allowed, its key ours and unique");
         Check(
-            std::ranges::count(scan.rows, ReplayObserve::Start::Outpost, &ReplayObserve::Row::start) == 1 && std::ranges::count(scan.rows, ReplayObserve::Start::Load, &ReplayObserve::Row::start) == std::ssize(listed),
-            "an outpost's chapter is listed as one, explorable ones from their loads"
+            std::ranges::count(scan.rows, std::optional<size_t>(), &ReplayObserve::Row::keyframe) == 1 && std::ranges::count(scan.rows, std::optional<size_t>(0), &ReplayObserve::Row::keyframe) == std::ssize(listed) + 1,
+            "a recording of outposts alone is listed, not playable; the others play from a keyframe"
         );
+        const auto two = std::ranges::find(scan.rows, std::filesystem::path(L"two-maps.gwrec"), [](const ReplayObserve::Row& row) {
+            return row.path.filename();
+        });
+        Check(two != scan.rows.end() && two->chapter == 1 && two->keyframe == 0 && two->maps == 2 && two->header.map_id == 448, "a recording of an outpost then an explorable map is one row of two maps, played from the explorable map's first keyframe");
         Check(
             std::ranges::none_of(
                 scan.rows,
@@ -1700,7 +1732,7 @@ namespace {
             ),
             "the rows are the newest first"
         );
-        Check(scan.rows.size() > 1 && scan.rows[0].message.age_minutes == 60 && scan.rows[1].message.age_minutes == 120, "a row's age is the minutes since its chapter began");
+        Check(scan.rows.size() > 1 && scan.rows[0].message.age_minutes == 60 && scan.rows[1].message.age_minutes == 120, "a row's age is the minutes since its recording began");
         const auto left_out_for = [&scan](const wchar_t* name) {
             const auto found = std::ranges::find(scan.left_out, std::filesystem::path(name), [](const ReplayObserve::LeftOut& left_out) {
                 return left_out.path.filename();
@@ -1752,12 +1784,11 @@ namespace {
             if (verbose) {
                 printf("== %s\n", starts.names[s].c_str());
             }
-            if (!plan.error.empty() && !starts.from_load[s]) {
-                printf("%s: %s\nfeed: FAILED\n", starts.names[s].c_str(), plan.error.c_str());
-                passed = false;
+            if (starts.Refused(s)) {
+                passed &= s < starts.file_keyframes;
                 continue;
             }
-            passed &= ProveFeed(contents, plan, verbose ? 0 : UINT32_MAX, verbose, starts.from_load[s] ? std::optional(starts.chapters[s]) : std::nullopt);
+            passed &= ProveFeed(contents, plan, verbose ? 0 : UINT32_MAX, verbose);
             passed &= ProveWire(contents, plan, 20261127).error.empty();
         }
         return passed && !starts.plans.empty();
@@ -1814,31 +1845,27 @@ namespace {
         Check(ok, "a v2 recording with two chapters and two keyframes is written");
         ReplayFile::Contents v2;
         Check(ReplayFile::Read(path, v2, error), std::format("the v2 recording reads back ({})", error).c_str());
-        Check(v2.version == ReplayFile::format_version && v2.header == header && v2.records == written, "its header and stream read back as written");
+        Check(v2.header == header && v2.records == written, "its header and stream read back as written");
         Check(v2.chapters == chapters && v2.keyframes == keyframes, "its chapters and keyframes read back as written, each before the record it was written before");
         ReplayFile::Contents index;
         Check(
             ReplayFile::Read(path, index, error, false) && index.chapters == chapters && index.keyframes.size() == keyframes.size() && index.records.size() == written.size() && index.keyframes[1].records.empty(),
             "its index (no bodies) holds its chapters, keyframes and record times"
         );
-        Check(PlaysAll(v2, false), "every start of the v2 recording plays: each chapter from its load (as recorded but for the listed changes) and each keyframe, their stages in order, what the client needs, the order of real loads and the wire");
+        Check(PlaysAll(v2, false), "every start of the v2 recording plays: each keyframe and the model's after each load, their stages in order, what the client needs, the order of real loads and the wire");
         Check(ProveOrder(v2), "the v2 recording's starts and model keyframes hold the order of real loads");
-        Check(ProveCompare(v2) == 0, "the v2 recording compares: its loads against the model, its keyframes listed, no bag content");
-
-        const auto v1_path = folder / L"self-test-v1.gwrec";
-        Check(WriteRecording(v1_path, world.header, world.table, world.records, true), "a recording is written to be made version 1");
-        if (const auto file = _wfopen(v1_path.c_str(), L"r+b")) {
-            const uint8_t version[] = {ReplayFile::first_format_version, 0};
-            fseek(file, sizeof(ReplayFile::magic), SEEK_SET);
-            fwrite(version, 1, sizeof(version), file);
-            fclose(file);
+        Check(ProveCompare(v2) == 0, "the v2 recording compares: its loads and keyframes against the model, no bag content, its names placeholders");
+        auto named = v2;
+        for (auto& record : named.keyframes.front().records) {
+            if (ReplayState::Message message; ReplayState::Decode(named.table, record.body, message) && message.id == 381 && !message.fields.empty()) {
+                message.fields[0].text = L"Real Name";
+                ReplayState::Encode(named.table, message, record.body);
+            }
         }
-        ReplayFile::Contents v1;
-        Check(
-            ReplayFile::Read(v1_path, v1, error) && v1.version == ReplayFile::first_format_version && v1.records == world.records && v1.keyframes.empty() && v1.chapters.size() == 1 && v1.chapters[0].map_id == world.header.map_id,
-            "a version 1 recording still reads: one chapter from its header, no keyframe"
-        );
-        Check(PlaysAll(v1, false), "a version 1 recording still plays from its load");
+        Check(CountNames(named.table, named.keyframes.front().records, named.header.flags).not_placeholders == 1, "a name that is not a placeholder in a keyframe is found, by count");
+        auto other = v2;
+        other.header.flags = 0;
+        Check(CountNames(other.table, named.keyframes.front().records, other.header.flags).not_placeholders == 0, "with the names settings off, names are not checked");
     }
 
     int SelfTest(const std::filesystem::path& folder)
@@ -1931,6 +1958,10 @@ int wmain(const int argc, const wchar_t* argv[])
     auto passed = !starts.plans.empty();
     for (size_t s = 0; s < starts.plans.size(); s++) {
         const auto& plan = starts.plans[s];
+        if (starts.Refused(s)) {
+            passed &= s < starts.file_keyframes;
+            continue;
+        }
         if (command == L"--wire") {
             const auto proof = ProveWire(contents, plan, 20261123);
             printf(
@@ -1941,12 +1972,7 @@ int wmain(const int argc, const wchar_t* argv[])
             continue;
         }
         printf("== %s\n", starts.names[s].c_str());
-        passed &= ProveFeed(contents, plan, static_cast<uint32_t>(_wtoi(argv[3])), true, starts.from_load[s] ? std::optional(starts.chapters[s]) : std::nullopt);
-    }
-    if (command == L"--feed" && contents.version == ReplayFile::first_format_version) {
-        const auto kept = Filtered(contents);
-        printf("== the stream as the recorder now keeps it (the no-inventory rule): %zu of %zu records\n", kept.records.size(), contents.records.size());
-        passed &= ProveFeed(kept, ReplayWire::MakePlan(kept, 0), 0, true, size_t{0});
+        passed &= ProveFeed(contents, plan, static_cast<uint32_t>(_wtoi(argv[3])), true);
     }
     printf("%s: %s\n", command == L"--wire" ? "wire" : "feed", passed ? "passed" : "FAILED");
     return passed ? 0 : 1;

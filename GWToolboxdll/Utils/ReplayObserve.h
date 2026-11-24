@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -40,19 +41,12 @@ namespace ReplayObserve {
     // The offsets the client's 414 row add reads (MsCliObserve.cpp): teams from +0x20, 0x84 bytes each, a team's name at +0x24.
     static_assert(sizeof(Team) == 0x84 && offsetof(Team, name) == 0x24 && offsetof(RowMessage, teams) == 0x20 && sizeof(RowMessage) == 0x128);
 
-    enum class Start : uint8_t {
-        Load,
-        Keyframe,
-        Outpost,
-    };
-
     struct Row {
         std::filesystem::path path;
         ReplayFile::Header header;
         size_t chapter = 0;
-        size_t keyframe = 0;
-        Start start = Start::Load;
-        uint32_t duration_ms = 0;
+        std::optional<size_t> keyframe;
+        size_t maps = 0;
         RowMessage message;
     };
 
