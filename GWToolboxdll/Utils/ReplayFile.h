@@ -12,9 +12,12 @@
 
 namespace ReplayFile {
     constexpr char magic[8] = {'G', 'W', 'T', 'B', 'R', 'E', 'C', '\0'};
-    constexpr uint16_t format_version = 1;
+    constexpr uint16_t first_format_version = 1;
+    constexpr uint16_t format_version = 2;
     constexpr uint16_t header_size = 96;
     constexpr size_t max_body_size = 0xFFFF;
+    constexpr uint16_t chapter_entry_id = 0xF001;
+    constexpr uint16_t keyframe_entry_id = 0xF002;
 
     enum Flags : uint32_t {
         NamesStripped = 1 << 0,
@@ -53,11 +56,42 @@ namespace ReplayFile {
         bool operator==(const Record&) const = default;
     };
 
+    struct Chapter {
+        size_t first_record = 0;
+        uint32_t time_ms = 0;
+        uint32_t map_id = 0;
+        uint32_t is_explorable = 0;
+        uint32_t map_region_type = 0;
+
+        bool operator==(const Chapter&) const = default;
+    };
+
+    enum class KeyframeKind : uint8_t {
+        Start,
+        AfterLoad,
+        Periodic,
+    };
+    const char* KeyframeKindName(KeyframeKind kind);
+
+    struct Keyframe {
+        size_t record_index = 0;
+        uint32_t time_ms = 0;
+        KeyframeKind kind = KeyframeKind::Periodic;
+        std::vector<Record> records;
+
+        bool operator==(const Keyframe&) const = default;
+    };
+
     struct Contents {
+        uint16_t version = format_version;
         Header header;
         MessageTable table;
         std::vector<Record> records;
+        std::vector<Chapter> chapters;
+        std::vector<Keyframe> keyframes;
         bool truncated_tail = false;
+
+        [[nodiscard]] size_t ChapterEnd(size_t chapter) const { return chapter + 1 < chapters.size() ? chapters[chapter + 1].first_record : records.size(); }
     };
 
     uint64_t TableDigest(const MessageTable& table);
@@ -87,7 +121,7 @@ namespace ReplayFile {
         std::unordered_map<std::wstring, std::wstring> mercenaries;
     };
 
-    bool Read(const std::filesystem::path& path, Contents& out, std::string& error);
+    bool Read(const std::filesystem::path& path, Contents& out, std::string& error, bool bodies = true);
     bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error);
 
     class Writer {
@@ -99,6 +133,8 @@ namespace ReplayFile {
 
         bool Open(const std::filesystem::path& path, const Header& header, const MessageTable& table);
         bool Append(uint32_t time_ms, const uint8_t* body, size_t body_size);
+        bool AppendChapter(const Chapter& chapter);
+        bool AppendKeyframe(uint32_t time_ms, KeyframeKind kind, const std::vector<Record>& records);
         bool Flush();
         bool Close(const Header& header);
 
@@ -111,4 +147,4 @@ namespace ReplayFile {
         FILE* file = nullptr;
         uint64_t size = 0;
     };
-}
+} // namespace ReplayFile

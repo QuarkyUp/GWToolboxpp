@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ReplayState {
@@ -31,13 +32,8 @@ namespace ReplayState {
     size_t DecodePrefix(const ReplayFile::MessageTable& table, const uint8_t* bytes, size_t size, Message& out, const ReplayFile::TextFilter& filter = {});
     bool Decode(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& body, Message& out, const ReplayFile::TextFilter& filter = {});
     bool Encode(const ReplayFile::MessageTable& table, const Message& message, std::vector<uint8_t>& out);
-    std::vector<uint32_t> NamedAgents(const ReplayFile::MessageTable& table, const Message& message);
+    Message Blank(const ReplayFile::MessageTable& table, uint16_t message_id);
 
-    enum class Kind { Unknown, State, Transient, Private };
-    Kind KindOf(uint16_t message_id);
-    const char* KindName(Kind kind);
-    bool IsCharacterMessageOf(const Message& message, uint32_t agent_id);
-    bool Streamed(const ReplayFile::MessageTable& table, const ReplayFile::Record& record, uint32_t controlled_agent);
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
     enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };
@@ -61,10 +57,17 @@ namespace ReplayState {
         uint32_t id = 0;
     };
 
+    struct Order {
+        std::set<std::pair<IdKind, uint32_t>> brought;
+
+        [[nodiscard]] std::vector<std::pair<IdField, uint32_t>> Unbrought(const ReplayFile::MessageTable& table, const Message& message) const;
+        void Bring(const ReplayFile::MessageTable& table, const Message& message);
+    };
+
     std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages);
     std::string Describe(const OrderFailure& failure);
 
-    constexpr uint32_t default_keyframe_interval_ms = 10000;
+    std::vector<uint32_t> Identity(const Message& message);
 
     class World {
     public:
@@ -73,9 +76,6 @@ namespace ReplayState {
         bool Apply(const ReplayFile::Record& record);
         void Apply(const Message& message);
         [[nodiscard]] std::vector<Message> Join() const;
-        [[nodiscard]] std::string Dump(bool with_texts) const;
-        [[nodiscard]] uint32_t Clock() const { return clock; }
-        [[nodiscard]] size_t AgentCount() const { return agents.size(); }
         [[nodiscard]] uint32_t LayoutErrors() const { return layout_errors; }
         [[nodiscard]] uint32_t ControlledAgent() const;
 
@@ -104,10 +104,18 @@ namespace ReplayState {
             std::map<uint32_t, Message> attribute_updates;
         };
 
+        struct PlayerFlags {
+            uint32_t value = 0;
+            uint32_t mask = 0;
+        };
+
         void Tick(uint32_t milliseconds);
         void ApplyToAgent(Agent& agent, const Message& message);
-        void JoinAgent(const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const;
+        void JoinRows(uint32_t agent_id, const Agent& agent, bool before_connect, std::vector<Message>& out, std::set<Key>& emitted) const;
+        void JoinAgent(uint32_t agent_id, const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const;
         void JoinItem(uint32_t item_id, std::vector<Message>& out, std::set<Key>& emitted) const;
+        void JoinInventory(uint32_t inventory_id, std::vector<Message>& out, std::set<Key>& emitted) const;
+        void JoinCharacter(uint32_t agent_id, std::vector<Message>& out, std::set<Key>& emitted) const;
         [[nodiscard]] std::set<uint32_t> ShownItems() const;
         [[nodiscard]] bool Alive(uint32_t agent_id) const;
         [[nodiscard]] uint32_t ReportedAgent() const;
@@ -118,33 +126,32 @@ namespace ReplayState {
         bool connected = false;
         uint32_t layout_errors = 0;
         std::vector<Message> entry;
+        std::vector<Message> map_init;
         std::map<Key, Message> instance;
         std::map<uint32_t, Agent> agents;
         std::map<uint32_t, Character> characters;
         std::map<uint32_t, Message> players;
-        std::map<uint32_t, uint32_t> player_flags;
+        std::map<uint32_t, PlayerFlags> player_flags;
         std::map<uint32_t, std::map<uint16_t, Message>> items;
-        std::set<uint32_t> shown_items;
-        std::set<uint32_t> inventory_items;
         Message reporter;
     };
 
-    struct Keyframe {
-        size_t record_index = 0;
-        uint32_t time_ms = 0;
-        World world;
+    class InventoryFilter {
+    public:
+        explicit InventoryFilter(const ReplayFile::MessageTable& table) : table(&table) {}
+
+        bool Keep(const Message& message, std::vector<Message>& shown_before, std::vector<uint32_t>& unknown_items);
+        [[nodiscard]] bool Holds(const Message& message) const;
+        [[nodiscard]] size_t Held() const;
+
+    private:
+        const ReplayFile::MessageTable* table;
+        std::set<uint32_t> shown;
+        std::map<uint32_t, std::map<uint16_t, Message>> held;
     };
 
-    std::vector<Keyframe> Keyframes(const ReplayFile::Contents& contents, uint32_t interval_ms);
+    bool IsBagContent(const Message& message);
+    std::vector<uint32_t> ShownItems(const Message& message);
+
     std::vector<ReplayFile::Record> JoinRecords(const ReplayFile::MessageTable& table, const World& world, uint32_t time_ms);
-    std::vector<ReplayFile::Record> Seek(const ReplayFile::Contents& contents, const std::vector<Keyframe>& keyframes, uint32_t time_ms);
-
-    struct JoinCheck {
-        std::vector<std::string> failures;
-        size_t join_records = 0;
-        size_t stream_rows_before_creation = 0;
-        size_t player_rows_without_agent = 0;
-    };
-
-    JoinCheck CheckJoin(const ReplayFile::Contents& contents);
-}
+} // namespace ReplayState

@@ -1,17 +1,30 @@
 #include "stdafx.h"
 
 #include <GWCA/Context/CharContext.h>
+#include <GWCA/Context/ItemContext.h>
 #include <GWCA/Context/PreGameContext.h>
+#include <GWCA/Context/WorldContext.h>
 
 #include <GWCA/Constants/UIMessages.h>
 
 #include <GWCA/GameEntities/Agent.h>
+#include <GWCA/GameEntities/Hero.h>
+#include <GWCA/GameEntities/Item.h>
 #include <GWCA/GameEntities/Map.h>
 #include <GWCA/GameEntities/Match.h>
+#include <GWCA/GameEntities/NPC.h>
+#include <GWCA/GameEntities/Party.h>
+#include <GWCA/GameEntities/Player.h>
+#include <GWCA/GameEntities/Quest.h>
+#include <GWCA/GameEntities/Skill.h>
 
 #include <GWCA/Managers/AgentMgr.h>
+#include <GWCA/Managers/EffectMgr.h>
+#include <GWCA/Managers/ItemMgr.h>
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/MemoryMgr.h>
+#include <GWCA/Managers/PartyMgr.h>
+#include <GWCA/Managers/SkillbarMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
 #include <GWCA/Managers/UIMgr.h>
 
@@ -28,6 +41,7 @@
 #include <Utils/EncString.h>
 #include <Utils/ReplayFile.h>
 #include <Utils/ReplayObserve.h>
+#include <Utils/ReplayState.h>
 #include <Utils/ReplayWire.h>
 #include <Utils/StoCHandlers.h>
 #include <Utils/TextUtils.h>
@@ -35,10 +49,72 @@
 namespace {
     using Clock = std::chrono::steady_clock;
     using GW::Packet::StoC::PacketBase;
+    using ReplayState::Message;
 
     constexpr auto idle_timeout = std::chrono::seconds(60);
     constexpr auto flush_interval = std::chrono::seconds(5);
-    constexpr auto registration_retry_interval = std::chrono::seconds(1);
+    constexpr uint32_t keyframe_interval_ms = 30000;
+
+    enum MessageId : uint16_t {
+        AgentConnect = 31,
+        AgentCreate = 32,
+        AgentReporter = 34,
+        CharAccountNameData = 48,
+        CharAttributeState = 55,
+        CharEffectUpkeepApplied = 65,
+        CharEffectApplied = 66,
+        CharQuestGeneralInfo = 80,
+        CharQuestAddMarker = 83,
+        CharNpcProperties = 86,
+        CharNpcModel = 87,
+        CharPlayerCreate = 89,
+        CharNpcUpdateWeapons = 109,
+        CharEquipment = 110,
+        CharContextValue112 = 112,
+        CharHeroActivate = 114,
+        CharHeroDataAdd = 115,
+        CharToClient153 = 153,
+        CharAgentUpdateNpcName = 155,
+        CharNotifyDword = 159,
+        CharAgentAttrUpdateFloat = 162,
+        CharAgentUpdateProfession = 166,
+        CharUpdateAgentPartysize = 176,
+        CharPlayerUnlockedProfession = 182,
+        CharProfessions = 183,
+        CharSkillbar = 218,
+        CharUnlockedSkills = 219,
+        CharPlayerAttrSet = 233,
+        CharPlayerAttrMaxKurzick = 234,
+        CharPlayerAttrMaxLuxon = 235,
+        CharPlayerAttrMaxBalthazar = 236,
+        CharPlayerAttrMaxImperial = 237,
+        CharAgentInitialEffects = 240,
+        CharPlayerTeam = 242,
+        CharTitleRankDisplay = 244,
+        ItemInventoryCreate = 324,
+        ItemReportDetailAll = 353,
+        MissionAccessRights = 366,
+        MissionInstanceLoadHead = 380,
+        MissionInstanceLoadPlayerName = 381,
+        MissionConfigEnd = 390,
+        MissionInstanceLoadFinish = 398,
+        MissionLoadMap = 406,
+        MissionManifestComplete = 408,
+        MissionManifestPhase = 409,
+        PartyAssign = 435,
+        PartySetDifficulty = 447,
+        PartyHeroAdd = 451,
+        PartyMemberAdd = 460,
+        PartyMembershipBegin = 467,
+        PartyMembershipEnd = 468,
+    };
+
+    enum Notice : uint32_t {
+        Level = 36,
+        MaxEnergy = 41,
+        MaxHealth = 42,
+    };
+    constexpr uint32_t health_value = 34;
 
     ReplayRecorderModule::Settings settings;
 
@@ -48,7 +124,6 @@ namespace {
     uint64_t message_table_digest = 0;
     constexpr uint32_t viewpoint_message_id = 172;
     uintptr_t game_viewpoint_handler = 0;
-    Clock::time_point next_registration_attempt;
 
     std::mutex recording_mutex;
     ReplayFile::Writer writer;
@@ -62,13 +137,19 @@ namespace {
     uint32_t pending_chat_time_ms = 0;
     bool has_pending_chat = false;
     std::optional<ReplayFile::NameStripper> name_stripper;
-    std::string status = "Waiting for the next map";
+    std::optional<ReplayState::InventoryFilter> inventory_filter;
+    std::string status = "Not recording";
+    bool record_requested = false;
+    bool stopped_until_login = false;
+    bool load_keyframe_due = false;
+    bool connect_seen = false;
+    uint32_t next_keyframe_ms = 0;
+    uint32_t keyframe_count = 0;
+    uint32_t chapter_count = 0;
 
     using ObserveGame_pt = void(__cdecl*)(uint32_t game_key);
-    using GameProps_pt = uint8_t*(__cdecl*)();
     ObserveGame_pt ObserveGame_Func = nullptr;
     ObserveGame_pt ObserveGame_Ret = nullptr;
-    GameProps_pt GameProps_Func = nullptr;
     GW::HookEntry observe_hook_entry;
     bool observe_applied = false;
     std::atomic_bool emulating_rows = false;
@@ -93,12 +174,18 @@ namespace {
         return TextUtils::WStringToString(recording_path.filename().wstring());
     }
 
+    bool PveMap(const GW::Constants::MapID map_id)
+    {
+        return GW::Map::GetMapInfo(map_id) && !GWToolbox::ShouldDisableToolbox(map_id);
+    }
+
     void FinishRecording()
     {
         if (!writer.IsOpen()) {
             return;
         }
         has_pending_chat = false;
+        inventory_filter.reset();
         header.duration_ms = ElapsedMs(recording_start);
         header.flags |= ReplayFile::Complete;
         const auto size = writer.Size();
@@ -115,81 +202,481 @@ namespace {
             Log::Error("Replay Recorder: %s", status.c_str());
             return;
         }
-        status = std::format("Saved {}: {} messages, {} KB, {} layout errors{}", RecordingName(), header.record_count, size / 1024, header.layout_errors,
-                             header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : "");
+        status = std::format(
+            "Saved {}: {} chapters, {} keyframes, {} messages, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, size / 1024, header.layout_errors,
+            header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : ""
+        );
         Log::Info("Replay Recorder: %s", status.c_str());
     }
 
-    void StartRecording(const GW::Packet::StoC::GameSrvTransfer* transfer)
+    void PackRecord(const PacketBase* packet, std::vector<uint8_t>& out)
     {
-        const auto map_id = static_cast<GW::Constants::MapID>(transfer->map_id);
+        const auto& fields = message_table[packet->header];
+        if (!ReplayFile::PackMessage(packet->header, fields.data(), static_cast<uint32_t>(fields.size()), reinterpret_cast<const uint8_t*>(packet), out, name_stripper ? name_stripper->For(static_cast<uint16_t>(packet->header)) : ReplayFile::TextFilter())) {
+            out = {static_cast<uint8_t>(packet->header), static_cast<uint8_t>(packet->header >> 8)};
+            header.layout_errors++;
+        }
+    }
+
+    std::vector<uint8_t> Encoded(const Message& message)
+    {
+        std::vector<uint8_t> encoded;
+        Message stripped;
+        if (!ReplayState::Encode(message_table, message, encoded) || !name_stripper) {
+            return encoded;
+        }
+        // Texts made from memory pass the same names settings as the recorded ones, by the same decoding.
+        if (!ReplayState::Decode(message_table, encoded, stripped, name_stripper->For(message.id)) || !ReplayState::Encode(message_table, stripped, encoded)) {
+            encoded.clear();
+        }
+        return encoded;
+    }
+
+    bool WriteRecord(const uint32_t time_ms, const std::vector<uint8_t>& bytes)
+    {
+        const auto size_cap = static_cast<uint64_t>(settings.size_cap_mb) << 20;
+        if (writer.Size() + bytes.size() + 6 > size_cap) {
+            header.flags |= ReplayFile::SizeCapReached;
+            FinishRecording();
+            return false;
+        }
+        if (!writer.Append(time_ms, bytes.data(), bytes.size())) {
+            FinishRecording();
+            return false;
+        }
+        header.record_count++;
+        last_record_at = Clock::now();
+        return true;
+    }
+
+    Message ItemDetails(const uint32_t item_id)
+    {
+        const auto item = GW::Items::GetItemById(item_id);
+        auto details = ReplayState::Blank(message_table, ItemReportDetailAll);
+        if (!item || details.fields.size() < 13) {
+            return {};
+        }
+        const uint32_t values[] = {
+            item->item_id,
+            item->model_file_id,
+            static_cast<uint32_t>(item->type),
+            item->dye.dye_tint,
+            static_cast<uint32_t>(item->dye.dye1) | static_cast<uint32_t>(item->dye.dye2) << 4 | static_cast<uint32_t>(item->dye.dye3) << 8 | static_cast<uint32_t>(item->dye.dye4) << 12,
+            item->item_formula,
+            0,
+            item->interaction,
+            item->value,
+            item->model_id,
+            item->quantity
+        };
+        for (size_t i = 0; i < std::size(values); i++) {
+            details.Set(i, values[i]);
+        }
+        details.fields[11].text = item->name_enc ? item->name_enc : L"";
+        details.fields[12].numbers.assign(reinterpret_cast<const uint32_t*>(item->mod_struct), reinterpret_cast<const uint32_t*>(item->mod_struct) + (item->mod_struct ? item->mod_struct_size : 0));
+        return details;
+    }
+
+    uint32_t TeamToken(const GW::AgentLiving* living, const GW::WorldContext* world)
+    {
+        // The tokens every load at hand gives: the players' team ('play', the world's own), foes ('mon1'), the rest ('nonc').
+        constexpr uint32_t foes = 0x6D6F6E31;
+        constexpr uint32_t others = 0x6E6F6E63;
+        return living->allegiance == GW::Constants::Allegiance::Ally_NonAttackable || living->IsPlayer() ? world->playerTeamToken : living->allegiance == GW::Constants::Allegiance::Enemy ? foes : others;
+    }
+
+    ReplayState::World Snapshot()
+    {
+        ReplayState::World world(message_table);
+        const auto apply = [&world](const Message& message) {
+            if (!message.fields.empty() || message_table[message.id].size() <= 1) {
+                world.Apply(message);
+            }
+        };
+        const auto make = [](const uint16_t id, std::initializer_list<uint32_t> values) {
+            auto message = ReplayState::Blank(message_table, id);
+            size_t field = 0;
+            for (const auto value : values) {
+                message.Set(field++, value);
+            }
+            return message;
+        };
+        const auto char_context = GW::GetCharContext();
+        const auto world_context = GW::GetWorldContext();
+        const auto controlled = GW::Agents::GetControlledCharacter();
+        const auto agents = GW::Agents::GetAgentArray();
+        if (!char_context || !world_context || !controlled || !agents) {
+            return world;
+        }
+        const auto map_id = GW::Map::GetMapID();
         const auto map_info = GW::Map::GetMapInfo(map_id);
-        if (!map_info || GWToolbox::ShouldDisableToolbox(map_id)) {
-            status = std::format("Not recording map {}: PvP or unknown", transfer->map_id);
+
+        auto head = make(MissionInstanceLoadHead, {char_context->h0054[0] & 0xFF, char_context->h0054[1] & 0xFF, char_context->h0054[2] & 0xFF, char_context->h0054[3] & 0xFF});
+        apply(head);
+        apply(ReplayState::Blank(message_table, MissionConfigEnd));
+        auto player_name = ReplayState::Blank(message_table, MissionInstanceLoadPlayerName);
+        if (!player_name.fields.empty()) {
+            player_name.fields[0].text = char_context->player_name;
+        }
+        apply(player_name);
+        constexpr uint32_t instance_flag_0x20 = 0x20;
+        apply(make(
+            GAME_SMSG_INSTANCE_LOAD_INFO, {char_context->player_number, static_cast<uint32_t>(char_context->current_map_id), static_cast<uint32_t>(char_context->current_map_type), char_context->district_number,
+                                           static_cast<uint32_t>(char_context->language), 0, (char_context->player_flags & instance_flag_0x20) != 0}
+        ));
+        for (const auto& quest : world_context->quest_log) {
+            auto general = make(CharQuestGeneralInfo, {static_cast<uint32_t>(quest.quest_id), quest.log_state});
+            if (general.fields.size() > 5) {
+                general.fields[2].text = quest.location ? quest.location : L"";
+                general.fields[3].text = quest.name ? quest.name : L"";
+                general.fields[4].text = quest.npc ? quest.npc : L"";
+                general.Set(5, static_cast<uint32_t>(quest.map_from));
+            }
+            apply(general);
+            auto marker = make(CharQuestAddMarker, {static_cast<uint32_t>(quest.quest_id)});
+            if (marker.fields.size() > 3) {
+                marker.SetF(1, quest.marker.x, 0);
+                marker.SetF(1, quest.marker.y, 1);
+                marker.Set(2, quest.marker.zplane);
+                marker.Set(3, static_cast<uint32_t>(quest.map_to));
+            }
+            apply(marker);
+        }
+        apply(make(CharPlayerAttrMaxKurzick, {world_context->max_kurzick}));
+        apply(make(CharPlayerAttrMaxLuxon, {world_context->max_luxon}));
+        apply(make(CharPlayerAttrMaxBalthazar, {world_context->max_balth}));
+        apply(make(CharPlayerAttrMaxImperial, {world_context->max_imperial}));
+        apply(make(CharContextValue112, {world_context->is_hard_mode_unlocked}));
+        if (world_context->accountInfo) {
+            const auto& account = *world_context->accountInfo;
+            auto name = make(CharAccountNameData, {});
+            if (name.fields.size() > 6) {
+                name.fields[0].text = account.account_name ? account.account_name : L"";
+                const uint32_t values[] = {account.wins, account.losses, account.rating, account.qualifier_points, account.rank, account.tournament_reward_points};
+                for (size_t i = 0; i < std::size(values); i++) {
+                    name.Set(i + 1, values[i]);
+                }
+            }
+            apply(name);
+        }
+        apply(make(CharToClient153, {static_cast<uint32_t>(map_id), 0}));
+        constexpr uint32_t manifest_size = 898;
+        for (const auto phase : {0u, 1u}) {
+            apply(make(MissionManifestPhase, {phase}));
+        }
+        apply(make(MissionManifestComplete, {2, manifest_size, 0}));
+        for (const auto phase : {0u, 1u}) {
+            apply(make(MissionManifestPhase, {phase}));
+        }
+        apply(make(MissionManifestComplete, {0, static_cast<uint32_t>(map_id), 0}));
+        auto load_map = make(MissionLoadMap, {map_info ? map_info->file_id : 0});
+        if (load_map.fields.size() > 3) {
+            load_map.SetF(1, controlled->pos.x, 0);
+            load_map.SetF(1, controlled->pos.y, 1);
+            load_map.Set(2, controlled->pos.zplane);
+        }
+        apply(load_map);
+        apply(make(CharPlayerTeam, {world_context->playerTeamToken}));
+
+        const auto is_character = [world_context](const uint32_t agent_id) {
+            return std::ranges::any_of(world_context->party_profession_states, [agent_id](const GW::ProfessionState& state) {
+                return state.agent_id == agent_id;
+            });
+        };
+        for (const auto& state : world_context->party_profession_states) {
+            const auto living = GW::Agents::GetAgentByID(state.agent_id) ? GW::Agents::GetAgentByID(state.agent_id)->GetAsAgentLiving() : nullptr;
+            apply(make(CharAttributeState, {state.agent_id, 0, 0}));
+            apply(make(CharProfessions, {state.agent_id, static_cast<uint32_t>(state.primary), static_cast<uint32_t>(state.secondary), 0}));
+            apply(make(CharPlayerUnlockedProfession, {state.agent_id, state.unlocked_professions}));
+            if (const auto skillbar = GW::SkillbarMgr::GetSkillbar(state.agent_id); skillbar && message_table[CharSkillbar].size() > 3) {
+                auto skills = make(CharSkillbar, {state.agent_id});
+                for (const auto& skill : skillbar->skills) {
+                    skills.fields[1].numbers.push_back(static_cast<uint32_t>(skill.skill_id));
+                    skills.fields[2].numbers.push_back(0);
+                }
+                skills.Set(3, 1);
+                apply(skills);
+            }
+            if (living) {
+                apply(make(CharNotifyDword, {MaxEnergy, state.agent_id, living->max_energy}));
+                apply(make(CharNotifyDword, {MaxHealth, state.agent_id, living->max_hp}));
+            }
+        }
+        for (const auto& hero : world_context->hero_info) {
+            apply(make(CharHeroDataAdd, {hero.hero_id, hero.level, static_cast<uint32_t>(hero.primary), static_cast<uint32_t>(hero.secondary), hero.hero_file_id, hero.model_file_id}));
+        }
+        for (const auto& flag : world_context->hero_flags) {
+            apply(make(ItemInventoryCreate, {flag.inventory_id, 1}));
+            apply(make(CharHeroActivate, {flag.hero_id, flag.agent_id, flag.inventory_id, 0}));
+        }
+        if (world_context->unlocked_character_skills.size()) {
+            auto unlocked = ReplayState::Blank(message_table, CharUnlockedSkills);
+            if (!unlocked.fields.empty()) {
+                unlocked.fields[0].numbers.assign(world_context->unlocked_character_skills.begin(), world_context->unlocked_character_skills.end());
+            }
+            apply(unlocked);
+        }
+        apply(make(
+            CharPlayerAttrSet,
+            {world_context->experience, world_context->current_kurzick, world_context->total_earned_kurzick, world_context->current_luxon, world_context->total_earned_luxon, world_context->current_imperial, world_context->total_earned_imperial, 0, 0,
+             world_context->level, world_context->morale, world_context->current_balth, world_context->total_earned_balth, world_context->current_skill_points, world_context->total_earned_skill_points}
+        ));
+
+        apply(make(AgentConnect, {GW::Map::GetInstanceTime()}));
+        for (const auto agent : *agents) {
+            if (!agent) {
+                continue;
+            }
+            auto create = ReplayState::Blank(message_table, AgentCreate);
+            if (create.fields.size() < 23) {
+                break;
+            }
+            const auto living = agent->GetAsAgentLiving();
+            const auto item = agent->GetAsAgentItem();
+            if (!living && !item) {
+                continue;
+            }
+            constexpr uint32_t npc_class = 0x20000000;
+            constexpr uint32_t player_class = 0x30000000;
+            constexpr uint32_t living_def = 1;
+            constexpr uint32_t item_def = 4;
+            constexpr uint32_t npc_flags = 9;
+            constexpr uint32_t player_flags = 5;
+            constexpr float living_radius = 12.f;
+            constexpr float default_speed = 288.f;
+            const auto infinity = std::numeric_limits<float>::infinity();
+            const auto agent_class = living ? (living->IsPlayer() ? player_class | living->login_number : npc_class | living->player_number) : item->item_id;
+            const uint32_t values[] = {agent->agent_id, agent_class, living ? living_def : item_def, living ? (living->IsPlayer() ? player_flags : npc_flags) : 0};
+            for (size_t i = 0; i < std::size(values); i++) {
+                create.Set(i, values[i]);
+            }
+            create.SetF(4, agent->pos.x, 0);
+            create.SetF(4, agent->pos.y, 1);
+            create.Set(5, agent->pos.zplane);
+            create.SetF(6, agent->rotation_cos, 0);
+            create.SetF(6, agent->rotation_sin, 1);
+            create.Set(7, 1);
+            create.SetF(8, living ? default_speed : 0.f);
+            create.SetF(9, 1.f);
+            create.SetF(10, living ? living_radius : 0.f);
+            create.Set(11, living ? TeamToken(living, world_context) : 0);
+            create.SetF(18, infinity, 0);
+            create.SetF(18, infinity, 1);
+            create.SetF(21, infinity, 0);
+            create.SetF(21, infinity, 1);
+            if (living && !living->IsPlayer()) {
+                if (const auto npc = living->player_number < world_context->npcs.size() ? &world_context->npcs[living->player_number] : nullptr; npc && npc->model_file_id) {
+                    auto properties =
+                        make(CharNpcProperties, {living->player_number, npc->model_file_id, npc->skin_file_id, std::bit_cast<uint32_t>(npc->visual_adjustment), npc->appearance, npc->npc_flags, static_cast<uint32_t>(npc->primary), npc->default_level});
+                    if (properties.fields.size() > 8) {
+                        properties.fields[8].text = npc->name_enc ? npc->name_enc : L"";
+                    }
+                    apply(properties);
+                    auto model = make(CharNpcModel, {living->player_number});
+                    if (model.fields.size() > 1 && npc->model_files) {
+                        model.fields[1].numbers.assign(npc->model_files, npc->model_files + npc->files_count);
+                    }
+                    apply(model);
+                }
+                if (const auto name = GW::Agents::GetAgentEncName(agent)) {
+                    auto npc_name = make(CharAgentUpdateNpcName, {agent->agent_id});
+                    if (npc_name.fields.size() > 1) {
+                        npc_name.fields[1].text = name;
+                    }
+                    apply(npc_name);
+                }
+            }
+            if (living) {
+                apply(make(CharAgentUpdateProfession, {agent->agent_id, static_cast<uint32_t>(living->primary), static_cast<uint32_t>(living->secondary)}));
+                apply(make(CharNotifyDword, {Level, agent->agent_id, living->level}));
+                apply(make(CharAgentInitialEffects, {agent->agent_id, living->effects}));
+            }
+            if (item) {
+                apply(ItemDetails(item->item_id));
+            }
+            apply(create);
+            if (living && !is_character(agent->agent_id)) {
+                apply(make(CharAgentAttrUpdateFloat, {health_value, agent->agent_id, std::bit_cast<uint32_t>(living->hp)}));
+            }
+            if (living && living->equip && living->equip[0]) {
+                auto equipment = make(CharEquipment, {agent->agent_id});
+                for (size_t slot = 0; slot < 9 && slot + 1 < equipment.fields.size(); slot++) {
+                    const auto item_id = living->equip[0]->item_ids[slot];
+                    apply(ItemDetails(item_id));
+                    equipment.Set(slot + 1, item_id);
+                }
+                apply(equipment);
+            }
+            if (living && (living->weapon_item_id || living->offhand_item_id) && !living->IsPlayer()) {
+                apply(ItemDetails(living->weapon_item_id));
+                apply(ItemDetails(living->offhand_item_id));
+                apply(make(CharNpcUpdateWeapons, {agent->agent_id, living->weapon_item_id, living->offhand_item_id}));
+            }
+        }
+        for (const auto& player : world_context->players) {
+            if (!player.agent_id) {
+                continue;
+            }
+            auto row = make(CharPlayerCreate, {player.player_number, player.agent_id, player.appearance_bitmap, static_cast<uint32_t>(player.secondary)});
+            if (row.fields.size() > 6) {
+                row.fields[6].text = player.name ? player.name : L"";
+            }
+            apply(row);
+            apply(make(CharUpdateAgentPartysize, {player.player_number, player.party_size}));
+            apply(make(CharTitleRankDisplay, {player.player_number, player.active_title_tier}));
+        }
+        if (const auto party_effects = GW::Effects::GetPartyEffectsArray()) {
+            for (const auto& effects : *party_effects) {
+                for (const auto& effect : effects.effects) {
+                    apply(make(CharEffectApplied, {effects.agent_id, static_cast<uint32_t>(effect.skill_id), effect.attribute_level, effect.effect_id, std::bit_cast<uint32_t>(effect.duration ? effect.GetTimeRemaining() / 1000.f : 0.f)}));
+                }
+                for (const auto& buff : effects.buffs) {
+                    apply(make(CharEffectUpkeepApplied, {effects.agent_id, buff.target_agent_id, static_cast<uint32_t>(buff.skill_id), buff.buff_id, 0}));
+                }
+            }
+        }
+        apply(make(AgentReporter, {controlled->agent_id, 3}));
+        if (const auto party = GW::PartyMgr::GetPartyInfo()) {
+            apply(make(PartyMembershipBegin, {party->party_id}));
+            for (const auto& member : party->players) {
+                apply(make(PartyMemberAdd, {party->party_id, member.login_number, 1}));
+            }
+            for (const auto& hero : party->heroes) {
+                apply(make(PartyHeroAdd, {party->party_id, hero.owner_player_id, hero.agent_id, static_cast<uint32_t>(hero.hero_id), hero.level}));
+            }
+            apply(make(PartyMembershipEnd, {party->party_id}));
+            apply(make(PartyAssign, {party->party_id, party->players.size() ? party->players[0].login_number : 0}));
+            apply(make(PartySetDifficulty, {GW::PartyMgr::GetIsPartyInHardMode()}));
+        }
+        constexpr uint32_t access_rights_mask = 0xD;
+        apply(make(MissionAccessRights, {char_context->player_flags & access_rights_mask}));
+        apply(ReplayState::Blank(message_table, MissionInstanceLoadFinish));
+        return world;
+    }
+
+    void WriteKeyframe(const ReplayFile::KeyframeKind kind)
+    {
+        const auto started = Clock::now();
+        const auto world = Snapshot();
+        const auto time_ms = ElapsedMs(recording_start);
+        std::vector<ReplayFile::Record> records;
+        uint64_t bytes = 0;
+        size_t not_encoded = 0;
+        for (const auto& message : world.Join()) {
+            auto encoded = Encoded(message);
+            if (encoded.empty()) {
+                not_encoded++;
+                continue;
+            }
+            bytes += encoded.size() + 6;
+            records.push_back({time_ms, std::move(encoded)});
+        }
+        if (records.empty() || !writer.AppendKeyframe(time_ms, kind, records)) {
+            Log::Log("Replay Recorder: keyframe %s not written: the client's state could not be read", ReplayFile::KeyframeKindName(kind));
             return;
         }
-        const auto explorable = transfer->is_explorable != 0;
-        if (!(explorable ? settings.record_explorables : settings.record_outposts) || message_table.empty()) {
-            status = std::format("Not recording map {}", transfer->map_id);
-            return;
+        keyframe_count++;
+        next_keyframe_ms = time_ms + keyframe_interval_ms;
+        Log::Log(
+            "Replay Recorder: keyframe %u (%s) at %u ms: %zu messages, %zu not encoded against the client's table, %llu KB, read and written in %u ms", keyframe_count, ReplayFile::KeyframeKindName(kind), time_ms, records.size(), not_encoded, bytes / 1024,
+            ElapsedMs(started)
+        );
+    }
+
+    void WriteChapter(const uint32_t map_id, const bool explorable)
+    {
+        const auto map_info = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(map_id));
+        writer.AppendChapter({0, ElapsedMs(recording_start), map_id, explorable, map_info ? static_cast<uint32_t>(map_info->type) : 0});
+        chapter_count++;
+        connect_seen = false;
+        load_keyframe_due = true;
+    }
+
+    bool OpenRecording(const uint32_t map_id, const bool explorable)
+    {
+        if (message_table.empty()) {
+            status = "Not recording: the client's message table is not read yet";
+            return false;
         }
         const auto folder = RecordingsFolder();
         std::wstring error;
         if (!Resources::EnsureFolderExists(folder, error)) {
             status = TextUtils::WStringToString(error);
             Log::Error("Replay Recorder: %s", status.c_str());
-            return;
+            return false;
         }
-        recording_path = folder / std::format(L"{}_map{}.gwrec", TextUtils::StringToWString(TextUtils::FilenameTimestamp()), transfer->map_id);
+        recording_path = folder / std::format(L"{}_map{}.gwrec", TextUtils::StringToWString(TextUtils::FilenameTimestamp()), map_id);
+        const auto char_context = GW::GetCharContext();
+        const auto map_info = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(map_id));
         header = {};
         header.client_build = GW::MemoryMgr::GetGWVersion();
         header.table_digest = message_table_digest;
         header.start_time_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-        header.map_id = transfer->map_id;
-        header.map_region_type = static_cast<uint32_t>(map_info->type);
+        header.map_id = map_id;
+        header.map_region_type = map_info ? static_cast<uint32_t>(map_info->type) : 0;
         header.is_explorable = explorable;
-        header.region = transfer->region;
+        header.district = char_context ? char_context->district_number : 0;
+        header.region = static_cast<uint32_t>(GW::Map::GetRegion());
+        header.language = static_cast<uint32_t>(GW::Map::GetLanguage());
         header.flags = (settings.strip_names_and_chat ? ReplayFile::NamesStripped | ReplayFile::ChatDropped : 0) | (settings.strip_own_names ? ReplayFile::OwnNamesStripped : 0);
         strncpy(header.toolbox_version, GWTOOLBOXDLL_VERSION GWTOOLBOXDLL_VERSION_BETA, sizeof(header.toolbox_version) - 1);
         if (!writer.Open(recording_path, header, message_table)) {
             status = std::format("Could not create {}", RecordingName());
             Log::Error("Replay Recorder: %s", status.c_str());
-            return;
+            return false;
         }
-        const auto char_context = GW::GetCharContext();
         name_stripper.reset();
         if (settings.strip_names_and_chat || settings.strip_own_names) {
             name_stripper.emplace(settings.strip_names_and_chat, settings.strip_own_names, char_context ? std::wstring(char_context->player_name) : std::wstring());
         }
+        inventory_filter.emplace(message_table);
         has_pending_chat = false;
+        keyframe_count = 0;
+        chapter_count = 0;
         recording_start = last_record_at = last_flush_at = Clock::now();
+        WriteChapter(map_id, explorable);
         status = std::format("Recording {}", RecordingName());
+        Log::Log("Replay Recorder: %s", status.c_str());
+        return true;
     }
 
-    void WriteRecord(const uint32_t time_ms, const std::vector<uint8_t>& bytes)
+    void StartFromMemory()
     {
-        const auto size_cap = static_cast<uint64_t>(settings.size_cap_mb) << 20;
-        if (writer.Size() + bytes.size() + 6 > size_cap) {
-            header.flags |= ReplayFile::SizeCapReached;
-            FinishRecording();
+        const auto map_id = GW::Map::GetMapID();
+        if (!PveMap(map_id) || GW::Map::GetIsObserving()) {
+            status = "Not recording: PvP maps and observed matches are never recorded";
+            record_requested = false;
             return;
         }
-        if (!writer.Append(time_ms, bytes.data(), bytes.size())) {
-            FinishRecording();
+        if (!OpenRecording(static_cast<uint32_t>(map_id), GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable)) {
+            record_requested = false;
             return;
         }
-        header.record_count++;
-        last_record_at = Clock::now();
+        connect_seen = true;
+        load_keyframe_due = false;
+        WriteKeyframe(ReplayFile::KeyframeKind::Start);
     }
 
-    void PackRecord(const PacketBase* packet, std::vector<uint8_t>& out)
+    bool WriteMessage(const uint32_t time_ms, const std::vector<uint8_t>& bytes)
     {
-        const auto& fields = message_table[packet->header];
-        if (!ReplayFile::PackMessage(packet->header, fields.data(), static_cast<uint32_t>(fields.size()), reinterpret_cast<const uint8_t*>(packet), out,
-                                     name_stripper ? name_stripper->For(static_cast<uint16_t>(packet->header)) : ReplayFile::TextFilter())) {
-            out = {static_cast<uint8_t>(packet->header), static_cast<uint8_t>(packet->header >> 8)};
-            header.layout_errors++;
+        Message message;
+        if (!inventory_filter || !ReplayState::Decode(message_table, bytes, message)) {
+            return WriteRecord(time_ms, bytes);
         }
+        std::vector<Message> shown_before;
+        std::vector<uint32_t> unknown_items;
+        if (!inventory_filter->Keep(message, shown_before, unknown_items)) {
+            return true;
+        }
+        for (const auto item_id : unknown_items) {
+            shown_before.push_back(ItemDetails(item_id));
+        }
+        for (const auto& details : shown_before) {
+            if (const auto encoded = Encoded(details); !encoded.empty() && !WriteRecord(time_ms, encoded)) {
+                return false;
+            }
+        }
+        return WriteRecord(time_ms, bytes);
     }
 
     void OnServerMessage(GW::HookStatus*, PacketBase* packet, void*)
@@ -198,25 +685,27 @@ namespace {
             return;
         }
         std::scoped_lock lock(recording_mutex);
-        if (packet->header == GAME_SMSG_TRANSFER_GAME_SERVER_INFO) {
-            FinishRecording();
-            StartRecording(static_cast<const GW::Packet::StoC::GameSrvTransfer*>(packet));
+        if (packet->header >= message_table.size()) {
             return;
         }
-        if (!writer.IsOpen() || packet->header >= message_table.size()) {
-            return;
-        }
-        if (packet->header == GAME_SMSG_INSTANCE_LOAD_INFO) {
-            const auto info = static_cast<const GW::Packet::StoC::InstanceLoadInfo*>(packet);
-            if (info->is_observer) {
-                writer.Close(header);
-                std::error_code error;
-                std::filesystem::remove(recording_path, error);
-                status = "Not recording: observing a match";
+        const auto transfer = packet->header == GAME_SMSG_TRANSFER_GAME_SERVER_INFO ? static_cast<const GW::Packet::StoC::GameSrvTransfer*>(packet) : nullptr;
+        if (!writer.IsOpen()) {
+            const auto char_context = GW::GetCharContext();
+            // At login the game joins its first map with no 422: the join's map is in the mission context (MissionClient::GameJoin, +0x198).
+            if (settings.record_from_login && !stopped_until_login && packet->header == MissionInstanceLoadHead && char_context && PveMap(char_context->map_id)) {
+                OpenRecording(static_cast<uint32_t>(char_context->map_id), char_context->is_explorable != 0);
+            }
+            if (!writer.IsOpen()) {
                 return;
             }
-            header.district = info->district;
-            header.language = info->language;
+        }
+        if (packet->header == GAME_SMSG_INSTANCE_LOAD_INFO && static_cast<const GW::Packet::StoC::InstanceLoadInfo*>(packet)->is_observer) {
+            FinishRecording();
+            status = "Stopped: an observed match is never recorded";
+            return;
+        }
+        if (packet->header == AgentConnect) {
+            connect_seen = true;
         }
         const auto time_ms = ElapsedMs(recording_start);
         if (header.flags & ReplayFile::ChatDropped) {
@@ -243,43 +732,98 @@ namespace {
             }
             if (has_pending_chat) {
                 has_pending_chat = false;
-                WriteRecord(pending_chat_time_ms, pending_chat);
-                if (!writer.IsOpen()) {
+                if (!WriteMessage(pending_chat_time_ms, pending_chat)) {
                     return;
                 }
             }
         }
+        if (transfer) {
+            if (!PveMap(static_cast<GW::Constants::MapID>(transfer->map_id))) {
+                FinishRecording();
+                status = std::format("Stopped before map {}: PvP maps are never recorded", transfer->map_id);
+                return;
+            }
+            // The transfer carries the next game server's address and key: it opens the next chapter, never recorded itself.
+            WriteChapter(transfer->map_id, transfer->is_explorable != 0);
+            return;
+        }
         PackRecord(packet, body);
-        WriteRecord(time_ms, body);
+        WriteMessage(time_ms, body);
     }
 
-    void RegisterCallbacks()
+    void ReadMessageTable()
     {
-        if (Clock::now() < next_registration_attempt) {
-            return;
-        }
-        next_registration_attempt = Clock::now() + registration_retry_interval;
         const auto table = GetStoCHandlerArray();
-        if (!(table && table->size())) {
+        if (!message_table.empty() || !(table && table->size())) {
             return;
         }
-        message_table.clear();
         for (const auto& handler : *table) {
             message_table.emplace_back(handler.fields, handler.fields + handler.field_count);
         }
         message_table_digest = ReplayFile::TableDigest(message_table);
-        if (!game_viewpoint_handler && table->size() > viewpoint_message_id) {
+        if (table->size() > viewpoint_message_id) {
             // GWCA puts its dispatcher in a header's handler_func once a callback is registered on it (PacketLoggerWindow.cpp's InitStoC): the game's own is read first.
             game_viewpoint_handler = reinterpret_cast<uintptr_t>((*table)[viewpoint_message_id].handler_func);
+        }
+    }
+
+    void RegisterCallbacks()
+    {
+        if (callbacks_registered || message_table.empty()) {
+            return;
         }
         for (uint32_t message_id = 0; message_id < message_table.size(); message_id++) {
             if (!GW::StoC::RegisterPacketCallback(&stoc_hook_entry, message_id, OnServerMessage, nullptr, 0x9000)) {
                 GW::StoC::RemoveCallbacks(&stoc_hook_entry);
-                message_table.clear();
                 return;
             }
         }
         callbacks_registered = true;
+    }
+
+    void RemoveCallbacks()
+    {
+        GW::StoC::RemoveCallbacks(&stoc_hook_entry);
+        callbacks_registered = false;
+    }
+
+    void UpdateRecording()
+    {
+        const auto in_game = !GW::GetPreGameContext() && GW::GetCharContext();
+        if (!in_game) {
+            stopped_until_login = false;
+            record_requested = false;
+        }
+        const auto wanted = record_requested || (settings.record_from_login && !stopped_until_login);
+        if (wanted && !message_table.empty()) {
+            RegisterCallbacks();
+        }
+        else if (!writer.IsOpen() && callbacks_registered) {
+            RemoveCallbacks();
+        }
+        const auto loaded = in_game && GW::Map::GetIsMapLoaded() && GW::Map::GetInstanceType() != GW::Constants::InstanceType::Loading && GW::Agents::GetControlledCharacter();
+        if (!writer.IsOpen()) {
+            if (wanted && loaded && callbacks_registered) {
+                StartFromMemory();
+            }
+            return;
+        }
+        const auto now = Clock::now();
+        if (!in_game || now - last_record_at > idle_timeout || !wanted) {
+            FinishRecording();
+            return;
+        }
+        if (loaded && load_keyframe_due && connect_seen) {
+            load_keyframe_due = false;
+            WriteKeyframe(ReplayFile::KeyframeKind::AfterLoad);
+        }
+        else if (loaded && !load_keyframe_due && ElapsedMs(recording_start) >= next_keyframe_ms) {
+            WriteKeyframe(ReplayFile::KeyframeKind::Periodic);
+        }
+        if (writer.IsOpen() && now - last_flush_at > flush_interval) {
+            writer.Flush();
+            last_flush_at = now;
+        }
     }
 
     using GameConnect_pt = void(__cdecl*)(uint32_t protocol, const uint8_t* address, const void* data, uint32_t size);
@@ -297,10 +841,6 @@ namespace {
     constexpr uint32_t net_event_connected = 5;
     constexpr uint32_t net_event_closed = 6;
     constexpr uint32_t net_event_data = 8;
-    constexpr uint32_t mission_context_offset = 0x44;
-    constexpr uint32_t mission_flags_offset = 0x190;
-    constexpr uint32_t mission_join_value_offset = 0x194;
-    constexpr uint32_t mission_join_map_offset = 0x198;
     constexpr uint32_t instance_acknowledged = 0xC0;
     constexpr uint32_t join_pending = 0x20;
     constexpr uint32_t transfer_kept = 0x10;
@@ -412,22 +952,16 @@ namespace {
         PostNetEvent_Func(*net_context_global, connection, kind, data, size);
     }
 
-    uint8_t* MissionContext()
-    {
-        const auto properties = GameProps_Func ? GameProps_Func() : nullptr;
-        return properties ? *reinterpret_cast<uint8_t**>(properties + mission_context_offset) : nullptr;
-    }
-
     uint32_t MissionFlags()
     {
-        const auto mission = MissionContext();
-        return mission ? *reinterpret_cast<uint32_t*>(mission + mission_flags_offset) : 0;
+        const auto char_context = GW::GetCharContext();
+        return char_context ? char_context->world_flags : 0;
     }
 
     uint32_t JoinedMap()
     {
-        const auto mission = MissionContext();
-        return mission ? *reinterpret_cast<uint32_t*>(mission + mission_join_map_offset) : 0;
+        const auto char_context = GW::GetCharContext();
+        return char_context ? static_cast<uint32_t>(char_context->map_id) : 0;
     }
 
     void LogPlayback(const std::string& step)
@@ -527,7 +1061,7 @@ namespace {
     {
         GW::Hook::EnterHook();
         InstanceAck_Ret(mission);
-        if (playback == Playback::Acknowledging && (*reinterpret_cast<uint32_t*>(mission + mission_flags_offset) & instance_acknowledged) == instance_acknowledged) {
+        if (playback == Playback::Acknowledging && (MissionFlags() & instance_acknowledged) == instance_acknowledged) {
             LogPlayback("c2s 145 due: the instance acknowledged");
             PostStage(ReplayWire::Stage::Load);
             EnterStage(Playback::Loading);
@@ -556,11 +1090,13 @@ namespace {
         const auto left_map = char_context ? GW::Map::GetMapInfo(char_context->current_map_id) : nullptr;
         const auto replay_map = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(playing_row.header.map_id));
         // The world map draws the world of the map left for the replay (+0x238) over the explored areas the replay's s2c 139 gave, and asserts they match (GmMapView.cpp:1731).
-        if (open && playback != Playback::Off && !(left_map && replay_map && left_map->continent == replay_map->continent)) {
+        if (open && playback != Playback::Off && (playing_row.start != ReplayObserve::Start::Load || !(left_map && replay_map && left_map->continent == replay_map->continent))) {
             if (!world_map_refusal_logged) {
                 world_map_refusal_logged = true;
-                Log::Info("Replay Recorder: the world map stays closed during this replay: it would show the continent of map %u, the one left for the replay, over the explored areas of map %u's",
-                          char_context ? static_cast<uint32_t>(char_context->current_map_id) : 0, playing_row.header.map_id);
+                Log::Info(
+                    "Replay Recorder: the world map stays closed during this replay: it would show the continent of map %u, the one left for the replay, over the explored areas of map %u's",
+                    char_context ? static_cast<uint32_t>(char_context->current_map_id) : 0, playing_row.header.map_id
+                );
                 Log::FlushFile();
             }
             return GW::Hook::LeaveHook();
@@ -610,8 +1146,9 @@ namespace {
 
     void DisarmPlayback()
     {
-        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func),
-                                  reinterpret_cast<void*>(WorldMapToggle_Func), reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
+        for (const auto hooked :
+             {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func), reinterpret_cast<void*>(WorldMapToggle_Func),
+              reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
             if (hooked) {
                 GW::Hook::RemoveHook(hooked);
             }
@@ -638,11 +1175,13 @@ namespace {
         const auto net_callback = find("\x55\x8B\xEC\x83\xEC\x48\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x53\x8B\x5D\x0C\x56\x8B\x75\x08", "xxxxxxx????xxxxxxxxxxxxx");
         const auto ready_step = find(
             "\x55\x8B\xEC\x83\xEC\x28\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x8B\x45\x0C\x53\x8B\x5D\x08\x89\x5D\xDC\x89\x45\xD8\x83\x7B\x60\x01\x0F\x85\x00\x00\x00\x00\x8B\x45\x10\x80\x78\x01\x16\x0F\x85\x00\x00\x00\x00\x56\x57\x8D\x53\x69",
-            "xxxxxxx????xxxxxxxxxxxxxxxxxxxxxxxx????xxxxxxxxx????xxxxx");
+            "xxxxxxx????xxxxxxxxxxxxxxxxxxxxxxxx????xxxxxxxxx????xxxxx"
+        );
         const auto ready_cipher = find("\x6A\x14\x8D\x73\x7C\xC7\x43\x60\x02\x00\x00\x00\x8B\xCE\xE8\x00\x00\x00\x00\x8B\x43\x64\x8D\xBB\x84\x01\x00\x00", "xxxxxxxxxxxxxxx????xxxxxxxxx");
         const auto receive = find(
             "\x55\x8B\xEC\x51\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x53\x56\x57\xE8\x00\x00\x00\x00\x8B\x5D\x10\x85\xC0\x74\x0E\x8D\x43\x34\x50\x6A\x00\xE8\x00\x00\x00\x00\x83\xC4\x08\x8B\x4D\x08\x83\x79\x34\x00\x74\x7A\x8B\x7D\x0C\x83\x79\x60\x02",
-            "xxxxx????xxxxxxxxx????xxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxx");
+            "xxxxx????xxxxxxxxx????xxxxxxxxxxxxxx????xxxxxxxxxxxxxxxxxxx"
+        );
         const auto receive_cipher = find("\x53\x8D\x4F\x7C\xE8\x00\x00\x00\x00\xFF\x75\x14\x8D\x04\x1E\x89\x77\x44\x57\x89\x47\x48\xE8", "xxxxx????xxxxxxxxxxxxxx");
         const auto instance_ack = find("\x55\x8B\xEC\x8B\x45\x08\x8B\x88\x90\x01\x00\x00\x8B\xC1\x25\xC0\x00\x00\x00\x3C\xC0\x75\x00\xF6\xC1\x01", "xxxxxxxxxxxxxxxxxxxxxx?xxx");
         const auto map_loaded = find("\x55\x8B\xEC\x81\xEC\x48\x01\x00\x00\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x8D\x45\xE8\xC7\x45\xE4\x90\x00\x00\x00", "xxxxxxxxxx????xxxxxxxxxxxxxxx");
@@ -664,7 +1203,6 @@ namespace {
             {"the world map's toggle", world_map_toggle != 0},
             {"the mission map's creation", mission_map_create != 0},
             {"the Observe window's hook", ObserveGame_Func != nullptr},
-            {"the game's properties", GameProps_Func != nullptr},
             {"the transfer message's layout", message_table.size() > GAME_SMSG_TRANSFER_GAME_SERVER_INFO && message_table[GAME_SMSG_TRANSFER_GAME_SERVER_INFO] == transfer_fields},
         };
         for (const auto& [name, found] : checks) {
@@ -682,39 +1220,45 @@ namespace {
         WorldMapToggle_Func = reinterpret_cast<WorldMapToggle_pt>(world_map_toggle);
         MissionMapCreate_Func = reinterpret_cast<MissionMapCreate_pt>(mission_map_create);
         AgentAdvance_Func = reinterpret_cast<AgentAdvance_pt>(agent_advance);
-        if (GW::Hook::CreateHook(&GameConnect_Func, OnGameConnect, &GameConnect_Ret) != 0 || GW::Hook::CreateHook(&Goodbye_Func, OnGoodbye, &Goodbye_Ret) != 0 ||
-            GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 || GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0 ||
-            GW::Hook::CreateHook(&WorldMapToggle_Func, OnWorldMapToggle, &WorldMapToggle_Ret) != 0 || GW::Hook::CreateHook(&MissionMapCreate_Func, OnMissionMapCreate, &MissionMapCreate_Ret) != 0 ||
-            (AgentAdvance_Func && GW::Hook::CreateHook(&AgentAdvance_Func, OnAgentAdvance, &AgentAdvance_Ret) != 0)) {
+        if (GW::Hook::CreateHook(&GameConnect_Func, OnGameConnect, &GameConnect_Ret) != 0 || GW::Hook::CreateHook(&Goodbye_Func, OnGoodbye, &Goodbye_Ret) != 0 || GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 ||
+            GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0 || GW::Hook::CreateHook(&WorldMapToggle_Func, OnWorldMapToggle, &WorldMapToggle_Ret) != 0 ||
+            GW::Hook::CreateHook(&MissionMapCreate_Func, OnMissionMapCreate, &MissionMapCreate_Ret) != 0 || (AgentAdvance_Func && GW::Hook::CreateHook(&AgentAdvance_Func, OnAgentAdvance, &AgentAdvance_Ret) != 0)) {
             DisarmPlayback();
             return "Playback not available: its hooks could not be made";
         }
-        for (const auto hooked : {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func),
-                                  reinterpret_cast<void*>(WorldMapToggle_Func), reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
+        for (const auto hooked :
+             {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func), reinterpret_cast<void*>(WorldMapToggle_Func),
+              reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
             if (hooked) {
                 GW::Hook::EnableHooks(hooked);
             }
         }
         // s2c 172's handler passes {agent, u8} to the char client's observe call, which sets the viewpoint the camera follows (0x00811a20, x23-live, x25-live).
         const auto follow_missing = message_table.size() <= viewpoint_message_id || message_table[viewpoint_message_id] != viewpoint_fields ? "s2c 172's fields are not {agent, u8} in this client"
-                                    : !observe_agent                                                                                     ? "the char client's observe call is not found in this client"
-                                    : !game_viewpoint_handler                                                                            ? "s2c 172's handler was not read before the recorder's callbacks"
+                                    : !observe_agent                                                                                        ? "the char client's observe call is not found in this client"
+                                    : !game_viewpoint_handler                                                                               ? "s2c 172's handler was not read before the recorder's callbacks"
                                     : memcmp(reinterpret_cast<const void*>(game_viewpoint_handler), "\x55\x8B\xEC\x8B\x45\x08\xFF\x70\x08\xFF\x70\x04\xE8", 13) != 0
                                         ? "s2c 172's handler is not the viewpoint handler's code (or another module replaced it before the recorder read it)"
                                     : GW::Scanner::FunctionFromNearCall(game_viewpoint_handler + 12) != observe_agent ? "s2c 172's handler does not call the char client's observe call"
-                                                                                                                       : "";
+                                                                                                                      : "";
         viewpoint_available = !*follow_missing;
         playback_armed = true;
-        return std::format("Ready: Observe on one of your recordings plays it{}{}", viewpoint_available ? "" : std::format(" (following other agents is not available: {})", follow_missing),
-                           AgentAdvance_Func ? "" : " (pause and speeds run on the toolbox's clock: the agents' clock is not found in this client)");
+        return std::format(
+            "Ready: Observe on one of your recordings plays it{}{}", viewpoint_available ? "" : std::format(" (following other agents is not available: {})", follow_missing),
+            AgentAdvance_Func ? "" : " (pause and speeds run on the toolbox's clock: the agents' clock is not found in this client)"
+        );
     }
 
     void StartPlayback(const ReplayObserve::Row& row)
     {
         ReplayFile::Contents contents;
         std::string error;
-        auto made = ReplayFile::Read(row.path, contents, error) ? ReplayWire::MakePlan(contents) : ReplayWire::Plan{.error = error};
-        const auto name = TextUtils::WStringToString(row.path.filename().wstring());
+        auto made = !ReplayFile::Read(row.path, contents, error) ? ReplayWire::Plan{.error = error}
+                    : row.chapter >= contents.chapters.size()    ? ReplayWire::Plan{.error = "its chapter is not in the file"}
+                    : row.start == ReplayObserve::Start::Load    ? ReplayWire::MakePlan(contents, row.chapter)
+                    : row.keyframe < contents.keyframes.size()   ? ReplayWire::MakeKeyframePlan(contents, contents.keyframes[row.keyframe])
+                                                                 : ReplayWire::Plan{.error = "its keyframe is not in the file"};
+        const auto name = std::format("{} (chapter {}, {})", TextUtils::WStringToString(row.path.filename().wstring()), row.chapter + 1, row.start == ReplayObserve::Start::Load ? "from its load" : "from its first keyframe");
         if (made.error.empty() && made.map_type != ReplayWire::game_map_type) {
             made.error = std::format("its map type is {}, not a game map's: the observer's party window asserts the observed map is one", made.map_type);
         }
@@ -741,24 +1285,24 @@ namespace {
         const uint8_t loopback[] = {address_family_ipv4, 0, closed_port >> 8, closed_port & 0xFF, 127, 0, 0, 1};
         memcpy(transfer.address, loopback, sizeof(loopback));
         // MissionClient::GameJoin keeps the 422's +0x1c at +0x194; it reaches only the connect data our hook never sends and the reconnect record.
-        const auto mission = MissionContext();
-        transfer.game_type = mission ? *reinterpret_cast<uint32_t*>(mission + mission_join_value_offset) : 0;
+        const auto char_context = GW::GetCharContext();
+        transfer.game_type = char_context ? char_context->token1 : 0;
         const auto joined_map = JoinedMap();
         transfer.territory = contents.header.region;
-        transfer.map_id = contents.header.map_id;
-        transfer.map_type = contents.header.is_explorable;
+        transfer.map_id = contents.chapters[row.chapter].map_id;
+        transfer.map_type = contents.chapters[row.chapter].is_explorable;
         transfer.key = RandomBytes()();
         transfer_due = true;
         playback_status = std::format("Playing {}", name);
         std::string changes;
         for (const auto& change : plan.changes) {
             changes += change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("; left out: {} records from record {} ({})", change.count, change.record, change.why)
-                                                                      : std::format("; record {}: 410's observer byte set ({})", change.record, change.why);
+                                                                      : std::format("; message {}: 410's observer byte set ({})", change.record, change.why);
         }
         LogPlayback(
             std::format(
-                "{}: {} posts, the recording as recorded from record {} ({} ms), its stream timed from its 31 at {} ms, {} ms long, controlled agent {}, {} of the recorder's own records{}", playback_status, plan.posts.size(), plan.first_record,
-                plan.start_ms, plan.entry_ms, plan.duration_ms, plan.controlled_agent, plan.own_records_streamed, changes
+                "{}: {} posts, {} keyframe messages, the recording from record {} ({} ms) to record {}, its stream timed from {} ms, {} ms long, controlled agent {}{}", playback_status, plan.posts.size(), plan.keyframe_records, plan.first_record,
+                plan.start_ms, plan.end_record, plan.entry_ms, plan.duration_ms, plan.controlled_agent, changes
             )
         );
         LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, joined_map, static_cast<uint32_t>(GW::Map::GetMapID())));
@@ -795,8 +1339,7 @@ namespace {
                     LogPlayback(std::format("the transfer (s2c 422) emulated: mission flags {:#x} before, {:#x} after, the join's map {}", flags, MissionFlags(), JoinedMap()));
                 }
                 else if (waited > (flags & (join_pending | transfer_kept) ? transfer_wait : connect_timeout)) {
-                    FinishPlayback(std::format("The game did not start the replay's connection (mission flags {:#x}, the join's map {}, a game connection {})", flags, JoinedMap(),
-                                               *game_connection_global ? "open" : "none"));
+                    FinishPlayback(std::format("The game did not start the replay's connection (mission flags {:#x}, the join's map {}, a game connection {})", flags, JoinedMap(), *game_connection_global ? "open" : "none"));
                 }
                 return;
             }
@@ -880,13 +1423,20 @@ namespace {
         }
         const auto row = found->second;
         lock.unlock();
+        if (row.start == ReplayObserve::Start::Outpost) {
+            Log::InfoW(L"Replay %ls: chapter %zu is an outpost, which the game's observer mode does not play yet.", row.path.filename().wstring().c_str(), row.chapter + 1);
+            GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
+            return GW::Hook::LeaveHook();
+        }
         if (playback_armed && playback == Playback::Off) {
             StartPlayback(row);
             return GW::Hook::LeaveHook();
         }
         const auto& map_name = Resources::GetMapName(static_cast<GW::Constants::MapID>(row.header.map_id))->wstring();
-        const auto answer = std::format(L"Replay {}: {}, {} long. Turn on \"Play recordings from the Observe window\" in the Replay Recorder's settings to play it.", row.path.filename().wstring(),
-                                        map_name.empty() ? std::format(L"map {}", row.header.map_id) : map_name, ReplayObserve::Duration(row.header.duration_ms));
+        const auto answer = std::format(
+            L"Replay {}: {}, {} long. Turn on \"Play recordings from the Observe window\" in the Replay Recorder's settings to play it.", row.path.filename().wstring(), map_name.empty() ? std::format(L"map {}", row.header.map_id) : map_name,
+            ReplayObserve::Duration(row.header.duration_ms)
+        );
         Log::InfoW(L"%ls", answer.c_str());
         GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
         GW::Hook::LeaveHook();
@@ -967,7 +1517,6 @@ namespace {
     {
         const auto observe_game = GW::Scanner::Find("\x55\x8B\xEC\xE8\x00\x00\x00\x00\xFF\x75\x08\x8B\x48\x44\x81\xC1\x58\x02\x00\x00\xE8\x00\x00\x00\x00\x85\xC0", "xxxx????xxxxxxxxxxxxx????xx");
         ObserveGame_Func = reinterpret_cast<ObserveGame_pt>(observe_game);
-        GameProps_Func = observe_game ? reinterpret_cast<GameProps_pt>(GW::Scanner::FunctionFromNearCall(observe_game + 3)) : nullptr;
         if (!ObserveGame_Func || GW::Hook::CreateHook(&ObserveGame_Func, OnObserveGame, &ObserveGame_Ret) != 0) {
             ObserveGame_Func = nullptr;
             Log::Log("Replay Recorder: the game's Observe function is not found in this client; recordings are not listed");
@@ -982,14 +1531,14 @@ namespace {
         }
         return "Waiting for the Observe window";
     }
-}
+} // namespace
 
 void ReplayRecorderModule::Initialize()
 {
     ToolboxModule::Initialize();
     SettingsRegistry::Register(this, settings);
     std::scoped_lock lock(recording_mutex);
-    RegisterCallbacks();
+    ReadMessageTable();
 }
 
 ReplayRecorderModule::PlaybackView ReplayRecorderModule::GetPlayback() const
@@ -1007,7 +1556,7 @@ ReplayRecorderModule::PlaybackView ReplayRecorderModule::GetPlayback() const
         .length_ms = plan.duration_ms,
         .recorder_agent = plan.controlled_agent,
         .followed_agent = followed_agent,
-        .name = TextUtils::WStringToString(playing_path.filename().wstring()),
+        .name = std::format("{}, chapter {}", TextUtils::WStringToString(playing_path.filename().wstring()), playing_row.chapter + 1),
         .status = playback_status,
     };
 }
@@ -1050,12 +1599,11 @@ void ReplayRecorderModule::SignalTerminate()
 {
     playback_stop_requested = true;
     restart_pending = false;
-    GW::StoC::RemoveCallbacks(&stoc_hook_entry);
     GW::StoC::RemoveCallbacks(&observe_hook_entry);
     DropListedRows();
     std::scoped_lock lock(recording_mutex);
+    RemoveCallbacks();
     FinishRecording();
-    callbacks_registered = false;
 }
 
 bool ReplayRecorderModule::CanTerminate()
@@ -1099,8 +1647,7 @@ void ReplayRecorderModule::Update(float)
     }
     UpdatePlayback();
     const auto play = settings.play_from_observe_window && settings.list_in_observe_window && ObserveGame_Func;
-    const auto settled = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && GW::Map::GetIsMapLoaded() && !GW::Map::GetIsObserving() && GameProps_Func &&
-                         !(MissionFlags() & (join_pending | transfer_kept));
+    const auto settled = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && GW::Map::GetIsMapLoaded() && !GW::Map::GetIsObserving() && !(MissionFlags() & (join_pending | transfer_kept));
     if (!settled) {
         outpost_settled_since.reset();
     }
@@ -1126,20 +1673,9 @@ void ReplayRecorderModule::Update(float)
         playback_status.clear();
     }
     std::scoped_lock lock(recording_mutex);
-    if (!callbacks_registered) {
-        RegisterCallbacks();
-    }
-    if (!writer.IsOpen()) {
-        return;
-    }
-    const auto now = Clock::now();
-    if (now - last_record_at > idle_timeout || GW::GetPreGameContext()) {
-        FinishRecording();
-        return;
-    }
-    if (now - last_flush_at > flush_interval) {
-        writer.Flush();
-        last_flush_at = now;
+    ReadMessageTable();
+    if (playback == Playback::Off) {
+        UpdateRecording();
     }
 }
 
@@ -1158,12 +1694,34 @@ void ReplayRecorderModule::SaveSettings(SettingsDoc& doc)
 void ReplayRecorderModule::DrawSettingsInternal()
 {
     std::scoped_lock lock(recording_mutex);
-    ImGui::Checkbox("Record explorable areas", &settings.record_explorables);
-    ImGui::Checkbox("Record outposts", &settings.record_outposts);
+    if (writer.IsOpen()) {
+        if (ImGui::Button("Stop recording")) {
+            record_requested = false;
+            stopped_until_login = settings.record_from_login;
+            FinishRecording();
+        }
+        ImGui::SameLine();
+        ImGui::Text("Recording %s: %u chapters, %u keyframes, %u messages, %llu KB", RecordingName().c_str(), chapter_count, keyframe_count, header.record_count, writer.Size() / 1024);
+    }
+    else {
+        ImGui::BeginDisabled(record_requested);
+        if (ImGui::Button("Record")) {
+            record_requested = true;
+            status = "Waiting for the map to load";
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextUnformatted(status.c_str());
+    }
+    ImGui::ShowHelp(
+        "Records what the game server sends from now on, in one file across map changes, until Stop or logging off. Its start, each map's load and every 30 seconds keep a keyframe: the moment as the game holds it, which a replay can start from."
+    );
+    ImGui::Checkbox("Start recording when entering the game", &settings.record_from_login);
     ImGui::Checkbox("Keep other players' names and chat out of recordings", &settings.strip_names_and_chat);
     ImGui::ShowHelp("Other players' names become \"Player 1\", \"Player 2\"...; player chat and speech bubbles are left out.");
     ImGui::Checkbox("Keep my own names out of recordings", &settings.strip_own_names);
     ImGui::ShowHelp("Your character's and account's names become \"Recorder\", your mercenary heroes' names \"Mercenary 1\"... With either setting on, guild names become \"Guild 1\"... and guild tags \"G1\"...");
+    ImGui::TextDisabled("Recordings never hold your bags, storage or gold: only what each character wears or holds.");
     ImGui::InputText("Folder", settings.folder, MAX_PATH);
     ImGui::SameLine();
     if (ImGui::Button("Open")) {
@@ -1178,24 +1736,22 @@ void ReplayRecorderModule::DrawSettingsInternal()
     if (ImGui::InputInt("Size cap per recording (MB)", &settings.size_cap_mb)) {
         settings.size_cap_mb = std::clamp(settings.size_cap_mb, 1, 4096);
     }
-    ImGui::TextDisabled("PvP maps are never recorded. A recording starts on entering a map and ends on leaving it.");
+    ImGui::TextDisabled("PvP maps and observed matches are never recorded.");
     ImGui::Checkbox("List recordings in the Observe window", &settings.list_in_observe_window);
-    ImGui::ShowHelp("Recordings made on this client build appear in the Observe window (B, in an outpost) under \"Custom Event (0)\". Choosing one is answered here; nothing is sent to the server.");
+    ImGui::ShowHelp(
+        "Each map of a recording made on this client build appears in the Observe window (B, in an outpost) under \"Custom Event (0)\": from its load, from its first keyframe, or as an outpost, which is not played yet. Choosing one is answered here; nothing is sent to the server."
+    );
     if (!observe_status.empty()) {
         ImGui::TextDisabled("%s", observe_status.c_str());
     }
     ImGui::Checkbox("Play recordings from the Observe window", &settings.play_from_observe_window);
-    ImGui::ShowHelp("Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. The Replay window shows while it plays; its Stop, or stop observing (B, then Yes), brings you back to your outpost. Needs the list above.");
+    ImGui::ShowHelp(
+        "Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. The Replay window shows while it plays; its Stop, or stop observing (B, then Yes), brings you back to your outpost. Needs the list above."
+    );
     if (!playback_status.empty()) {
         ImGui::TextDisabled("%s", playback_status.c_str());
     }
     if (playback != Playback::Off) {
         ImGui::TextDisabled("A replay is playing: its controls are in the Replay window.");
-    }
-    if (writer.IsOpen()) {
-        ImGui::Text("Recording %s: %u messages, %llu KB, %u layout errors", RecordingName().c_str(), header.record_count, writer.Size() / 1024, header.layout_errors);
-    }
-    else {
-        ImGui::Text("%s", status.c_str());
     }
 }

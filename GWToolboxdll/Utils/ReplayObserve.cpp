@@ -54,29 +54,55 @@ namespace ReplayObserve {
                 scan.left_out.push_back({entry.path(), error_code ? "empty, and it could not be removed" : "empty: removed"});
                 continue;
             }
-            Row row{entry.path(), {}, {}};
-            const auto& header = row.header;
+            ReplayFile::Header header;
             std::string error;
-            auto reason = !ReplayFile::ReadHeader(row.path, row.header, error) ? error
+            auto reason = !ReplayFile::ReadHeader(entry.path(), header, error) ? error
                           : header.client_build != client_build                ? std::format("recorded on client build {}, this client is build {}", header.client_build, client_build)
                           : header.table_digest != table_digest                ? "its message table is not this client's"
                           : !(header.flags & ReplayFile::Complete)             ? "unfinished: still being recorded, or the recording stopped before its end"
                           : !header.record_count                               ? "no messages"
-                          : !header.map_id || header.map_id > 0xFFFF           ? std::format("map {} is not a map", header.map_id)
-                          : !header.is_explorable                              ? "an outpost: the observer's party window asserts the observed map is a game map"
                                                                                : std::string();
-            if (reason.empty()) {
-                scan.rows.push_back(std::move(row));
+            ReplayFile::Contents index;
+            if (reason.empty() && !ReplayFile::Read(entry.path(), index, error, false)) {
+                reason = error;
             }
-            else {
-                scan.left_out.push_back({std::move(row.path), std::move(reason)});
+            if (!reason.empty()) {
+                scan.left_out.push_back({entry.path(), std::move(reason)});
+                continue;
+            }
+            for (size_t chapter = 0; chapter < index.chapters.size(); chapter++) {
+                const auto& opened = index.chapters[chapter];
+                const auto end = index.ChapterEnd(chapter);
+                if (!opened.map_id || opened.map_id > 0xFFFF || end == opened.first_record) {
+                    continue;
+                }
+                const auto duration_ms = index.records[end - 1].time_ms - std::min(index.records[end - 1].time_ms, opened.time_ms);
+                const auto row = [&](const Start start, const size_t keyframe) {
+                    scan.rows.push_back({entry.path(), index.header, chapter, keyframe, start, duration_ms, {}});
+                    scan.rows.back().header.start_time_unix_ms += opened.time_ms;
+                    scan.rows.back().header.map_id = opened.map_id;
+                };
+                if (!opened.is_explorable) {
+                    row(Start::Outpost, 0);
+                    continue;
+                }
+                const auto first_keyframe = std::ranges::find_if(index.keyframes, [&](const ReplayFile::Keyframe& keyframe) {
+                    return keyframe.record_index >= opened.first_record && keyframe.record_index < end;
+                });
+                const auto begun_mid_map = first_keyframe != index.keyframes.end() && first_keyframe->kind == ReplayFile::KeyframeKind::Start;
+                if (!begun_mid_map) {
+                    row(Start::Load, 0);
+                }
+                if (first_keyframe != index.keyframes.end()) {
+                    row(Start::Keyframe, static_cast<size_t>(first_keyframe - index.keyframes.begin()));
+                }
             }
         }
         std::ranges::sort(scan.rows, [](const Row& a, const Row& b) {
-            return a.header.start_time_unix_ms != b.header.start_time_unix_ms ? a.header.start_time_unix_ms > b.header.start_time_unix_ms : a.path < b.path;
+            return a.header.start_time_unix_ms != b.header.start_time_unix_ms ? a.header.start_time_unix_ms > b.header.start_time_unix_ms : a.path != b.path ? a.path < b.path : a.start < b.start;
         });
         for (size_t i = max_rows; i < scan.rows.size(); i++) {
-            scan.left_out.push_back({scan.rows[i].path, std::format("older than the newest {} recordings", max_rows)});
+            scan.left_out.push_back({scan.rows[i].path, std::format("older than the newest {} rows", max_rows)});
         }
         scan.rows.resize(std::min(scan.rows.size(), max_rows));
 
@@ -90,7 +116,7 @@ namespace ReplayObserve {
             std::tm local{};
             wchar_t started_text[32] = L"?";
             if (_localtime64_s(&local, &started) == 0) {
-                wcsftime(started_text, std::size(started_text), L"%Y-%m-%d %H:%M", &local);
+                wcsftime(started_text, std::size(started_text), L"%m-%d %H:%M", &local);
             }
             auto& message = row.message;
             message.key = key++;
@@ -98,7 +124,8 @@ namespace ReplayObserve {
             message.age_minutes = static_cast<uint32_t>(now_unix_ms > header.start_time_unix_ms ? std::min<uint64_t>((now_unix_ms - header.start_time_unix_ms) / 60000, 0xFFFF) : 0);
             message.team_count = 1;
             message.teams[0].team_id = 1;
-            const auto name = std::format(L"\x108\x107Replay {} ({})\x1", started_text, Duration(header.duration_ms));
+            const auto start = row.start == Start::Load ? L"from load" : row.start == Start::Keyframe ? L"keyframe" : L"outpost";
+            const auto name = std::format(L"\x108\x107Replay {} #{} {} ({})\x1", started_text, row.chapter + 1, start, Duration(row.duration_ms));
             wcsncpy(message.teams[0].name, name.c_str(), team_name_size - 1);
         }
         return scan;

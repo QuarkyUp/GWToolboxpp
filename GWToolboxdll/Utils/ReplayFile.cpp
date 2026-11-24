@@ -11,6 +11,8 @@ namespace ReplayFile {
         constexpr uint32_t max_messages = 0x1000;
         constexpr uint32_t max_descriptors = 0x400;
         constexpr size_t record_prefix_size = 6;
+        constexpr size_t chapter_entry_size = 14;
+        constexpr size_t keyframe_entry_size = 7;
 
         void Put(std::vector<uint8_t>& out, const uint64_t value, const size_t size)
         {
@@ -32,7 +34,10 @@ namespace ReplayFile {
             std::vector<uint8_t>& out;
 
             template <typename T>
-            void operator()(T& value) { Put(out, value, sizeof(T)); }
+            void operator()(T& value)
+            {
+                Put(out, value, sizeof(T));
+            }
             void operator()(char (&text)[24]) { out.insert(out.end(), text, text + sizeof(text)); }
         };
 
@@ -75,18 +80,17 @@ namespace ReplayFile {
             visit(header.toolbox_version);
         }
 
-        bool ParseHeader(const uint8_t* bytes, const size_t size, Header& out, std::string& error)
+        bool ParseHeader(const uint8_t* bytes, const size_t size, Header& out, uint16_t& version, std::string& error)
         {
             if (size < header_size || memcmp(bytes, magic, sizeof(magic)) != 0) {
                 error = "not a recording (no magic)";
                 return false;
             }
             HeaderReader header_reader{bytes + sizeof(magic)};
-            uint16_t version = 0;
             uint16_t stored_size = 0;
             VisitHeader(header_reader, out, version, stored_size);
-            if (version != format_version || stored_size != header_size) {
-                error = std::format("format version {} with a header of {} bytes, expected {} and {}", version, stored_size, format_version, header_size);
+            if (version < first_format_version || version > format_version || stored_size != header_size) {
+                error = std::format("format version {} with a header of {} bytes, expected {} to {} and {}", version, stored_size, first_format_version, format_version, header_size);
                 return false;
             }
             return true;
@@ -247,7 +251,7 @@ namespace ReplayFile {
                 return true;
             }
         };
-    }
+    } // namespace
 
     uint64_t TableDigest(const MessageTable& table)
     {
@@ -269,7 +273,20 @@ namespace ReplayFile {
         return packer.Pack(fields + 1, field_count - 1) && out.size() <= max_body_size;
     }
 
-    bool Read(const std::filesystem::path& path, Contents& out, std::string& error)
+    const char* KeyframeKindName(const KeyframeKind kind)
+    {
+        switch (kind) {
+            case KeyframeKind::Start:
+                return "start";
+            case KeyframeKind::AfterLoad:
+                return "after a load";
+            case KeyframeKind::Periodic:
+                return "periodic";
+        }
+        return "?";
+    }
+
+    bool Read(const std::filesystem::path& path, Contents& out, std::string& error, const bool bodies)
     {
         out = {};
         const auto file = _wfopen(path.c_str(), L"rb");
@@ -285,12 +302,14 @@ namespace ReplayFile {
         }
         fclose(file);
 
-        if (!ParseHeader(bytes.data(), bytes.size(), out.header, error)) {
+        if (!ParseHeader(bytes.data(), bytes.size(), out.header, out.version, error)) {
             return false;
         }
 
         size_t offset = header_size;
-        const auto remaining = [&] { return bytes.size() - offset; };
+        const auto remaining = [&] {
+            return bytes.size() - offset;
+        };
         const auto take = [&](const size_t n) {
             const auto value = Get(bytes.data() + offset, n);
             offset += n;
@@ -326,32 +345,59 @@ namespace ReplayFile {
             return false;
         }
 
+        size_t record_count = 0;
+        uint32_t keyframe_messages = 0;
+        const auto with_meta = out.version > first_format_version;
         while (remaining()) {
             if (remaining() < record_prefix_size) {
                 out.truncated_tail = true;
                 break;
             }
-            Record record;
-            record.time_ms = static_cast<uint32_t>(take(4));
+            const auto time_ms = static_cast<uint32_t>(take(4));
             const auto body_size = static_cast<size_t>(take(2));
             if (body_size < 2) {
-                error = std::format("record {} has no message id", out.records.size());
+                error = std::format("record {} has no message id", record_count);
                 return false;
             }
             if (remaining() < body_size) {
                 out.truncated_tail = true;
                 break;
             }
-            record.body.assign(bytes.begin() + offset, bytes.begin() + offset + body_size);
+            const auto body = bytes.data() + offset;
+            const auto message_id = static_cast<uint16_t>(Get(body, 2));
             offset += body_size;
-            if (record.MessageId() >= message_count) {
-                error = std::format("record {} has message id {}, beyond the table's {}", out.records.size(), record.MessageId(), message_count);
+            if (with_meta && !keyframe_messages && message_id == chapter_entry_id && body_size == chapter_entry_size) {
+                out.chapters.push_back({record_count, time_ms, static_cast<uint32_t>(Get(body + 2, 4)), static_cast<uint32_t>(Get(body + 6, 4)), static_cast<uint32_t>(Get(body + 10, 4))});
+                continue;
+            }
+            if (with_meta && !keyframe_messages && message_id == keyframe_entry_id && body_size == keyframe_entry_size) {
+                out.keyframes.push_back({record_count, time_ms, static_cast<KeyframeKind>(body[2]), {}});
+                keyframe_messages = static_cast<uint32_t>(Get(body + 3, 4));
+                continue;
+            }
+            if (message_id >= message_count) {
+                error = std::format("record {} has message id {}, beyond the table's {}", record_count, message_id, message_count);
                 return false;
             }
-            out.records.push_back(std::move(record));
+            if (keyframe_messages) {
+                keyframe_messages--;
+                if (bodies) {
+                    out.keyframes.back().records.push_back({time_ms, {body, body + body_size}});
+                }
+                continue;
+            }
+            out.records.push_back({time_ms, bodies ? std::vector<uint8_t>(body, body + body_size) : std::vector<uint8_t>()});
+            record_count++;
         }
-        if ((out.header.flags & Complete) && out.header.record_count != out.records.size()) {
-            error = std::format("the header counts {} records, the file holds {}", out.header.record_count, out.records.size());
+        if (keyframe_messages) {
+            out.keyframes.pop_back();
+            out.truncated_tail = true;
+        }
+        if (out.chapters.empty() || out.chapters.front().first_record) {
+            out.chapters.insert(out.chapters.begin(), {0, 0, out.header.map_id, out.header.is_explorable, out.header.map_region_type});
+        }
+        if ((out.header.flags & Complete) && out.header.record_count != record_count) {
+            error = std::format("the header counts {} records, the file holds {}", out.header.record_count, record_count);
             return false;
         }
         return true;
@@ -375,11 +421,9 @@ namespace ReplayFile {
                 return c >= 0x20 && c < 0x100;
             });
         }
-    }
+    } // namespace
 
-    NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name)
-        : other_players(other_players),
-          own_names(own_names)
+    NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name) : other_players(other_players), own_names(own_names)
     {
         if (!own_name.empty()) {
             recorder_names.insert(std::move(own_name));
@@ -459,7 +503,8 @@ namespace ReplayFile {
         uint8_t bytes[header_size];
         const auto read = fread(bytes, 1, sizeof(bytes), file);
         fclose(file);
-        return ParseHeader(bytes, read, out, error);
+        uint16_t version = 0;
+        return ParseHeader(bytes, read, out, version, error);
     }
 
     Writer::~Writer()
@@ -505,6 +550,27 @@ namespace ReplayFile {
         return Write(bytes);
     }
 
+    bool Writer::AppendChapter(const Chapter& chapter)
+    {
+        std::vector<uint8_t> body;
+        Put(body, chapter_entry_id, 2);
+        Put(body, chapter.map_id, 4);
+        Put(body, chapter.is_explorable, 4);
+        Put(body, chapter.map_region_type, 4);
+        return Append(chapter.time_ms, body.data(), body.size());
+    }
+
+    bool Writer::AppendKeyframe(const uint32_t time_ms, const KeyframeKind kind, const std::vector<Record>& records)
+    {
+        std::vector<uint8_t> body;
+        Put(body, keyframe_entry_id, 2);
+        Put(body, static_cast<uint8_t>(kind), 1);
+        Put(body, records.size(), 4);
+        return Append(time_ms, body.data(), body.size()) && std::ranges::all_of(records, [this, time_ms](const Record& record) {
+                   return Append(time_ms, record.body.data(), record.body.size());
+               });
+    }
+
     bool Writer::Flush()
     {
         return file && fflush(file) == 0;
@@ -521,4 +587,4 @@ namespace ReplayFile {
         file = nullptr;
         return written && closed;
     }
-}
+} // namespace ReplayFile

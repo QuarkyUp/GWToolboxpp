@@ -26,6 +26,8 @@ namespace ReplayState {
             AgentUpdateRotateAbort = 45,
             AgentUpdateRotation = 46,
             AgentUpdateTeamToken = 47,
+            AccountCurrency = 15,
+            CharAccountNameData = 48,
             CharAttackInterval = 53,
             CharAttributeState = 55,
             CharAttribPointsAvail = 56,
@@ -52,6 +54,8 @@ namespace ReplayState {
             CharNpcModel = 87,
             CharPlayerCreate = 89,
             CharAgentDestroyPlayer = 90,
+            CharToClient91 = 91,
+            CharHeroSkillStatusBitmap = 101,
             CharPostProcess = 107,
             CharHeroActivate = 114,
             CharHeroDataAdd = 115,
@@ -60,7 +64,12 @@ namespace ReplayState {
             CharEquipment = 110,
             CharEquipUpdate = 111,
             CharContextValue112 = 112,
+            CharToClient124 = 124,
+            CharToClient125 = 125,
+            CharMapInit = 138,
+            CharMapInitStart = 139,
             CharPointTable141 = 141,
+            CharToClient153 = 153,
             CharAgentUpdateScale = 154,
             CharAgentUpdateNpcName = 155,
             CharAgentMorale = 156,
@@ -74,11 +83,23 @@ namespace ReplayState {
             CharPlayerLink = 177,
             CharPlayerUnlockedProfession = 182,
             CharProfessions = 183,
+            CharPrefs = 181,
             CharMissionStreamStart = 186,
             CharSkillbar = 218,
+            CharUnlockedSkills = 219,
+            CharSkillUpdateSkillCount2 = 221,
+            CharPlayerAttrSet = 233,
+            CharPlayerAttrMaxKurzick = 234,
+            CharPlayerAttrMaxLuxon = 235,
+            CharPlayerAttrMaxBalthazar = 236,
+            CharPlayerAttrMaxImperial = 237,
+            CharDisplay = 239,
             CharAgentInitialEffects = 240,
             CharAgentUpdateEffects = 241,
             CharPlayerTeam = 242,
+            CharTitleRankData = 243,
+            CharTitleRankDisplay = 244,
+            CharTitleTrackInfo = 246,
             GadgetClassDefine = 263,
             PropAnimate = 270,
             PropLayers = 273,
@@ -89,13 +110,24 @@ namespace ReplayState {
             GuildGeneralInfo = 289,
             GuildToClient302 = 302,
             ItemAssign = 309,
+            ItemCount = 313,
             ItemCustomize = 314,
             ItemInventoryAdd = 318,
+            ItemInventoryAddBag = 319,
+            ItemInventoryAddGold = 320,
+            ItemInventoryAddGoldAccount = 321,
+            ItemInventoryCreate = 324,
             ItemInventoryEquipSet = 327,
+            ItemInventoryEquipSetActivate = 328,
+            ItemInventoryMove = 331,
+            ItemInventoryRemove = 333,
+            ItemInventoryRemoveGold = 335,
+            ItemInventorySwap = 338,
             ItemProfession = 346,
             ItemReportDetailLow = 350,
             ItemReportDetailAll = 353,
             ItemReportDetailAllReset = 354,
+            ItemToClient360 = 360,
             MissionAccessRights = 366,
             MissionInstanceLoadHead = 380,
             MissionInstanceLoadPlayerName = 381,
@@ -131,6 +163,9 @@ namespace ReplayState {
         };
 
         enum Notice : uint32_t {
+            CharacterNotice0 = 0,
+            CharacterNotice14 = 14,
+            CharacterNotice15 = 15,
             AuraAdded = 6,
             AuraRemoved = 7,
             Marker = 11,
@@ -154,17 +189,8 @@ namespace ReplayState {
             IgnoringArmour = 55,
         };
 
-        constexpr uint16_t state_ids[] = {
-            30,  31,  32,  33,  34,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,  53,  60,  62,  63,  64,  65,  66,  68,  72,  73,  76,  77,  80,  81,  82,  83,  84,  86,  87,  89,  90,  107, 109, 110, 111, 112, 141, 154, 155, 156, 159,
-            162, 163, 166, 170, 174, 176, 177, 186, 240, 241, 242, 263, 270, 273, 277, 280, 284, 288, 289, 302, 309, 314, 346, 350, 353, 354, 366, 380, 381, 390, 398, 404, 406, 407, 408, 409, 410, 428, 430, 435, 446, 447, 451, 460, 467, 468, 474,
-        };
+        constexpr uint16_t bag_content_ids[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 131, 132, 133, 134, 195, 196, 197, 202, 203, 204, 224, 318, 319, 320, 321, 322, 323, 326, 327, 329, 331, 332, 333, 334, 335, 336, 337, 338, 339, 341, 342};
         constexpr uint16_t transient_ids[] = {12, 13, 35, 52, 61, 69, 70, 71, 93, 94, 96, 97, 160, 161, 164, 165, 226, 227, 228, 345};
-        constexpr uint16_t private_ids[] = {
-            15, 48, 49, 50, 51, 54, 55, 56, 57, 58, 59, 75, 78, 92, 101, 114, 115, 116, 124, 125, 126, 128, 129, 131, 132, 138, 139, 140, 181, 182,
-            183, 195, 196, 197, 202, 203, 204, 218, 219, 221, 224, 229, 230, 233, 234, 235, 236, 237, 238, 239, 243, 244, 245, 246, 313, 318,
-            319, 320, 321, 324, 327, 328, 331, 333, 335, 337, 479, 480, 481,
-        };
-
         constexpr uint32_t class_kind_mask = 0xF0000000;
         constexpr uint32_t npc_class = 0x20000000;
         constexpr uint32_t gadget_def = 2;
@@ -173,9 +199,9 @@ namespace ReplayState {
         constexpr size_t equipment_slots = 9;
         constexpr uint16_t quest_ids[] = {CharQuestAdd, CharQuestGeneralInfo, CharQuestUpdateName, CharQuestDescription, CharQuestAddMarker, CharQuestUpdateMarker, CharQuestEarned};
         constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailAllReset, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
-        constexpr uint16_t character_ids[] = {CharAttributeState, CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharPlayerUnlockedProfession, CharProfessions, CharSkillbar};
         constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharProfessions};
         constexpr size_t skillbar_create_field = 3;
+        constexpr size_t item_quantity_field = 10;
         constexpr IdField named_id_fields[] = {
             {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},      {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
             {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},     {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
@@ -195,7 +221,8 @@ namespace ReplayState {
             {289, 0, IdKind::Guild}, {467, 0, IdKind::Party}, {89, 0, IdKind::Player}, {176, 0, IdKind::Player}, {177, 0, IdKind::Player}, {410, 0, IdKind::Player}, {73, 0, IdKind::Quest},      {80, 0, IdKind::Quest},
             {116, 0, IdKind::Hero},  {115, 0, IdKind::Hero},  {86, 0, IdKind::Npc},    {273, 0, IdKind::Prop},   {66, 1, IdKind::Skill},   {226, 1, IdKind::Skill},  {228, 1, IdKind::Skill},
         };
-        constexpr uint16_t row_ids[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentUpdateProfession, CharAgentAllyAdd, CharAgentInitialEffects, CharAgentUpdateEffects};
+        constexpr uint16_t row_ids[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentUpdateProfession, CharAgentAllyAdd, CharAgentInitialEffects, CharAgentUpdateEffects, CharAgentMorale, CharAgentAttrUpdateFloat};
+        constexpr uint16_t character_rows[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentUpdateProfession, CharAgentUpdateEffects, CharAgentMorale, CharAgentAttrUpdateFloat};
 
         template <typename List>
         bool Contains(const List& list, const uint32_t value)
@@ -210,7 +237,7 @@ namespace ReplayState {
 
         bool IsStateNotice(const uint32_t kind)
         {
-            return Contains(std::initializer_list<uint32_t>{Marker, ModelsStopped, Guild, Level, MaxEnergy, MaxHealth, Unlurk}, kind);
+            return Contains(std::initializer_list<uint32_t>{CharacterNotice0, CharacterNotice14, CharacterNotice15, Marker, ModelsStopped, Guild, Level, MaxEnergy, MaxHealth, Unlurk}, kind);
         }
 
         bool IsRow(const Message& message)
@@ -265,8 +292,23 @@ namespace ReplayState {
                 case CharPlayerTeam:
                 case CharPostProcess:
                 case CharContextValue112:
+                case CharAccountNameData:
+                case CharToClient91:
+                case CharToClient124:
+                case CharToClient125:
+                case CharToClient153:
+                case CharPrefs:
+                case CharUnlockedSkills:
+                case CharSkillUpdateSkillCount2:
+                case CharPlayerAttrSet:
+                case CharPlayerAttrMaxKurzick:
+                case CharPlayerAttrMaxLuxon:
+                case CharPlayerAttrMaxBalthazar:
+                case CharPlayerAttrMaxImperial:
+                case CharDisplay:
                 case GuildToClient284:
                 case GuildToClient302:
+                case ItemToClient360:
                 case MissionAccessRights:
                 case MissionToClient404:
                 case PartyAssign:
@@ -295,6 +337,15 @@ namespace ReplayState {
                 case CharQuestUpdateName:
                 case PartyMembershipBegin:
                 case PartyMembershipEnd:
+                case ItemInventoryCreate:
+                case ItemInventoryEquipSetActivate:
+                case CharHeroSkillStatusBitmap:
+                case CharHeroActivate:
+                case CharHeroDataAdd:
+                case CharMercenaryInfo:
+                case CharTitleRankData:
+                case CharTitleRankDisplay:
+                case CharTitleTrackInfo:
                     return {message.id, message.U(0)};
                 case PartyMemberAdd:
                     return {message.id, message.U(0), message.U(1)};
@@ -439,10 +490,7 @@ namespace ReplayState {
             std::vector<uint8_t>& out;
             size_t next = 0;
 
-            const Field* Next()
-            {
-                return next < message.fields.size() ? &message.fields[next++] : nullptr;
-            }
+            const Field* Next() { return next < message.fields.size() ? &message.fields[next++] : nullptr; }
 
             bool Put(const uint32_t value, const size_t size)
             {
@@ -559,34 +607,7 @@ namespace ReplayState {
             }
             return message;
         }
-
-        void Describe(std::string& out, const Message& message, const bool full, const size_t skipped_field = SIZE_MAX)
-        {
-            out += std::format("{}", message.id);
-            for (size_t i = 0; i < message.fields.size(); i++) {
-                if (i == skipped_field) {
-                    out += " -";
-                    continue;
-                }
-                const auto& field = message.fields[i];
-                out += " ";
-                if (!full) {
-                    out += field.text.empty() ? std::format("n{}", field.numbers.size()) : std::format("t{}", field.text.size());
-                    continue;
-                }
-                for (size_t j = 0; j < field.numbers.size(); j++) {
-                    out += std::format("{}{:x}", j ? "," : "", field.numbers[j]);
-                }
-                if (!field.text.empty() || field.numbers.empty()) {
-                    out += "'";
-                    for (const auto c : field.text) {
-                        out += std::format("{:04x}", static_cast<uint16_t>(c));
-                    }
-                }
-            }
-            out += "\n";
-        }
-    }
+    } // namespace
 
     uint32_t Message::U(const size_t field, const size_t item) const
     {
@@ -642,15 +663,45 @@ namespace ReplayState {
         return encoder.Walk(descriptors.data() + 1, descriptors.size() - 1) && encoder.next == message.fields.size() && out.size() <= ReplayFile::max_body_size;
     }
 
-    std::vector<uint32_t> NamedAgents(const ReplayFile::MessageTable& table, const Message& message)
+    Message Blank(const ReplayFile::MessageTable& table, const uint16_t message_id)
     {
-        std::vector<uint32_t> named;
-        for (const auto& field : IdFields(table, message.id)) {
-            if (field.kind == IdKind::Agent && message.U(field.field)) {
-                named.push_back(message.U(field.field));
+        Message message{message_id, {}};
+        if (message_id >= table.size() || table[message_id].empty()) {
+            return message;
+        }
+        const auto& descriptors = table[message_id];
+        for (size_t i = 1; i < descriptors.size(); i++) {
+            const auto type = descriptors[i] & 0xF;
+            const auto size = descriptors[i] >> 8;
+            switch (type) {
+                case 0:
+                case 1:
+                case 4:
+                case 8:
+                    message.fields.push_back({{0}, {}});
+                    break;
+                case 2:
+                    message.fields.push_back({{0, 0}, {}});
+                    break;
+                case 3:
+                    message.fields.push_back({{0, 0, 0}, {}});
+                    break;
+                case 5:
+                case 9:
+                    message.fields.push_back({std::vector<uint32_t>(size, 0), {}});
+                    break;
+                case 7:
+                case 11:
+                    message.fields.emplace_back();
+                    break;
+                case 12:
+                    message.fields.push_back({{0}, {}});
+                    return message;
+                default:
+                    break;
             }
         }
-        return named;
+        return message;
     }
 
     const char* IdKindName(const IdKind kind)
@@ -745,59 +796,54 @@ namespace ReplayState {
         return std::format("record {} (message {}): its {} {} (field {}) comes before any message that brings it in", failure.record, failure.field.message, IdKindName(failure.field.kind), failure.id, failure.field.field);
     }
 
-    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages)
+    std::vector<std::pair<IdField, uint32_t>> Order::Unbrought(const ReplayFile::MessageTable& table, const Message& message) const
     {
-        std::vector<OrderFailure> failures;
-        std::set<std::pair<IdKind, uint32_t>> brought;
-        for (size_t i = 0; i < messages.size(); i++) {
-            const auto& message = messages[i];
-            for (const auto& field : IdFields(table, message.id)) {
-                if (field.field >= message.fields.size()) {
+        std::vector<std::pair<IdField, uint32_t>> unbrought;
+        std::set<std::pair<IdKind, uint32_t>> own;
+        for (const auto& field : IdFields(table, message.id)) {
+            if (field.field >= message.fields.size()) {
+                continue;
+            }
+            const auto brings = BringsIdsIn(field);
+            for (const auto id : message.fields[field.field].numbers) {
+                if (!id) {
                     continue;
                 }
-                const auto brings = BringsIdsIn(field);
+                if (brings) {
+                    own.insert({field.kind, id});
+                }
+                else if (OrderChecked(field.kind) && !brought.contains({field.kind, id}) && !own.contains({field.kind, id})) {
+                    unbrought.emplace_back(field, id);
+                }
+            }
+        }
+        return unbrought;
+    }
+
+    void Order::Bring(const ReplayFile::MessageTable& table, const Message& message)
+    {
+        for (const auto& field : IdFields(table, message.id)) {
+            if (field.field < message.fields.size() && BringsIdsIn(field)) {
                 for (const auto id : message.fields[field.field].numbers) {
-                    if (!id) {
-                        continue;
-                    }
-                    if (brings) {
+                    if (id) {
                         brought.insert({field.kind, id});
-                    }
-                    else if (OrderChecked(field.kind) && !brought.contains({field.kind, id})) {
-                        failures.push_back({i, field, id});
                     }
                 }
             }
         }
+    }
+
+    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages)
+    {
+        std::vector<OrderFailure> failures;
+        Order order;
+        for (size_t i = 0; i < messages.size(); i++) {
+            for (const auto& [field, id] : order.Unbrought(table, messages[i])) {
+                failures.push_back({i, field, id});
+            }
+            order.Bring(table, messages[i]);
+        }
         return failures;
-    }
-
-    Kind KindOf(const uint16_t message_id)
-    {
-        if (Contains(state_ids, message_id)) {
-            return Kind::State;
-        }
-        if (Contains(transient_ids, message_id)) {
-            return Kind::Transient;
-        }
-        if (Contains(private_ids, message_id)) {
-            return Kind::Private;
-        }
-        return Kind::Unknown;
-    }
-
-    bool IsCharacterMessageOf(const Message& message, const uint32_t agent_id)
-    {
-        return agent_id && Contains(character_ids, message.id) && message.U(0) == agent_id;
-    }
-
-    bool Streamed(const ReplayFile::MessageTable& table, const ReplayFile::Record& record, const uint32_t controlled_agent)
-    {
-        if (KindOf(record.MessageId()) != Kind::Private) {
-            return true;
-        }
-        Message message;
-        return Decode(table, record.body, message) && IsCharacterMessageOf(message, controlled_agent);
     }
 
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages)
@@ -840,18 +886,148 @@ namespace ReplayState {
         return failures;
     }
 
-    const char* KindName(const Kind kind)
+    std::vector<uint32_t> Identity(const Message& message)
     {
-        switch (kind) {
-            case Kind::State:
-                return "state";
-            case Kind::Transient:
-                return "transient";
-            case Kind::Private:
-                return "private";
-            default:
-                return "unknown";
+        if (auto key = InstanceKey(message); !key.empty()) {
+            return key;
         }
+        const auto id = message.id;
+        if (Contains(item_ids, id)) {
+            return {id, message.U(0)};
+        }
+        switch (id) {
+            case CharPlayerCreate:
+            case CharPlayerRowFlags:
+            case CharAttributeState:
+            case CharAttributes:
+            case CharPlayerUnlockedProfession:
+            case CharProfessions:
+            case CharSkillbar:
+                return {id, message.U(0)};
+            case CharAgentUpdateAttribute:
+                return {id, message.U(0), message.U(1)};
+            default:
+                break;
+        }
+        const auto agent_field = AgentField(id);
+        if (agent_field < 0) {
+            return {id};
+        }
+        const auto agent = message.U(agent_field);
+        switch (id) {
+            case CharNotifyDword:
+                return message.U(0) == AuraAdded || message.U(0) == AuraRemoved ? std::vector<uint32_t>{id, agent, message.U(0), message.U(2)} : std::vector<uint32_t>{id, agent, message.U(0)};
+            case CharAgentAttrUpdateFloat:
+            case CharAgentAttrUpdateFloatTarget:
+                return {id, agent, message.U(0)};
+            case CharEffectApplied:
+            case CharEffectUpkeepAdded:
+            case CharEffectUpkeepApplied:
+                return {id, agent, message.U(3)};
+            case CharEffectRemoved:
+            case CharEffectUpkeepRemoved:
+                return {id, agent, message.U(1)};
+            default:
+                return {id, agent};
+        }
+    }
+
+    bool IsBagContent(const Message& message)
+    {
+        return Contains(bag_content_ids, message.id);
+    }
+
+    std::vector<uint32_t> ShownItems(const Message& message)
+    {
+        std::vector<uint32_t> shown;
+        const auto add = [&shown, &message](const size_t field) {
+            if (message.U(field)) {
+                shown.push_back(message.U(field));
+            }
+        };
+        switch (message.id) {
+            case AgentCreate:
+                if (message.U(CreateDef) == item_def) {
+                    add(CreateClass);
+                }
+                break;
+            case CharEquipment:
+                for (size_t slot = 1; slot <= equipment_slots; slot++) {
+                    add(slot);
+                }
+                break;
+            case CharEquipUpdate:
+                add(2);
+                break;
+            case CharNpcUpdateWeapons:
+                add(1);
+                add(2);
+                break;
+            default:
+                break;
+        }
+        return shown;
+    }
+
+    bool InventoryFilter::Keep(const Message& message, std::vector<Message>& shown_before, std::vector<uint32_t>& unknown_items)
+    {
+        if (IsBagContent(message)) {
+            return false;
+        }
+        if (Contains(item_ids, message.id) || message.id == ItemCount) {
+            if (shown.contains(message.U(0))) {
+                return true;
+            }
+            auto& kept = held[message.U(0)];
+            if (message.id != ItemCount) {
+                kept[message.id] = message;
+            }
+            else if (kept.contains(ItemReportDetailAll)) {
+                kept[ItemReportDetailAll].Set(item_quantity_field, message.U(1));
+            }
+            return false;
+        }
+        for (const auto item : ShownItems(message)) {
+            if (!shown.insert(item).second) {
+                continue;
+            }
+            const auto found = held.find(item);
+            if (found == held.end() || found->second.empty()) {
+                unknown_items.push_back(item);
+                continue;
+            }
+            for (const auto id : item_ids) {
+                if (const auto detail = found->second.find(id); detail != found->second.end()) {
+                    shown_before.push_back(detail->second);
+                }
+            }
+            held.erase(found);
+        }
+        for (const auto& field : IdFields(*table, message.id)) {
+            if (field.kind != IdKind::Item || field.field >= message.fields.size()) {
+                continue;
+            }
+            if (std::ranges::any_of(message.fields[field.field].numbers, [this](const uint32_t item) {
+                    return item && !shown.contains(item);
+                })) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool InventoryFilter::Holds(const Message& message) const
+    {
+        return (Contains(item_ids, message.id) || message.id == ItemCount) && !shown.contains(message.U(0));
+    }
+
+    size_t InventoryFilter::Held() const
+    {
+        size_t count = 0;
+        for (const auto& details : held | std::views::values) {
+            count += details.size();
+        }
+        return count;
     }
 
     bool World::Apply(const ReplayFile::Record& record)
@@ -867,6 +1043,11 @@ namespace ReplayState {
 
     void World::Apply(const Message& message)
     {
+        if ((message.id == MissionInstanceLoadHead || message.id == MissionInstanceInfo) && connected) {
+            const auto errors = layout_errors;
+            *this = World(*table);
+            layout_errors = errors;
+        }
         switch (message.id) {
             case AgentAdvance:
                 Tick(message.U(0));
@@ -881,9 +1062,6 @@ namespace ReplayState {
                     agent = {};
                 }
                 agent.create = message;
-                if (message.U(CreateDef) == item_def) {
-                    shown_items.insert(message.U(CreateClass));
-                }
                 return;
             }
             case AgentDestroy:
@@ -907,7 +1085,8 @@ namespace ReplayState {
                 return;
             case CharPlayerRowFlags: {
                 auto& flags = player_flags[message.U(0)];
-                flags = (flags & ~message.U(2)) | message.U(1);
+                flags.value = (flags.value & ~message.U(2)) | (message.U(1) & message.U(2));
+                flags.mask |= message.U(2);
                 return;
             }
             case CharQuestRemove:
@@ -915,11 +1094,18 @@ namespace ReplayState {
                     instance.erase({id, message.U(0)});
                 }
                 return;
-            case ItemInventoryEquipSet:
-                shown_items.insert({message.U(2), message.U(3)});
+            case CharMapInitStart:
+                map_init = {message};
                 return;
-            case ItemInventoryAdd:
-                inventory_items.insert(message.U(1));
+            case CharMapInit:
+                if (!map_init.empty()) {
+                    map_init.push_back(message);
+                }
+                return;
+            case ItemCount:
+                if (const auto found = items.find(message.U(0)); found != items.end() && found->second.contains(ItemReportDetailAll)) {
+                    found->second[ItemReportDetailAll].Set(item_quantity_field, message.U(1));
+                }
                 return;
             case CharAttributeState:
                 characters[message.U(0)].attribute_state = message;
@@ -965,12 +1151,12 @@ namespace ReplayState {
             return;
         }
         const auto agent_field = AgentField(message.id);
-        if (agent_field < 0 || KindOf(message.id) != Kind::State) {
+        if (agent_field < 0 || Contains(transient_ids, message.id)) {
             return;
         }
         auto found = agents.find(message.U(agent_field));
         if (found == agents.end() || !found->second.create.id) {
-            if (!IsRow(message)) {
+            if (!IsRow(message) && !IsUpkeep(message.id)) {
                 return;
             }
             found = agents.try_emplace(message.U(agent_field)).first;
@@ -999,7 +1185,6 @@ namespace ReplayState {
             case CharEquipment:
                 for (size_t slot = 0; slot < equipment_slots; slot++) {
                     agent.equipment[slot] = message.U(slot + 1);
-                    shown_items.insert(message.U(slot + 1));
                 }
                 agent.equipped = true;
                 return;
@@ -1007,16 +1192,14 @@ namespace ReplayState {
                 if (message.U(1) < equipment_slots) {
                     agent.equipment[message.U(1)] = message.U(2);
                     agent.equipped = true;
-                    shown_items.insert(message.U(2));
                 }
                 return;
             case CharNpcUpdateWeapons:
                 agent.slots[{message.id}] = message;
-                shown_items.insert({message.U(1), message.U(2)});
                 return;
             case CharAgentInitialEffects:
             case CharAgentUpdateEffects:
-                agent.slots[{CharAgentInitialEffects}] = Message{CharAgentInitialEffects, message.fields};
+                agent.slots[{CharAgentInitialEffects}] = message;
                 return;
             case CharAgentAllyDestroy:
                 agent.slots.erase({CharAgentAllyAdd});
@@ -1087,7 +1270,7 @@ namespace ReplayState {
         for (auto it = agents.begin(); it != agents.end();) {
             auto& agent = it->second;
             if (!agent.create.id) {
-                it = agents.erase(it);
+                ++it;
                 continue;
             }
             std::erase_if(agent.effects, [this](const auto& effect) {
@@ -1183,7 +1366,16 @@ namespace ReplayState {
         }
     }
 
-    void World::JoinAgent(const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const
+    void World::JoinInventory(const uint32_t inventory_id, std::vector<Message>& out, std::set<Key>& emitted) const
+    {
+        for (const auto id : {ItemInventoryCreate, ItemInventoryEquipSetActivate}) {
+            if (const auto found = instance.find({id, inventory_id}); found != instance.end() && emitted.insert(found->first).second) {
+                out.push_back(found->second);
+            }
+        }
+    }
+
+    void World::JoinRows(const uint32_t agent_id, const Agent& agent, const bool before_connect, std::vector<Message>& out, std::set<Key>& emitted) const
     {
         const auto& create = agent.create;
         const auto define = [&](const Key& key) {
@@ -1191,51 +1383,75 @@ namespace ReplayState {
                 out.push_back(found->second);
             }
         };
-        const auto define_npc = [&](const uint32_t agent_class) {
-            if ((agent_class & class_kind_mask) == npc_class) {
-                define({CharNpcProperties, agent_class & ~class_kind_mask});
-                define({CharNpcModel, agent_class & ~class_kind_mask});
-            }
+        const auto define_npc = [&](const uint32_t npc) {
+            define({CharNpcProperties, npc});
+            define({CharNpcModel, npc});
         };
         if (create.U(CreateDef) == gadget_def) {
             define({GadgetClassDefine, create.U(CreateClass)});
         }
-        define_npc(create.U(CreateClass));
+        if ((create.U(CreateClass) & class_kind_mask) == npc_class) {
+            define_npc(create.U(CreateClass) & ~class_kind_mask);
+        }
         if (const auto model = agent.slots.find({CharUpdateAgentModel}); model != agent.slots.end()) {
-            define({CharNpcProperties, model->second.U(1)});
-            define({CharNpcModel, model->second.U(1)});
+            define_npc(model->second.U(1));
         }
         if (create.U(CreateDef) == item_def) {
             JoinItem(create.U(CreateClass), out, emitted);
         }
-        for (const auto& [key, message] : agent.slots) {
-            if (IsRow(message)) {
-                out.push_back(message);
+        const auto brings_agent = [](const Message& message) {
+            return BringsIdsIn({message.id, static_cast<uint8_t>(AgentField(message.id)), IdKind::Agent});
+        };
+        const auto brought = before_connect || agent.create.id || std::ranges::any_of(agent.slots | std::views::values, [&](const Message& message) {
+                                 return IsRow(message) && brings_agent(message);
+                             });
+        for (const auto bringers : {true, false}) {
+            uint32_t row = 0;
+            for (const auto& message : agent.slots | std::views::values) {
+                row++;
+                if (!IsRow(message) || brings_agent(message) != bringers) {
+                    continue;
+                }
+                const auto now = before_connect ? Contains(character_rows, message.id) : bringers || (brought && !agent.create.id);
+                if (now && emitted.insert({AgentCreate, agent_id, row}).second) {
+                    out.push_back(message);
+                }
             }
         }
+    }
+
+    void World::JoinAgent(const uint32_t agent_id, const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const
+    {
+        JoinRows(agent_id, agent, false, out, emitted);
+        if (!agent.create.id) {
+            return;
+        }
+        const auto& create = agent.create;
         out.push_back(create);
         if (const auto weapons = agent.slots.find({CharNpcUpdateWeapons}); weapons != agent.slots.end()) {
             JoinItem(weapons->second.U(1), out, emitted);
             JoinItem(weapons->second.U(2), out, emitted);
         }
         if (agent.equipped) {
-            auto equipment = Make(CharEquipment, {create.U(CreateAgent)});
+            auto equipment = Make(CharEquipment, {agent_id});
             for (const auto item : agent.equipment) {
                 JoinItem(item, out, emitted);
                 equipment.fields.push_back({{item}, {}});
             }
             out.push_back(equipment);
         }
+        uint32_t row = 0;
         for (const auto& [key, message] : agent.slots) {
-            if (!IsRow(message) && !IsUpkeep(key[0])) {
+            row++;
+            if ((!IsRow(message) && !IsUpkeep(key[0])) || (IsRow(message) && emitted.insert({AgentCreate, agent_id, row}).second)) {
                 out.push_back(message);
             }
         }
         if (agent.health != 1.f) {
-            out.push_back(Make(CharAgentAttrUpdateFloat, {Health, create.U(CreateAgent), std::bit_cast<uint32_t>(agent.health)}));
+            out.push_back(Make(CharAgentAttrUpdateFloat, {Health, agent_id, std::bit_cast<uint32_t>(agent.health)}));
         }
         if (agent.energy != 1.f) {
-            out.push_back(Make(CharAgentAttrUpdateFloat, {Energy, create.U(CreateAgent), std::bit_cast<uint32_t>(agent.energy)}));
+            out.push_back(Make(CharAgentAttrUpdateFloat, {Energy, agent_id, std::bit_cast<uint32_t>(agent.energy)}));
         }
         for (const auto& effect : agent.effects | std::views::values) {
             auto applied = effect.applied;
@@ -1243,6 +1459,33 @@ namespace ReplayState {
                 applied.SetF(4, static_cast<float>(effect.expiry - clock) / 1000.f);
             }
             out.push_back(applied);
+        }
+    }
+
+    void World::JoinCharacter(const uint32_t agent_id, std::vector<Message>& out, std::set<Key>& emitted) const
+    {
+        const auto found = characters.find(agent_id);
+        if (found == characters.end() || !found->second.attribute_state.id || !emitted.insert({CharAttributeState, agent_id}).second) {
+            return;
+        }
+        const auto& character = found->second;
+        out.push_back(character.attribute_state);
+        for (const auto id : {CharProfessions, CharPlayerUnlockedProfession, CharSkillbar}) {
+            if (const auto latest = character.latest.find(id); latest != character.latest.end()) {
+                out.push_back(latest->second);
+            }
+        }
+        if (const auto status = instance.find({CharHeroSkillStatusBitmap, agent_id}); status != instance.end() && emitted.insert(status->first).second) {
+            out.push_back(status->second);
+        }
+        if (const auto agent = agents.find(agent_id); agent != agents.end()) {
+            JoinRows(agent_id, agent->second, true, out, emitted);
+        }
+        if (const auto attributes = character.latest.find(CharAttributes); attributes != character.latest.end()) {
+            out.push_back(attributes->second);
+        }
+        for (const auto& update : character.attribute_updates | std::views::values) {
+            out.push_back(update);
         }
     }
 
@@ -1256,15 +1499,16 @@ namespace ReplayState {
         const auto alive = [this, left_out](const uint32_t agent_id) {
             return Alive(agent_id) && agent_id != left_out;
         };
+        const auto has_character = [this](const uint32_t agent_id) {
+            const auto found = characters.find(agent_id);
+            return found != characters.end() && found->second.attribute_state.id;
+        };
         const auto emit_entry = [&](const int section) {
             for (const auto& message : entry) {
                 if (EntrySection(message.id) != section) {
                     continue;
                 }
                 out.push_back(message);
-                if (message.id == MissionInstanceInfo) {
-                    out.back().Set(observer_field, 1);
-                }
             }
         };
         const auto emit_instance = [&](const uint16_t id) {
@@ -1281,10 +1525,42 @@ namespace ReplayState {
                 }
             }
         };
+        const auto emit_flags = [&](const uint32_t player) {
+            if (const auto found = player_flags.find(player); found != player_flags.end() && emitted.insert({CharPlayerRowFlags, player}).second) {
+                out.push_back(Make(CharPlayerRowFlags, {player, found->second.value, found->second.mask}));
+            }
+        };
+        const auto emit_upkeeps = [&](const bool characters_only) {
+            for (const auto& [agent_id, agent] : agents) {
+                if (!alive(agent_id) && !(characters_only && has_character(agent_id))) {
+                    continue;
+                }
+                for (const auto& [key, message] : agent.slots) {
+                    const auto target = message.U(1);
+                    if (!IsUpkeep(key[0]) || (characters_only && !(has_character(agent_id) && (!target || has_character(target)))) || !emitted.insert({key[0], agent_id, key[1]}).second) {
+                        continue;
+                    }
+                    out.push_back(message);
+                    if (!characters_only && !alive(target)) {
+                        out.back().Set(1, 0);
+                    }
+                }
+            }
+        };
+        std::set<uint32_t> hero_inventories;
+        std::vector<std::pair<uint32_t, uint32_t>> heroes;
+        for (auto found = instance.lower_bound({CharHeroActivate}); found != instance.end() && found->first[0] == CharHeroActivate; ++found) {
+            hero_inventories.insert(found->second.U(2));
+            heroes.emplace_back(found->second.U(1), found->first[1]);
+        }
+        std::ranges::sort(heroes);
 
         emit_entry(0);
-        emit_entry(1);
-        emit_entry(2);
+        for (auto found = instance.lower_bound({ItemInventoryCreate}); found != instance.end() && found->first[0] == ItemInventoryCreate; ++found) {
+            if (!hero_inventories.contains(found->first[1])) {
+                JoinInventory(found->first[1], out, emitted);
+            }
+        }
         std::set<uint32_t> quests;
         for (const auto& key : instance | std::views::keys) {
             if (Contains(quest_ids, key[0])) {
@@ -1298,28 +1574,50 @@ namespace ReplayState {
                 }
             }
         }
+        for (const auto id : {CharPlayerAttrMaxKurzick, CharPlayerAttrMaxLuxon, CharPlayerAttrMaxBalthazar, CharPlayerAttrMaxImperial, CharContextValue112, CharAccountNameData, CharToClient153}) {
+            emit_instance(id);
+        }
+        emit_entry(2);
+        emit_entry(1);
         emit_entry(3);
-        emit_instance(MissionTeam);
-        emit_instance(CharPlayerTeam);
-        if (controlled) {
-            const auto& character = characters.at(controlled);
-            out.push_back(character.attribute_state);
-            for (const auto id : {CharProfessions, CharPlayerUnlockedProfession, CharSkillbar, CharAttributes}) {
-                if (const auto found = character.latest.find(id); found != character.latest.end()) {
-                    out.push_back(found->second);
-                }
-            }
-            for (const auto& update : character.attribute_updates | std::views::values) {
-                out.push_back(update);
+        for (const auto id : {MissionTeam, CharToClient91, CharPlayerTeam, CharToClient124, CharToClient125}) {
+            emit_instance(id);
+        }
+        JoinCharacter(controlled, out, emitted);
+        emit_instance(CharHeroDataAdd);
+        emit_instance(CharMercenaryInfo);
+        out.insert(out.end(), map_init.begin(), map_init.end());
+        for (const auto id : {CharPrefs, CharUnlockedSkills, CharSkillUpdateSkillCount2, CharPlayerAttrSet, CharDisplay}) {
+            emit_instance(id);
+        }
+        for (const auto& entry_message : entry) {
+            if (entry_message.id == MissionInstanceInfo) {
+                emit_flags(entry_message.U(0));
             }
         }
+        emit_instance(CharTitleRankData);
+        emit_instance(CharTitleTrackInfo);
+        emit_instance(CharPointTable141);
+        for (const auto& [agent_id, hero] : heroes) {
+            if (const auto inventory = instance.find({CharHeroActivate, hero}); inventory != instance.end()) {
+                JoinInventory(inventory->second.U(2), out, emitted);
+            }
+            JoinCharacter(agent_id, out, emitted);
+            if (const auto activate = instance.find({CharHeroActivate, hero}); activate != instance.end() && emitted.insert(activate->first).second) {
+                out.push_back(activate->second);
+            }
+        }
+        for (const auto agent_id : characters | std::views::keys) {
+            if (agent_id != left_out) {
+                JoinCharacter(agent_id, out, emitted);
+            }
+        }
+        emit_upkeeps(true);
 
         if (connected) {
             out.push_back(Make(AgentConnect, {clock}));
-            for (const auto item_id : items | std::views::keys) {
-                if (shown_items.contains(item_id) || !inventory_items.contains(item_id)) {
-                    JoinItem(item_id, out, emitted);
-                }
+            for (const auto item_id : ShownItems()) {
+                JoinItem(item_id, out, emitted);
             }
             const auto row_of = [this](const uint32_t agent_id) -> const Message* {
                 for (const auto& row : players | std::views::values) {
@@ -1333,11 +1631,11 @@ namespace ReplayState {
                 if (const auto row = row_of(controlled)) {
                     out.push_back(*row);
                 }
-                JoinAgent(agents.at(controlled), out, emitted);
+                JoinAgent(controlled, agents.at(controlled), out, emitted);
             }
             for (const auto& [agent_id, agent] : agents) {
                 if (agent.create.id && agent_id != reported && !row_of(agent_id)) {
-                    JoinAgent(agent, out, emitted);
+                    JoinAgent(agent_id, agent, out, emitted);
                 }
             }
             if (controlled) {
@@ -1350,22 +1648,17 @@ namespace ReplayState {
                 }
                 out.push_back(row);
                 if (alive(agent_id)) {
-                    JoinAgent(agents.at(agent_id), out, emitted);
+                    JoinAgent(agent_id, agents.at(agent_id), out, emitted);
                 }
             }
             for (const auto& [agent_id, agent] : agents) {
-                if (!alive(agent_id)) {
-                    continue;
+                if (!agent.create.id && agent_id != left_out) {
+                    JoinRows(agent_id, agent, false, out, emitted);
                 }
-                for (const auto& [key, message] : agent.slots) {
-                    if (IsUpkeep(key[0])) {
-                        out.push_back(message);
-                        if (!alive(message.U(1))) {
-                            out.back().Set(1, 0);
-                        }
-                    }
-                }
-                if (agent.move.id) {
+            }
+            emit_upkeeps(false);
+            for (const auto& [agent_id, agent] : agents) {
+                if (alive(agent_id) && agent.move.id) {
                     out.push_back(agent.move);
                     if (agent.move.id == AgentUpdateMoveTarget && !alive(agent.move.U(4))) {
                         out.back().Set(4, 0);
@@ -1374,12 +1667,12 @@ namespace ReplayState {
             }
         }
 
-        for (const auto& [player, flags] : player_flags) {
-            out.push_back(Make(CharPlayerRowFlags, {player, flags, ~flags}));
+        for (const auto player : player_flags | std::views::keys) {
+            emit_flags(player);
         }
         for (const auto id :
-             {CharUpdateAgentPartysize, CharPlayerLink, CharPointTable141, GuildAllianceInfo, GuildGeneralInfo, GuildAssign, GuildToClient284, GuildToClient302, CharPostProcess, CharContextValue112, GadgetClassDefine, CharNpcProperties, CharNpcModel,
-              PropLayers, PropAnimate}) {
+             {CharUpdateAgentPartysize, CharPlayerLink, CharTitleRankDisplay, GuildAllianceInfo, GuildGeneralInfo, GuildAssign, GuildToClient284, GuildToClient302, CharPostProcess, GadgetClassDefine, CharNpcProperties, CharNpcModel, PropLayers,
+              PropAnimate}) {
             emit_instance(id);
         }
         for (auto found = instance.lower_bound({PartyMembershipBegin}); found != instance.end() && found->first[0] == PartyMembershipBegin; ++found) {
@@ -1403,116 +1696,6 @@ namespace ReplayState {
         return out;
     }
 
-    std::string World::Dump(const bool full) const
-    {
-        const auto controlled = ControlledAgent();
-        const auto left_out = LeftOutAgent();
-        const auto alive = [this, left_out](const uint32_t agent_id) {
-            return Alive(agent_id) && agent_id != left_out ? agent_id : 0;
-        };
-        std::string out = std::format("clock {} connected {}\n", full ? clock : 0, connected);
-        for (auto section = 0; section <= 4; section++) {
-            for (const auto& message : entry) {
-                if (EntrySection(message.id) == section) {
-                    out += "entry ";
-                    Describe(out, message, full);
-                }
-            }
-        }
-        for (const auto& message : instance | std::views::values) {
-            out += "instance ";
-            Describe(out, message, full);
-        }
-        for (const auto& [player, flags] : player_flags) {
-            out += full ? std::format("player flags {} {:x}\n", player, flags) : std::format("player flags {}\n", player);
-        }
-        for (const auto& row : players | std::views::values) {
-            if (left_out && row.U(1) == left_out) {
-                continue;
-            }
-            out += "player ";
-            Describe(out, row, full);
-        }
-        if (controlled) {
-            out += "reporter ";
-            Describe(out, reporter, full);
-            const auto& character = characters.at(controlled);
-            out += "character ";
-            Describe(out, character.attribute_state, full);
-            for (const auto& message : character.latest | std::views::values) {
-                out += " ";
-                Describe(out, message, full);
-            }
-            for (const auto& message : character.attribute_updates | std::views::values) {
-                out += " ";
-                Describe(out, message, full);
-            }
-        }
-        for (const auto& [agent_id, agent] : agents) {
-            if (!alive(agent_id)) {
-                continue;
-            }
-            out += std::format("agent {}\n create ", agent_id);
-            Describe(out, agent.create, full, full ? SIZE_MAX : CreatePosition);
-            if (agent.move.id) {
-                auto move = agent.move;
-                if (move.id == AgentUpdateMoveTarget) {
-                    move.Set(4, alive(move.U(4)));
-                }
-                out += " move ";
-                Describe(out, move, full);
-            }
-            if (full) {
-                out += std::format(" health {:x} energy {:x}\n", std::bit_cast<uint32_t>(agent.health), std::bit_cast<uint32_t>(agent.energy));
-            }
-            if (agent.equipped) {
-                out += " equipment";
-                for (const auto item : agent.equipment) {
-                    out += std::format(" {}", item);
-                }
-                out += "\n";
-            }
-            for (const auto& [key, message] : agent.slots) {
-                auto slot = message;
-                if (IsUpkeep(key[0])) {
-                    slot.Set(1, alive(slot.U(1)));
-                }
-                out += " slot ";
-                Describe(out, slot, full);
-            }
-            for (const auto& [effect_id, effect] : agent.effects) {
-                out += full ? std::format(" effect {} until {} ", effect_id, effect.expiry) : std::format(" effect {} ", effect_id);
-                Describe(out, effect.applied, full, 4);
-            }
-        }
-        for (const auto item_id : ShownItems()) {
-            out += std::format("item {}\n", item_id);
-            if (const auto found = items.find(item_id); found != items.end()) {
-                for (const auto& message : found->second | std::views::values) {
-                    out += " ";
-                    Describe(out, message, full);
-                }
-            }
-        }
-        return out;
-    }
-
-    std::vector<Keyframe> Keyframes(const ReplayFile::Contents& contents, const uint32_t interval_ms)
-    {
-        std::vector<Keyframe> keyframes;
-        World world(contents.table);
-        auto next = interval_ms;
-        for (size_t i = 0; i < contents.records.size(); i++) {
-            const auto& record = contents.records[i];
-            if (interval_ms && record.time_ms >= next && record.MessageId() == AgentAdvance) {
-                keyframes.push_back({i, record.time_ms, world});
-                next = (record.time_ms / interval_ms + 1) * interval_ms;
-            }
-            world.Apply(record);
-        }
-        return keyframes;
-    }
-
     std::vector<ReplayFile::Record> JoinRecords(const ReplayFile::MessageTable& table, const World& world, const uint32_t time_ms)
     {
         std::vector<ReplayFile::Record> records;
@@ -1525,139 +1708,4 @@ namespace ReplayState {
         }
         return records;
     }
-
-    std::vector<ReplayFile::Record> Seek(const ReplayFile::Contents& contents, const std::vector<Keyframe>& keyframes, const uint32_t time_ms)
-    {
-        const auto after = std::ranges::upper_bound(keyframes, time_ms, {}, &Keyframe::time_ms);
-        std::vector<ReplayFile::Record> records;
-        if (after == keyframes.begin()) {
-            for (size_t i = 0; i < contents.records.size() && contents.records[i].time_ms <= time_ms; i++) {
-                records.push_back(contents.records[i]);
-            }
-            return records;
-        }
-        const auto& keyframe = *std::prev(after);
-        records = JoinRecords(contents.table, keyframe.world, keyframe.time_ms);
-        const auto controlled = keyframe.world.ControlledAgent();
-        for (auto i = keyframe.record_index; i < contents.records.size() && contents.records[i].time_ms <= time_ms; i++) {
-            if (Streamed(contents.table, contents.records[i], controlled)) {
-                records.push_back(contents.records[i]);
-            }
-        }
-        return records;
-    }
-
-    JoinCheck CheckJoin(const ReplayFile::Contents& contents)
-    {
-        JoinCheck check;
-        const auto fail = [&check](const size_t index, const uint16_t id, const std::string_view what) {
-            check.failures.push_back(std::format("record {} (message {}): {}", index, id, what));
-        };
-        std::vector<Message> messages(contents.records.size());
-        size_t connect_index = SIZE_MAX;
-        check.join_records = contents.records.size();
-        for (size_t i = 0; i < contents.records.size(); i++) {
-            std::vector<uint8_t> encoded;
-            if (!Decode(contents.table, contents.records[i].body, messages[i])) {
-                fail(i, contents.records[i].MessageId(), "does not decode against the file's table");
-            }
-            else if (!Encode(contents.table, messages[i], encoded) || encoded != contents.records[i].body) {
-                fail(i, messages[i].id, "does not encode back to its bytes");
-            }
-            if (messages[i].id == AgentConnect && connect_index == SIZE_MAX) {
-                connect_index = i;
-            }
-            if (messages[i].id == AgentAdvance && connect_index != SIZE_MAX && check.join_records == contents.records.size()) {
-                check.join_records = i;
-            }
-        }
-        const auto first_reporter = std::ranges::find(messages, uint16_t{AgentReporter}, &Message::id);
-        const auto reported = first_reporter != messages.end() ? first_reporter->U(0) : 0;
-        bool instance_info = false;
-        bool manifest_phase = false;
-        std::map<uint32_t, uint32_t> alive_teams;
-        std::set<uint32_t> player_agents;
-        uint32_t player_team = 0;
-        bool player_team_known = false;
-        for (size_t i = 0; i < messages.size(); i++) {
-            const auto& message = messages[i];
-            const auto id = message.id;
-            if (id == MissionInstanceInfo) {
-                instance_info = true;
-            }
-            if (id == MissionManifestPhase) {
-                manifest_phase = true;
-            }
-            if (id == MissionManifestComplete && !instance_info) {
-                fail(i, id, "408 before 410");
-            }
-            if (id == MissionManifestChunk && !manifest_phase) {
-                fail(i, id, "407 before 409");
-            }
-            if (IsAgentClient(id) && id != AgentAdvance && id != AgentConnect && i < connect_index) {
-                fail(i, id, "an agent message before 31");
-            }
-            if (id == CharPlayerTeam) {
-                player_team = message.U(0);
-                player_team_known = true;
-            }
-            for (const auto agent_id : NamedAgents(contents.table, message)) {
-                if (alive_teams.contains(agent_id) || (id == AgentCreate && agent_id == message.U(CreateAgent))) {
-                    continue;
-                }
-                const auto next_create = std::find_if(messages.begin() + static_cast<std::ptrdiff_t>(i) + 1, messages.end(), [](const Message& m) {
-                    return m.id == AgentCreate;
-                });
-                const auto own_row = (IsRow(message) || id == CharPlayerCreate) && next_create != messages.end() && next_create->U(CreateAgent) == agent_id;
-                if (own_row || IsCharacterMessageOf(message, reported)) {
-                    continue;
-                }
-                if (id == CharPlayerCreate) {
-                    check.player_rows_without_agent++;
-                }
-                else if (i < check.join_records || IsAgentClient(id)) {
-                    fail(i, id, std::format("names agent {} before its creation", agent_id));
-                }
-                else {
-                    check.stream_rows_before_creation++;
-                }
-            }
-            switch (id) {
-                case AgentCreate:
-                    alive_teams[message.U(CreateAgent)] = message.U(CreateTeam);
-                    break;
-                case AgentDestroy:
-                    alive_teams.erase(message.U(0));
-                    break;
-                case AgentUpdateTeamToken:
-                    if (alive_teams.contains(message.U(0))) {
-                        alive_teams[message.U(0)] = message.U(1);
-                    }
-                    break;
-                case CharPlayerCreate:
-                    player_agents.insert(message.U(1));
-                    break;
-                case AgentReporter: {
-                    const auto agent_id = message.U(0);
-                    if (!agent_id) {
-                        fail(i, id, "a reporter for agent 0 clears the agents");
-                    }
-                    else if (!player_agents.contains(agent_id) || !alive_teams.contains(agent_id)) {
-                        fail(i, id, "the reporter's agent was not created as a player first");
-                    }
-                    else if (!player_team_known) {
-                        fail(i, id, "34 before 242");
-                    }
-                    else if (alive_teams[agent_id] != player_team) {
-                        fail(i, id, "the reporter's agent's team token is not 242's");
-                    }
-                    break;
-                }
-                default:
-                    break;
-            }
-        }
-        std::ranges::move(CheckClientNeeds(messages), std::back_inserter(check.failures));
-        return check;
-    }
-}
+} // namespace ReplayState

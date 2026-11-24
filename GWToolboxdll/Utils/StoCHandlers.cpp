@@ -30,10 +30,10 @@ StoCHandlerArray* GetStoCHandlerArray()
             uint8_t h0010[12]{};
             uint32_t ClientCodecArray[4]{};
             StoCHandlerArray handlers;
-        } * gs_codec;
+        }* gs_codec;
     };
 
-    const auto addr = (GameServer* *)StoCHandler_Addr;
+    const auto addr = (GameServer**)StoCHandler_Addr;
     if (!(addr && *addr && (*addr)->gs_codec)) {
         return nullptr;
     }

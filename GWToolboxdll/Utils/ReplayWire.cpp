@@ -5,23 +5,17 @@
 #include <algorithm>
 #include <format>
 #include <optional>
-#include <ranges>
 #include <utility>
 
 namespace ReplayWire {
     namespace {
         enum MessageId : uint16_t {
-            AgentAdvance = 30,
             AgentConnect = 31,
             AgentReporter = 34,
-            ItemInventoryAddBag = 319,
-            ItemInventoryCreate = 324,
-            ItemInventoryEquipSetActivate = 328,
             MissionInstanceLoadHead = 380,
             MissionLoadMap = 406,
             MissionInstanceInfo = 410,
         };
-        constexpr uint32_t equipped_bag_type = 2;
         constexpr size_t instance_info_map_type = 2;
         constexpr size_t instance_info_observer = 5;
 
@@ -35,32 +29,24 @@ namespace ReplayWire {
             post.records++;
         }
 
-        std::vector<ReplayFile::Record> InventorySkeleton(const ReplayFile::Contents& contents)
+        bool IsLoad(const uint16_t id)
         {
-            std::vector<ReplayFile::Record> skeleton;
-            std::optional<uint32_t> inventory;
-            bool set_activated = false;
-            for (const auto& record : contents.records) {
-                ReplayState::Message message;
-                const auto id = record.MessageId();
-                if ((id != ItemInventoryCreate && id != ItemInventoryEquipSetActivate && id != ItemInventoryAddBag) || !ReplayState::Decode(contents.table, record.body, message)) {
-                    continue;
-                }
-                if (id == ItemInventoryCreate && !inventory) {
-                    inventory = message.U(0);
-                    skeleton.push_back(record);
-                }
-                else if (inventory && message.U(0) == *inventory && id == ItemInventoryEquipSetActivate && !set_activated) {
-                    set_activated = true;
-                    skeleton.push_back(record);
-                }
-                else if (inventory && message.U(0) == *inventory && id == ItemInventoryAddBag && message.U(1) == equipped_bag_type) {
-                    skeleton.push_back(record);
-                }
-            }
-            return skeleton;
+            return id == MissionInstanceLoadHead || id == MissionInstanceInfo || id == MissionLoadMap;
         }
-    }
+
+        bool SetObserver(const ReplayFile::MessageTable& table, ReplayState::Message& message, std::vector<uint8_t>& body, Plan& plan)
+        {
+            plan.map_type = message.U(instance_info_map_type);
+            if (message.U(instance_info_observer) == 1) {
+                return false;
+            }
+            message.Set(instance_info_observer, 1);
+            if (!ReplayState::Encode(table, message, body)) {
+                plan.error = "410 does not encode with its observer byte set";
+            }
+            return true;
+        }
+    } // namespace
 
     void Rc4::Init(const uint8_t* key, const size_t size)
     {
@@ -103,10 +89,12 @@ namespace ReplayWire {
         return "?";
     }
 
-    Plan MakePlan(const ReplayFile::Contents& contents)
+    Plan MakePlan(const ReplayFile::Contents& contents, const size_t chapter)
     {
         Plan plan;
         const auto& records = contents.records;
+        const auto begin = contents.chapters[chapter].first_record;
+        const auto end = contents.ChapterEnd(chapter);
         const auto find = [&records](const uint16_t id, const size_t from, const size_t to) {
             for (auto i = from; i < to; i++) {
                 if (records[i].MessageId() == id) {
@@ -115,22 +103,22 @@ namespace ReplayWire {
             }
             return to;
         };
-        const auto load = find(MissionLoadMap, 0, records.size());
-        const auto connect = find(AgentConnect, load, records.size());
-        if (connect >= records.size()) {
-            plan.error = "no instance load in the recording (no 406 followed by a 31)";
+        const auto load = find(MissionLoadMap, begin, end);
+        const auto connect = find(AgentConnect, load, end);
+        if (connect >= end) {
+            plan.error = "no instance load in the chapter (no 406 followed by a 31)";
             return plan;
         }
-        if (const auto head = find(MissionInstanceLoadHead, 0, load); head < load && head > 0) {
+        plan.first_record = begin;
+        if (const auto head = find(MissionInstanceLoadHead, begin, load); head < load && head > begin) {
             plan.first_record = head;
-            plan.changes.push_back({ChangeKind::LeftOut, 0, head, "they came on the previous map's connection, after its transfer and before this connection's first message (380)"});
+            plan.changes.push_back({ChangeKind::LeftOut, begin, head - begin, "they came on the previous map's connection, after its transfer and before this connection's first message (380)"});
         }
-        plan.end_record = records.size();
-        for (auto i = connect + 1; i < records.size(); i++) {
-            const auto id = records[i].MessageId();
-            if (id == MissionInstanceLoadHead || id == MissionInstanceInfo || id == MissionLoadMap) {
+        plan.end_record = end;
+        for (auto i = connect + 1; i < end; i++) {
+            if (IsLoad(records[i].MessageId())) {
                 plan.end_record = i;
-                plan.changes.push_back({ChangeKind::LeftOut, i, records.size() - i, "a second instance load: the game would load a map it never asked for"});
+                plan.changes.push_back({ChangeKind::LeftOut, i, end - i, "a second instance load: the game would load a map it never asked for"});
                 break;
             }
         }
@@ -147,20 +135,16 @@ namespace ReplayWire {
             auto body = records[i].body;
             if (message.id == MissionInstanceInfo && i < load) {
                 observer = true;
-                plan.map_type = message.U(instance_info_map_type);
-                if (message.U(instance_info_observer) != 1) {
-                    message.Set(instance_info_observer, 1);
-                    if (!ReplayState::Encode(contents.table, message, body)) {
-                        plan.error = "410 does not encode with its observer byte set";
-                        return plan;
-                    }
+                if (SetObserver(contents.table, message, body, plan)) {
                     plan.changes.push_back({ChangeKind::ObserverByte, i, 1, "the game enters observer mode and keeps the map it came from to go back to (410's handler)"});
+                }
+                if (!plan.error.empty()) {
+                    return plan;
                 }
             }
             if (message.id == AgentReporter && !plan.controlled_agent) {
                 plan.controlled_agent = message.U(0);
             }
-            plan.own_records_streamed += ReplayState::KindOf(message.id) == ReplayState::Kind::Private;
             const auto stage = i < load ? Stage::BeforeLoad : i < connect ? Stage::Load : records[i].time_ms <= plan.entry_ms ? Stage::Entry : Stage::Stream;
             Append(plan.posts, stage, stage == Stage::Stream ? records[i].time_ms - plan.entry_ms : 0, body);
         }
@@ -170,75 +154,93 @@ namespace ReplayWire {
         return plan;
     }
 
-    Plan MakeJoinPlan(const ReplayFile::Contents& contents, const uint32_t time_ms)
+    Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe)
     {
         Plan plan;
         const auto& records = contents.records;
-        const auto reporter = std::ranges::find(records, uint16_t{AgentReporter}, &ReplayFile::Record::MessageId);
-        auto start = std::find_if(reporter, records.end(), [time_ms](const ReplayFile::Record& record) {
-            return record.MessageId() == AgentAdvance && record.time_ms >= time_ms;
-        });
-        if (const auto last = std::ranges::find(records | std::views::reverse, uint16_t{AgentAdvance}, &ReplayFile::Record::MessageId); start == records.end() && last.base() > reporter) {
-            start = std::prev(last.base());
-        }
-        if (start == records.end()) {
-            plan.error = "no instance entry in the recording (no 34 followed by a 30)";
-            return plan;
-        }
-        ReplayState::World world(contents.table);
-        for (auto record = records.begin(); record != start; ++record) {
-            world.Apply(*record);
-        }
-        if (world.LayoutErrors()) {
-            plan.error = std::format("{} messages before the start do not decode", world.LayoutErrors());
-            return plan;
-        }
-        plan.start_ms = start->time_ms;
-        plan.entry_ms = plan.start_ms;
-        plan.first_record = static_cast<size_t>(start - records.begin());
-        plan.end_record = records.size();
-        plan.duration_ms = records.back().time_ms - plan.start_ms;
-        plan.controlled_agent = world.ControlledAgent();
-        const auto join = ReplayState::JoinRecords(contents.table, world, plan.start_ms);
-        for (const auto& record : join) {
-            if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message)) {
-                plan.error = std::format("the join's message {} does not encode", record.MessageId());
+        const auto chapter = std::ranges::upper_bound(contents.chapters, keyframe.record_index, {}, &ReplayFile::Chapter::first_record) - contents.chapters.begin();
+        const auto end = contents.ChapterEnd(static_cast<size_t>(std::max<std::ptrdiff_t>(chapter - 1, 0)));
+        std::vector<ReplayState::Message> messages(keyframe.records.size());
+        for (size_t i = 0; i < messages.size(); i++) {
+            if (!ReplayState::Decode(contents.table, keyframe.records[i].body, messages[i])) {
+                plan.error = std::format("the keyframe's message {} (id {}) does not decode against the file's table", i, keyframe.records[i].MessageId());
                 return plan;
             }
         }
-        const auto load = std::ranges::find(join, uint16_t{MissionLoadMap}, &ReplayFile::Record::MessageId);
-        const auto connect = std::find_if(load, join.end(), [](const ReplayFile::Record& record) {
-            return record.MessageId() == AgentConnect;
-        });
-        if (connect == join.end()) {
-            plan.error = "the join has no 406 followed by a 31";
+        const auto is = [](const uint16_t id) {
+            return [id](const ReplayState::Message& message) {
+                return message.id == id;
+            };
+        };
+        const auto load = static_cast<size_t>(std::ranges::find_if(messages, is(MissionLoadMap)) - messages.begin());
+        const auto connect = static_cast<size_t>(std::find_if(messages.begin() + static_cast<std::ptrdiff_t>(load), messages.end(), is(AgentConnect)) - messages.begin());
+        if (connect >= messages.size()) {
+            plan.error = "the keyframe has no 406 followed by a 31";
             return plan;
         }
-        const auto skeleton = InventorySkeleton(contents);
-        plan.skeleton_records = skeleton.size();
-        auto stage = Stage::BeforeLoad;
-        for (auto record = join.begin(); record != join.end(); ++record) {
-            if (record == load) {
-                stage = Stage::Load;
-            }
-            if (record == connect) {
-                stage = Stage::Entry;
-            }
-            Append(plan.posts, stage, 0, record->body);
-            if (record == connect) {
-                for (const auto& part : skeleton) {
-                    Append(plan.posts, stage, 0, part.body);
+        plan.first_record = keyframe.record_index;
+        plan.end_record = end;
+        plan.keyframe_records = messages.size();
+        plan.start_ms = keyframe.time_ms;
+        plan.entry_ms = keyframe.time_ms;
+        ReplayState::Order order;
+        bool observer = false;
+        for (size_t i = 0; i < messages.size(); i++) {
+            auto& message = messages[i];
+            auto body = keyframe.records[i].body;
+            if (message.id == MissionInstanceInfo && i < load) {
+                observer = true;
+                if (SetObserver(contents.table, message, body, plan)) {
+                    plan.changes.push_back({ChangeKind::ObserverByte, i, 1, "the keyframe's 410: the game enters observer mode and keeps the map it came from to go back to"});
+                }
+                if (!plan.error.empty()) {
+                    return plan;
                 }
             }
+            if (message.id == AgentReporter && !plan.controlled_agent) {
+                plan.controlled_agent = message.U(0);
+            }
+            order.Bring(contents.table, message);
+            Append(plan.posts, i < load ? Stage::BeforeLoad : i < connect ? Stage::Load : Stage::Entry, 0, body);
         }
-        for (auto record = start; record != records.end(); ++record) {
-            if (!ReplayState::Streamed(contents.table, *record, plan.controlled_agent)) {
-                plan.private_records_dropped++;
+        if (!observer) {
+            plan.error = "the keyframe has no 410 before its 406";
+            return plan;
+        }
+        std::optional<Change> left_out;
+        const auto flush = [&] {
+            if (left_out) {
+                plan.changes.push_back(*left_out);
+                left_out.reset();
+            }
+        };
+        auto last_ms = keyframe.time_ms;
+        for (auto i = keyframe.record_index; i < end; i++) {
+            if (IsLoad(records[i].MessageId())) {
+                flush();
+                plan.end_record = i;
+                plan.changes.push_back({ChangeKind::LeftOut, i, end - i, "a second instance load: the game would load a map it never asked for"});
+                break;
+            }
+            ReplayState::Message message;
+            if (!ReplayState::Decode(contents.table, records[i].body, message)) {
+                plan.error = std::format("record {} (message {}) does not decode against the file's table", i, records[i].MessageId());
+                return plan;
+            }
+            if (!order.Unbrought(contents.table, message).empty()) {
+                if (!left_out) {
+                    left_out = Change{ChangeKind::LeftOut, i, 0, "they name an id that neither the keyframe nor a record before them brought in"};
+                }
+                left_out->count++;
                 continue;
             }
-            plan.own_records_streamed += ReplayState::KindOf(record->MessageId()) == ReplayState::Kind::Private;
-            Append(plan.posts, Stage::Stream, record->time_ms - plan.start_ms, record->body);
+            flush();
+            order.Bring(contents.table, message);
+            last_ms = std::max(last_ms, records[i].time_ms);
+            Append(plan.posts, Stage::Stream, records[i].time_ms - keyframe.time_ms, records[i].body);
         }
+        flush();
+        plan.duration_ms = last_ms - keyframe.time_ms;
         return plan;
     }
 
@@ -258,4 +260,4 @@ namespace ReplayWire {
         }
         return bodies;
     }
-}
+} // namespace ReplayWire

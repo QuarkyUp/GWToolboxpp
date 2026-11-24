@@ -15,11 +15,10 @@ public:
 
     [[nodiscard]] const char* Name() const override { return "Replay Recorder"; }
     [[nodiscard]] const char* Icon() const override { return ICON_FA_VIDEO; }
-    [[nodiscard]] const char* Description() const override { return "Records what the game server sends in PvE instances, one file per instance, for replays"; }
+    [[nodiscard]] const char* Description() const override { return "Records what the game server sends in PvE maps, from any moment and across map changes, and plays it back in the game's observer mode"; }
 
     struct Settings {
-        bool record_explorables = true;
-        bool record_outposts = false;
+        bool record_from_login = false;
         bool strip_names_and_chat = true;
         bool strip_own_names = true;
         std::string folder;

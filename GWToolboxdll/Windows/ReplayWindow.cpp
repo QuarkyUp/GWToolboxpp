@@ -16,7 +16,7 @@
 namespace {
     GuiUtils::EncString followed_name;
     uint32_t named_agent = 0;
-}
+} // namespace
 
 void ReplayWindow::Initialize()
 {
