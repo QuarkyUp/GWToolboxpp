@@ -1863,6 +1863,14 @@ namespace {
             }
         }
         Check(CountNames(named.table, named.keyframes.front().records, named.header.flags).not_placeholders == 1, "a name that is not a placeholder in a keyframe is found, by count");
+        auto no_map_file = v2.keyframes.front();
+        for (auto& record : no_map_file.records) {
+            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == 406) {
+                message.Set(0, 0);
+                ReplayState::Encode(v2.table, message, record.body);
+            }
+        }
+        Check(!ReplayWire::MakeKeyframePlan(v2, no_map_file).error.empty(), "a keyframe whose 406 names no map file is refused: the game's map load asserts on it");
         auto other = v2;
         other.header.flags = 0;
         Check(CountNames(other.table, named.keyframes.front().records, other.header.flags).not_placeholders == 0, "with the names settings off, names are not checked");

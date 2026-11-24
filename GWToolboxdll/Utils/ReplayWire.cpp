@@ -113,6 +113,10 @@ namespace ReplayWire {
             plan.error = "the keyframe has no 406 followed by a 31";
             return plan;
         }
+        if (!messages[load].U(0)) {
+            plan.error = "the keyframe's 406 names no map file, which the game's map load asserts on (File.cpp:367)";
+            return plan;
+        }
         plan.first_record = keyframe.record_index;
         plan.end_record = end;
         plan.keyframe_records = messages.size();
