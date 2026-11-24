@@ -6,7 +6,10 @@
 #include <format>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
+#include <optional>
 #include <ranges>
+#include <span>
 
 namespace ReplayState {
     namespace {
@@ -201,7 +204,13 @@ namespace ReplayState {
         constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailAllReset, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
         constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, CharAgentUpdateAttribute, CharProfessions};
         constexpr size_t skillbar_create_field = 3;
+        constexpr size_t item_model_file_field = 1;
         constexpr size_t item_quantity_field = 10;
+        constexpr size_t item_name_field = 11;
+        constexpr size_t item_mods_field = 12;
+        constexpr uint32_t item_code_terminator = 0xC0000000;
+        constexpr uint32_t no_formula = 0x5E5;
+        constexpr uint32_t any_profession = 11;
         constexpr IdField named_id_fields[] = {
             {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},      {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
             {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},     {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
@@ -704,6 +713,37 @@ namespace ReplayState {
         return message;
     }
 
+    std::vector<Message> ItemReport(const ReplayFile::MessageTable& table, const ClientItem& item)
+    {
+        auto details = Blank(table, ItemReportDetailAll);
+        if (details.fields.size() <= item_mods_field) {
+            return {};
+        }
+        // CItemTable::AddDetailLow keeps 353's formula less one (0x5E5 for none), AddDetailHigh its mods and the item code's terminator.
+        const uint32_t values[] = {item.item_id, item.model_file, item.type, item.dye_tint, item.dye_colours, item.formula == no_formula ? 0 : item.formula + 1, item.multiplier, item.interaction, item.value, item.model_id, item.quantity};
+        for (size_t i = 0; i < std::size(values); i++) {
+            details.Set(i, values[i]);
+        }
+        details.fields[item_name_field].text = item.name;
+        const auto code = !item.code.empty() && item.code.back() == item_code_terminator ? std::span(item.code).first(item.code.size() - 1) : std::span(item.code);
+        details.Set(item_mods_field, static_cast<uint32_t>(code.size()));
+        for (const auto mod : code) {
+            details.fields.push_back({{mod}, {}});
+        }
+        std::vector<Message> messages = {details};
+        if (auto profession = Blank(table, ItemProfession); item.profession != any_profession && profession.fields.size() > 1) {
+            profession.Set(0, item.item_id);
+            profession.Set(1, item.profession);
+            messages.push_back(profession);
+        }
+        if (auto customize = Blank(table, ItemCustomize); !item.customizer.empty() && customize.fields.size() > 1) {
+            customize.Set(0, item.item_id);
+            customize.fields[1].text = item.customizer;
+            messages.push_back(customize);
+        }
+        return messages;
+    }
+
     const char* IdKindName(const IdKind kind)
     {
         switch (kind) {
@@ -846,18 +886,92 @@ namespace ReplayState {
         return failures;
     }
 
+    std::string FieldAssert(const Message& message)
+    {
+        constexpr uint32_t highest_agent_def = 8;
+        constexpr size_t create_radius = 10;
+        constexpr size_t create_team_radius = 12;
+        constexpr uint32_t quest_description_filled = 1;
+        constexpr size_t most_npc_model_files = 8;
+        constexpr uint32_t highest_weapon_set = 3;
+        constexpr uint32_t highest_manifest_type = 3;
+        constexpr uint32_t highest_manifest_phase = 1;
+        const auto agent_invalid_position = std::numeric_limits<float>::infinity();
+        switch (message.id) {
+            case AgentCreate:
+                if (message.U(CreateDef) > highest_agent_def) {
+                    return std::format("f2, the agent's def ({}), is past the agent context's definitions (AgAgent.cpp:180)", message.U(CreateDef));
+                }
+                if (message.F(CreatePosition, 0) == agent_invalid_position && message.F(CreatePosition, 1) == agent_invalid_position) {
+                    return "f4, the position, is AGENT_INVALID_POSITION (AgMsg.cpp:252)";
+                }
+                return message.F(create_team_radius) > message.F(create_radius) ? "f12, the team radius, is past f10, the bounding radius (AgAgent.cpp:156)" : "";
+            case CharQuestGeneralInfo:
+                return message.U(1) & quest_description_filled ? "f1, the quest's state, holds the bit the client sets once it has the description (ChCliApi.cpp:702)" : "";
+            case CharNpcModel:
+                return message.fields.size() > 1 && message.fields[1].numbers.size() > most_npc_model_files ? std::format("f1, the NPC's model files, holds {}, past MONSTER_COMPOSITE_MAX_DWORDS (CharMsg.cpp:4438)", message.fields[1].numbers.size()) : "";
+            case ItemInventoryEquipSetActivate:
+                return message.U(1) > highest_weapon_set ? std::format("f1, the weapon set ({}), is past ITEM_PLAYER_EQUIP_SETS (ItCliInv.cpp:329)", message.U(1)) : "";
+            case ItemReportDetailAll:
+            case ItemReportDetailAllReset: {
+                if (!message.U(item_model_file_field)) {
+                    return "f1, the model file, is 0 (ItCliApi.cpp:2505)";
+                }
+                const auto mods = message.U(item_mods_field);
+                return mods && message.U(item_mods_field + mods) == item_code_terminator ? "f12, the mods, end with the item code's terminator (ItemCode.h:516)" : "";
+            }
+            case MissionLoadMap:
+                return message.U(0) ? "" : "f0, the map file, is 0, which the game's map load asserts on (File.cpp:367)";
+            case MissionManifestComplete:
+                return message.U(0) > highest_manifest_type ? std::format("f0, the manifest's type ({}), is past MANIFEST_TYPES (MsCliMan.cpp:487)", message.U(0)) : "";
+            case MissionManifestPhase:
+                return message.U(0) > highest_manifest_phase ? std::format("f0, the manifest's phase ({}), is not one (MsCliMan.cpp:472)", message.U(0)) : "";
+            default:
+                return "";
+        }
+    }
+
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages)
     {
         std::vector<std::string> failures;
         std::set<uint32_t> attribute_states;
         std::set<uint32_t> hero_data;
         std::set<uint32_t> active_heroes;
+        std::set<uint32_t> created_agents;
+        std::set<uint32_t> inventories;
+        std::set<uint32_t> team_rows;
+        std::optional<uint32_t> party_building;
+        bool account_name = false;
         const auto fail = [&failures](const size_t index, const uint16_t id, const std::string_view what) {
             failures.push_back(std::format("record {} (message {}): {}", index, id, what));
         };
         for (size_t i = 0; i < messages.size(); i++) {
             const auto& message = messages[i];
             const auto agent_id = message.U(0);
+            if (const auto broken = FieldAssert(message); !broken.empty()) {
+                fail(i, message.id, broken);
+            }
+            if (message.id == AgentCreate && !created_agents.insert(agent_id).second) {
+                fail(i, message.id, std::format("agent {} created again before its 33: the client asserts !array[agent] (AgAgent.cpp:162)", agent_id));
+            }
+            else if (message.id == AgentDestroy) {
+                created_agents.erase(agent_id);
+            }
+            else if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
+                fail(i, message.id, "a second account name: the client asserts !context->acctNameData (ChCliApi.cpp:385)");
+            }
+            else if (message.id == ItemInventoryCreate && !inventories.insert(agent_id).second) {
+                fail(i, message.id, std::format("inventory {} created again: the client asserts !inventory (ItCliApi.cpp:2010)", agent_id));
+            }
+            else if (message.id == MissionTeam && !team_rows.insert(agent_id).second) {
+                fail(i, message.id, std::format("team row {} created again: the client asserts !m_tableByPartyId[partyId] (MsnTeam.cpp:105)", agent_id));
+            }
+            else if (message.id == PartyMembershipBegin && std::exchange(party_building, agent_id)) {
+                fail(i, message.id, "a party begun while another is: the client asserts !m_partyBuilding (PyCliParty.cpp:1228)");
+            }
+            else if (message.id == PartyMembershipEnd && std::exchange(party_building, std::nullopt) != agent_id) {
+                fail(i, message.id, std::format("party {} ended with no 467 of its own open: the client asserts m_partyBuilding and its party id (PyCliParty.cpp:1237, 1238)", agent_id));
+            }
             if (message.id == CharAttributeState && !attribute_states.insert(agent_id).second) {
                 fail(i, message.id, std::format("a second attribute state for agent {}: the client asserts !attribState", agent_id));
             }
@@ -971,6 +1085,11 @@ namespace ReplayState {
 
     bool InventoryFilter::Keep(const Message& message, std::vector<Message>& shown_before, std::vector<uint32_t>& unknown_items)
     {
+        if (message.id == MissionInstanceLoadHead) {
+            // Item ids are the instance's: a new map's items are not those shown in the one before.
+            shown.clear();
+            held.clear();
+        }
         if (IsBagContent(message)) {
             return false;
         }

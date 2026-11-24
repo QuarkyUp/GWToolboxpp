@@ -40,6 +40,7 @@ namespace ReplayWire {
 
     enum class ChangeKind : uint8_t {
         LeftOut,
+        BroughtIn,
         ObserverByte,
     };
 

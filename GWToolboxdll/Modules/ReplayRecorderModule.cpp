@@ -107,10 +107,8 @@ namespace {
         GuildAssign = 280,
         GuildAllianceInfo = 288,
         GuildGeneralInfo = 289,
-        ItemCustomize = 314,
         ItemInventoryCreate = 324,
-        ItemProfession = 346,
-        ItemReportDetailAll = 353,
+        ItemInventoryEquipSetActivate = 328,
         MissionAccessRights = 366,
         MissionInstanceLoadHead = 380,
         MissionInstanceLoadPlayerName = 381,
@@ -280,48 +278,30 @@ namespace {
     std::vector<Message> ItemDetails(const uint32_t item_id)
     {
         const auto item = GW::Items::GetItemById(item_id);
-        auto details = ReplayState::Blank(message_table, ItemReportDetailAll);
-        if (!item || details.fields.size() < 13) {
+        if (!item) {
             return {};
         }
-        const uint32_t values[] = {
-            item->item_id,
-            item->model_file_id,
-            static_cast<uint32_t>(item->type),
-            item->dye.dye_tint,
-            static_cast<uint32_t>(item->dye.dye1) | static_cast<uint32_t>(item->dye.dye2) << 4 | static_cast<uint32_t>(item->dye.dye3) << 8 | static_cast<uint32_t>(item->dye.dye4) << 12,
-            item->item_formula,
-            0,
-            item->interaction,
-            item->value,
-            item->model_id,
-            item->quantity
+        // CItemTable::AddDetailLow keeps 353's value as a dword at +0x24 (GWCA's value and h0026) and its multiplier at +0x4a.
+        ReplayState::ClientItem client_item = {
+            .item_id = item->item_id,
+            .model_file = item->model_file_id,
+            .type = static_cast<uint32_t>(item->type),
+            .dye_tint = item->dye.dye_tint,
+            .dye_colours = static_cast<uint32_t>(item->dye.dye1) | static_cast<uint32_t>(item->dye.dye2) << 4 | static_cast<uint32_t>(item->dye.dye3) << 8 | static_cast<uint32_t>(item->dye.dye4) << 12,
+            .formula = item->item_formula,
+            .multiplier = item->is_material_salvageable,
+            .interaction = item->interaction,
+            .value = item->value | static_cast<uint32_t>(item->h0026) << 16,
+            .model_id = item->model_id,
+            .quantity = item->quantity,
+            .name = item->name_enc ? item->name_enc : L"",
+            .profession = item->profession,
+            .customizer = item->customized ? item->customized : L"",
         };
-        for (size_t i = 0; i < std::size(values); i++) {
-            details.Set(i, values[i]);
+        if (item->mod_struct) {
+            std::ranges::transform(std::span(item->mod_struct, item->mod_struct_size), std::back_inserter(client_item.code), &GW::ItemModifier::mod);
         }
-        details.fields[11].text = item->name_enc ? item->name_enc : L"";
-        const auto mods = item->mod_struct ? item->mod_struct_size : 0;
-        details.Set(12, mods);
-        for (uint32_t i = 0; i < mods; i++) {
-            details.fields.push_back({{reinterpret_cast<const uint32_t*>(item->mod_struct)[i]}, {}});
-        }
-        std::vector<Message> messages = {details};
-        if (item->profession) {
-            auto profession = ReplayState::Blank(message_table, ItemProfession);
-            profession.Set(0, item->item_id);
-            profession.Set(1, item->profession);
-            messages.push_back(profession);
-        }
-        if (item->customized && *item->customized) {
-            auto customized = ReplayState::Blank(message_table, ItemCustomize);
-            if (customized.fields.size() > 1) {
-                customized.Set(0, item->item_id);
-                customized.fields[1].text = item->customized;
-                messages.push_back(customized);
-            }
-        }
-        return messages;
+        return ReplayState::ItemReport(message_table, client_item);
     }
 
     uint32_t TeamToken(const GW::AgentLiving* living, const GW::WorldContext* world)
@@ -440,12 +420,12 @@ namespace {
         }
         apply(load_map);
         apply(make(CharPlayerTeam, {world_context->playerTeamToken}));
-        // The team row and the zeros of 107 and 404 as every load at hand has them (unread values, the same in all).
-        auto team = make(MissionTeam, {1, world_context->playerTeamToken, 64, 0, 2});
-        if (team.fields.size() > 5) {
+        // The team row as every explorable load at hand has it (no outpost's has one), and the zeros of 107 and 404 as every load.
+        const auto explorable = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable;
+        if (auto team = make(MissionTeam, {1, world_context->playerTeamToken, 64, 0, 2}); explorable && team.fields.size() > 5) {
             team.fields[5].text = char_context->player_name;
+            apply(team);
         }
-        apply(team);
         apply(make(CharPostProcess, {0, 0}));
         apply(make(MissionToClient404, {0}));
 
@@ -477,8 +457,9 @@ namespace {
             const auto attributes = std::ranges::find(world_context->attributes, state.agent_id, &GW::PartyAttribute::agent_id);
             if (attributes != world_context->attributes.end() && message_table[CharAttributes].size() > 2) {
                 std::vector<const GW::Attribute*> raised;
-                for (const auto& attribute : attributes->attribute) {
-                    if (attribute.level) {
+                // Past the attributes' own slots (ids 0 to 44) the array holds entries no 58 at hand sends.
+                for (size_t index = 0; index < std::size(attributes->attribute); index++) {
+                    if (const auto& attribute = attributes->attribute[index]; attribute.level && static_cast<size_t>(attribute.id) == index) {
                         raised.push_back(&attribute);
                     }
                 }
@@ -498,6 +479,10 @@ namespace {
         }
         for (const auto& hero : world_context->hero_info) {
             apply(make(CharHeroDataAdd, {hero.hero_id, hero.level, static_cast<uint32_t>(hero.primary), static_cast<uint32_t>(hero.secondary), hero.hero_file_id, hero.model_file_id}));
+        }
+        if (const auto inventory = GW::Items::GetInventory()) {
+            apply(make(ItemInventoryCreate, {inventory->inventory_id(), 0}));
+            apply(make(ItemInventoryEquipSetActivate, {inventory->inventory_id(), inventory->active_weapon_set}));
         }
         for (const auto& flag : world_context->hero_flags) {
             apply(make(ItemInventoryCreate, {flag.inventory_id, 1}));
@@ -657,18 +642,28 @@ namespace {
                 apply(make(CharAgentMorale, {morale.agent_id, morale.morale}));
             }
         }
+        // The server sends a title only with a tier, and the tiers its titles are at and reach next.
+        std::set<uint32_t> title_tiers;
         for (uint32_t index = 0; index < world_context->titles.size(); index++) {
             const auto& title = world_context->titles[index];
+            if (!title.next_title_tier_index) {
+                continue;
+            }
+            title_tiers.insert({title.current_title_tier_index, title.next_title_tier_index});
             auto track = make(
                 CharTitleTrackInfo,
                 {index, title.props, title.current_points, title.current_title_tier_index, title.points_needed_current_rank, title.h0010, title.next_title_tier_index, title.points_needed_next_rank, title.max_title_rank, title.max_title_tier_index}
             );
-            if (track.fields.size() > 10 && title.points_desc) {
-                track.fields[10].text = title.points_desc;
+            if (track.fields.size() > 11) {
+                track.fields[10].text = title.points_desc ? title.points_desc : L"";
+                track.fields[11].text = title.h0028 ? title.h0028 : L"";
             }
             apply(track);
         }
-        for (uint32_t index = 0; index < world_context->title_tiers.size(); index++) {
+        for (const auto index : title_tiers) {
+            if (index >= world_context->title_tiers.size()) {
+                continue;
+            }
             const auto& tier = world_context->title_tiers[index];
             auto rank = make(CharTitleRankData, {index, tier.props, tier.tier_number});
             if (rank.fields.size() > 3 && tier.tier_name_enc) {
@@ -691,19 +686,17 @@ namespace {
                 if (info.fields.size() < (own ? 19u : 15u)) {
                     continue;
                 }
-                // 288 and 289 keep their last field as bits 4 and 8 of the entry's +0x8c, and 289 its sixth at +0xac past GWCA's Guild (k09).
-                const auto entry = reinterpret_cast<const uint8_t*>(guild);
-                const auto entry_flags = *reinterpret_cast<const uint32_t*>(entry + 0x8C);
+                // 289 keeps its sixth field at +0xac past GWCA's Guild (k09); the last field of both is 0 in all 318 at hand.
                 const auto& cape = guild->cape;
                 std::vector<uint32_t> values = {guild->features};
                 if (own) {
-                    values.push_back(*reinterpret_cast<const uint32_t*>(entry + 0xAC));
+                    values.push_back(*reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(guild) + 0xAC));
                 }
                 values.insert(values.end(), {cape.cape_bg_color, cape.cape_detail_color, cape.cape_emblem_color, cape.cape_shape, cape.cape_detail, cape.cape_emblem, cape.cape_trim, guild->faction, guild->faction_point});
                 if (own) {
                     values.insert(values.end(), {guild->qualifier_point, guild->rating, guild->rank});
                 }
-                values.push_back((entry_flags & 4 ? 1u : 0u) | (entry_flags & 8 ? 2u : 0u));
+                values.push_back(0);
                 info.Set(0, guild->index);
                 set_key(info, guild->key);
                 info.fields[2].text.assign(guild->name, wcsnlen(guild->name, std::size(guild->name)));
@@ -734,8 +727,10 @@ namespace {
                     }
                 }
                 for (const auto& buff : effects.buffs) {
+                    // GWCA lists an upkeep under its caster; 63 and 65 name its target first.
+                    const auto target = buff.target_agent_id ? buff.target_agent_id : effects.agent_id;
                     for (const auto id : {CharEffectUpkeepAdded, CharEffectUpkeepApplied}) {
-                        apply(make(id, {effects.agent_id, buff.target_agent_id, static_cast<uint32_t>(buff.skill_id), buff.h0004, buff.buff_id}));
+                        apply(make(id, {target, effects.agent_id, static_cast<uint32_t>(buff.skill_id), buff.h0004, buff.buff_id}));
                     }
                 }
             }
@@ -756,7 +751,9 @@ namespace {
         constexpr uint32_t access_rights_mask = 0xD;
         apply(make(MissionAccessRights, {char_context->player_flags & access_rights_mask}));
         apply(make(PartyToClient446, {0}));
-        apply(ReplayState::Blank(message_table, CharMissionStreamStart));
+        if (explorable) {
+            apply(ReplayState::Blank(message_table, CharMissionStreamStart));
+        }
         apply(ReplayState::Blank(message_table, MissionInstanceLoadFinish));
         return world;
     }
@@ -1507,8 +1504,9 @@ namespace {
         playback_status = std::format("Playing {}", name);
         std::string changes;
         for (const auto& change : plan.changes) {
-            changes += change.kind == ReplayWire::ChangeKind::LeftOut ? std::format("; left out: {} records from record {} ({})", change.count, change.record, change.why)
-                                                                      : std::format("; message {}: 410's observer byte set ({})", change.record, change.why);
+            changes += change.kind == ReplayWire::ChangeKind::LeftOut     ? std::format("; left out: {} records from record {} ({})", change.count, change.record, change.why)
+                       : change.kind == ReplayWire::ChangeKind::BroughtIn ? std::format("; brought in: {} records before record {} ({})", change.count, change.record, change.why)
+                                                                          : std::format("; message {}: 410's observer byte set ({})", change.record, change.why);
         }
         LogPlayback(
             std::format(

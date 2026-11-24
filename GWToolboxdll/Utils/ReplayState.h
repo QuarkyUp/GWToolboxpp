@@ -34,6 +34,27 @@ namespace ReplayState {
     bool Encode(const ReplayFile::MessageTable& table, const Message& message, std::vector<uint8_t>& out);
     Message Blank(const ReplayFile::MessageTable& table, uint16_t message_id);
 
+    struct ClientItem {
+        uint32_t item_id = 0;
+        uint32_t model_file = 0;
+        uint32_t type = 0;
+        uint32_t dye_tint = 0;
+        uint32_t dye_colours = 0;
+        uint32_t formula = 0;
+        uint32_t multiplier = 0;
+        uint32_t interaction = 0;
+        uint32_t value = 0;
+        uint32_t model_id = 0;
+        uint32_t quantity = 0;
+        std::wstring name;
+        std::vector<uint32_t> code;
+        uint32_t profession = 0;
+        std::wstring customizer;
+    };
+
+    std::vector<Message> ItemReport(const ReplayFile::MessageTable& table, const ClientItem& item);
+
+    std::string FieldAssert(const Message& message);
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
     enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };

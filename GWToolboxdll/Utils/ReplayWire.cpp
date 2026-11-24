@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <format>
+#include <map>
 #include <optional>
+#include <ranges>
 #include <utility>
 
 namespace ReplayWire {
@@ -18,6 +20,7 @@ namespace ReplayWire {
         };
         constexpr size_t instance_info_map_type = 2;
         constexpr size_t instance_info_observer = 5;
+        constexpr uint16_t item_detail_ids[] = {309, 313, 314, 346, 350, 353, 354};
 
         void Append(std::vector<Post>& posts, const Stage stage, const uint32_t time_ms, const std::vector<uint8_t>& body)
         {
@@ -113,9 +116,11 @@ namespace ReplayWire {
             plan.error = "the keyframe has no 406 followed by a 31";
             return plan;
         }
-        if (!messages[load].U(0)) {
-            plan.error = "the keyframe's 406 names no map file, which the game's map load asserts on (File.cpp:367)";
-            return plan;
+        for (size_t i = 0; i < messages.size(); i++) {
+            if (const auto broken = ReplayState::FieldAssert(messages[i]); !broken.empty()) {
+                plan.error = std::format("the keyframe's message {} (id {}) breaks an assert of the game's: {}", i, messages[i].id, broken);
+                return plan;
+            }
         }
         plan.first_record = keyframe.record_index;
         plan.end_record = end;
@@ -146,6 +151,12 @@ namespace ReplayWire {
             plan.error = "the keyframe has no 410 before its 406";
             return plan;
         }
+        std::map<uint32_t, std::vector<size_t>> earlier_details;
+        for (auto i = contents.chapters[static_cast<size_t>(std::max<std::ptrdiff_t>(chapter - 1, 0))].first_record; i < keyframe.record_index; i++) {
+            if (ReplayState::Message message; std::ranges::contains(item_detail_ids, records[i].MessageId()) && ReplayState::Decode(contents.table, records[i].body, message)) {
+                earlier_details[message.U(0)].push_back(i);
+            }
+        }
         std::optional<Change> left_out;
         const auto flush = [&] {
             if (left_out) {
@@ -166,7 +177,38 @@ namespace ReplayWire {
                 plan.error = std::format("record {} (message {}) does not decode against the file's table", i, records[i].MessageId());
                 return plan;
             }
-            if (!order.Unbrought(contents.table, message).empty()) {
+            if (const auto broken = ReplayState::FieldAssert(message); !broken.empty()) {
+                plan.error = std::format("record {} (message {}) breaks an assert of the game's: {}", i, message.id, broken);
+                return plan;
+            }
+            auto unbrought = order.Unbrought(contents.table, message);
+            if (!unbrought.empty() && std::ranges::all_of(unbrought, [&earlier_details](const std::pair<ReplayState::IdField, uint32_t>& field) {
+                    return field.first.kind == ReplayState::IdKind::Item && earlier_details.contains(field.second);
+                })) {
+                flush();
+                Change brought{ChangeKind::BroughtIn, i, 0, "an item's details from the stream before the keyframe, which the keyframe does not hold, posted before the record that shows it"};
+                for (const auto& item : unbrought | std::views::values) {
+                    const auto details = earlier_details.find(item);
+                    if (details == earlier_details.end()) {
+                        continue;
+                    }
+                    for (const auto detail : details->second) {
+                        ReplayState::Message decoded;
+                        ReplayState::Decode(contents.table, records[detail].body, decoded);
+                        if (const auto broken = ReplayState::FieldAssert(decoded); !broken.empty()) {
+                            plan.error = std::format("record {} (message {}) breaks an assert of the game's: {}", detail, decoded.id, broken);
+                            return plan;
+                        }
+                        order.Bring(contents.table, decoded);
+                        Append(plan.posts, Stage::Stream, records[i].time_ms - keyframe.time_ms, records[detail].body);
+                        brought.count++;
+                    }
+                    earlier_details.erase(details);
+                }
+                plan.changes.push_back(brought);
+                unbrought = order.Unbrought(contents.table, message);
+            }
+            if (!unbrought.empty()) {
                 if (!left_out) {
                     left_out = Change{ChangeKind::LeftOut, i, 0, "they name an id that neither the keyframe nor a record before them brought in"};
                 }

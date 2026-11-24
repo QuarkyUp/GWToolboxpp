@@ -331,11 +331,13 @@ namespace {
         {280, {0x204, 0x1005, 0x104}},
         {289, {0x204, 0x1005, 0x2017, 0x104}},
         {277, {0x404, 0x404}},
+        {314, {0x404, 0x2017}},
         {318, {0x204, 0x404, 0x204, 0x104}},
         {319, {0x204, 0x104, 0x104, 0x204, 0x104, 0x404}},
         {324, {0x204, 0x104}},
         {327, {0x204, 0x104, 0x404, 0x404}},
         {328, {0x204, 0x104}},
+        {346, {0x404, 0x104}},
         {353, {0x404, 0x404, 0x104, 0x104, 0x204, 0x204, 0x104, 0x404, 0x404, 0x404, 0x404, 0x4017, 0x400c, 0x404}},
         {380, {0x104, 0x104, 0x104, 0x104}},
         {381, {0x1417}},
@@ -426,7 +428,7 @@ namespace {
         write(327, {N(1), N(0), N(103), N(104)});
         write(409, {N(1)});
         write(407, {Bytes(40, 7)});
-        write(409, {N(2)});
+        write(409, {N(0)});
         write(407, {Bytes(12, 9)});
         write(408, {N(1), N(2), N(3)});
         write(428, {N(7)});
@@ -798,6 +800,10 @@ namespace {
         for (const auto& message : Decoded(table, records)) {
             std::vector<ReplayState::Message> shown_before;
             std::vector<uint32_t> unknown_items;
+            constexpr uint16_t instance_load_head = 380;
+            if (message.id == instance_load_head) {
+                leaks.held_details += filter.Held();
+            }
             if (ReplayState::IsBagContent(message)) {
                 leaks.bag_content++;
             }
@@ -805,7 +811,7 @@ namespace {
                 leaks.unshown_items++;
             }
         }
-        leaks.held_details = filter.Held();
+        leaks.held_details += filter.Held();
         return leaks;
     }
 
@@ -889,7 +895,16 @@ namespace {
         return differences;
     }
 
-    const std::map<uint32_t, const char*> listed_differences = {
+    struct Reason {
+        Reason(const char* why) : why(why), any_field(true) {}
+        Reason(const char* why, std::initializer_list<size_t> fields) : why(why), any_field(false), fields(fields) {}
+
+        const char* why;
+        bool any_field;
+        std::vector<size_t> fields;
+    };
+
+    const std::map<uint32_t, Reason> listed_differences = {
         {12, "a ping: the connection's, not the instance's state"},
         {13, "a ping's answer: the connection's, not the instance's state"},
         {15, "account currencies: left out by the no-inventory rule"},
@@ -923,10 +938,10 @@ namespace {
         {481, "the party search list: an outpost's window, not kept by the model"},
     };
 
-    const std::map<uint32_t, const char*> keyframe_differences = {
-        {31, "the clock: the model's 31 is the stream's clock at its last 30, the snapshot's the client's instance time"},
+    const std::map<uint32_t, Reason> keyframe_differences = {
+        {31, {"the clock: the model's 31 is the stream's clock at its last 30, the snapshot's the client's instance time", {0}}},
         {32,
-         "gadgets (chests, doors, shrines) are left out: their classes (263) are not in GWCA; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
+         "gadgets (chests, doors, shrines) and agents of def 3 are left out: GWCA gives them as neither living nor items, and gadget classes (263) are not in GWCA; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
         {36, "an agent's class change since its 32: the snapshot writes the agent as the client holds it"},
         {37, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
         {38, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
@@ -937,25 +952,16 @@ namespace {
         {46, "a rotation in progress: the 32 carries the agent's facing now"},
         {53, "an agent's attack pace: not read; its attacks play at their default pace until the stream's next 53"},
         {55, "the attribute points: not in GWCA; the attribute window, which an observer does not have (5c)"},
-        {58, "made before 7b's fix: attributes were not written; now from GWCA's PartyAttribute (ids, base, levels)"},
         {59, "an attribute changed after the load: the 58 written from GWCA holds its level"},
         {60, "a player's row flags: not read; the party window's, which observers replace with ObservedPartiesHud (5c)"},
-        {63, "made before 7b's fix: a maintained enchantment was written as 65 alone; now 63 and 65 from GWCA's buffs"},
-        {65, "made before 7b's fix: effects without a duration were written as 66; now as the 65 the stream sends (no 66 at hand has no duration)"},
-        {66, "made before 7b's fix: effects without a duration were written as 66; a periodic keyframe's durations are the client's remaining time"},
+        {66, {"a periodic keyframe's effect durations are the client's time remaining", {4}}},
         {72, "a cape shown: not read; capes hidden until the stream's next 72"},
         {76, "quest descriptions: the quest log's text, which an observer does not have (5c)"},
-        {80, "made before 7b's fix: the client's own bit 0 of a quest's state was written"},
-        {81, "a quest's marker sent after the load: the 83 written holds the marker the client keeps"},
-        {83, "made before 7b's fix: every quest got a marker, set or not; now only quests with a marker"},
-        {86, "made before 7b's fix: only the NPCs present were defined; now every NPC the client holds"},
-        {87, "made before 7b's fix: only the NPCs present were defined; now every NPC the client holds"},
-        {89, "made before 7b's fix: the sixth field, 0xCCCCCCCC in all 280 player rows at hand (the server's unset bytes), was 0"},
-        {101, "made before 7b's fix: not written; now [hero, 0] as in every load at hand"},
-        {107, "made before 7b's fix: not written; now [0, 0] as in every load at hand"},
-        {109, "made before 7b's fix: weapons were read from the agent view; now the char client's slots (k04, k05)"},
-        {110, "made before 7b's fix: what agents wear was read from the agent view, filled only once models load and in another slot order; now the char client's slots (k04, k05), for players only as the stream sends"},
-        {114, "made before 7b's fix: the hero's behaviour was 0; now GWCA's HeroFlag::hero_behavior"},
+        {81, "a quest's marker moved after the load: the 83 written holds the marker the client keeps"},
+        {83, "a quest's marker: the stream adds it (83) and moves it (81), the snapshot adds it where the client keeps it"},
+        {87, "an NPC the client holds that the stream has not defined since the load: defined, unused unless an agent's class names it"},
+        {109, {"a hero's weapons after a swap: the model keeps the load's 109 and the swap's 111s, the snapshot the char client's slots now (k04): the same weapons", {1, 2}}},
+        {110, "a hero's weapons after a swap: the model keeps the swap's 111s as a 110, the snapshot writes the hero's 109 from the char client's slots (k04)"},
         {115, "a hero's six values (115's array) are not read: the hero panel's"},
         {116, "mercenaries' 116 is not written: their 115 is the hero data their 114 needs (5c)"},
         {124, "not read: unknown purpose, no use of it seen in the observer's view (session 7)"},
@@ -964,55 +970,35 @@ namespace {
         {139, "the explored areas: not written; the world map stays closed in replays (OnWorldMapToggle)"},
         {141, "the mission map's points: the mission map stays closed in replays (6b, OnMissionMapCreate)"},
         {154, "an agent's scale: not read; models at their default size"},
-        {155, "made before 7b's fix: NPCs named by their NPC's own name got a 155 too; a 155 sent after the load is in the snapshot's"},
-        {156, "made before 7b's fix: morale was not written; now GWCA's morale_table, party characters only, 40 to 110"},
+        {155, {"an agent's name: GWCA's encoded name, not written when it is its NPC's own (the agent shows the NPC's name); rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10)", {1}}},
         {159, "notices 30 (guild), 0, 14 and 15 are not read; one-time notices are not kept"},
-        {162, "made before 7b's fix: characters' health, energy and regeneration were not written; a periodic keyframe's values are the client's"},
-        {166, "made before 7b's fix: agents with no profession got a 166"},
+        {162, {"rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10); a periodic keyframe's values are the client's", {2}}},
+        {166, "rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10)"},
         {170, "an ally added after the load: not read; missing from the party's allies until the stream's next 170"},
-        {177, "made before 7b's fix: not written; now GWCA's Player::party_leader_player_number"},
         {181, "the recorder's interface preferences: not the viewer's"},
-        {182, "made before 7b's fix: characters with no unlocked profession got a 182"},
-        {186, "made before 7b's fix: not written; now as in every load at hand"},
         {221, "the recorder's skill count: not read; the skills window's"},
         {233, "heroes' skill points: not in GWCA (0 written)"},
         {239, "the recorder's display settings: not the viewer's"},
         {240, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
         {241, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
-        {243, "made before 7b's fix: titles were not written; now GWCA's title_tiers"},
-        {246, "made before 7b's fix: titles were not written; now GWCA's titles, field for field (the title's second text, h0028, not read)"},
         {263, "gadget classes: not in GWCA; gadgets are left out until the stream sends them"},
         {270, "props' animations: not in GWCA; props at their default state until the stream sends them"},
         {273, "props' layers: not in GWCA; props at their default state until the stream sends them"},
         {277, "gadgets' states: gadgets are left out (263)"},
-        {280, "made before 7b's fix: not written; now GWCA's player_guild_index, key and rank (k08)"},
         {284, "not read: no field, its purpose unknown"},
-        {288, "made before 7b's fix: guilds were not written; now GWCA's guilds by their handler's fields (k08, k09)"},
-        {289, "made before 7b's fix: the recorder's guild was not written; now GWCA's guild by its handler's fields (k08, k09)"},
         {302, "not read: a guild value of unknown purpose"},
-        {314, "made before 7b's fix: worn items' customizer was not written; now GWCA's Item::customized"},
-        {324, "the recorder's own inventory: no kept message names it"},
-        {328, "the recorder's own weapon set: its inventory is not created (324)"},
-        {346, "made before 7b's fix: worn items' profession was not written; now GWCA's Item::profession"},
-        {353, "made before 7b's fix: worn items were missing with what they wore (110); a periodic keyframe's item values are the client's"},
-        {354, "an item's details reset after the load: the 353 written holds the client's"},
-        {380, "made before 7b's fix: the fields were read in memory order; 380's handler keeps them at +0x5c, +0x60, +0x54, +0x58 (gwlab's client-answers.md)"},
-        {404, "made before 7b's fix: not written; now [0] as in every load at hand"},
-        {406, "made before 7b's fix, the live test 6 crash: the map file was AreaInfo::file_id, 0 for PvE maps, which the map's load asserts (k01); the facing and the server's time were 0 (k02); its spawn is the controlled agent's place now"},
+        {314, {"the item's customizer through the names settings: memory's text is the recorder's where the stream's 314 names another, a placeholder either way; the item's description, which observers have no window for", {1}}},
+        {353, {"an item no agent wears now (a hero's other weapon set) is not written, the plan bringing its details from the stream when a record shows it again; an item described again (354) is written as a 353", {}}},
+        {354, {"an item described again after the load (354): the snapshot writes the client's details as a 353", {}}},
+        {406, {"the spawn and facing: the controlled agent's place and facing now; the server's time: the recorder's clock as a FILETIME (k02)", {1, 3, 5}}},
         {407, "the manifest's chunks: absent from 12 of 18 loads at hand, which loaded (session 7)"},
         {408, "the manifest's hash: 0, as in gwlab's loads, which loaded (session 7)"},
         {409, "the manifest's phases: written as gwlab's loads have them, which loaded (session 7)"},
         {428, "not read: gwlab's map 779 load had 0 and loaded (session 7)"},
-        {430, "made before 7b's fix: the team row was not written; now as the 5 loads at hand have it"},
-        {446, "made before 7b's fix: not written; now [0] as in every load at hand"},
         {159 | 22 << 16, "a one-time notice: not kept"},
     };
 
-    const std::map<uint16_t, const char*> keyframe_layout_errors = {
-        {353, "made before 7b's fix: an item's mods were written in its group's count field; now a count and one field per mod"},
-    };
-
-    bool PrintComparison(const std::map<uint32_t, Difference>& differences, const std::map<uint32_t, const char*>& reasons)
+    bool PrintComparison(const std::map<uint32_t, Difference>& differences, const std::map<uint32_t, Reason>& reasons)
     {
         size_t unlisted = 0;
         size_t equal = 0;
@@ -1031,10 +1017,16 @@ namespace {
                 fields += std::format(" f{} x{}", field, count);
             }
             const auto why = reasons.find(id);
-            unlisted += why == reasons.end();
+            const auto listed = why != reasons.end() && std::ranges::all_of(difference.fields | std::views::keys, [&why](const size_t field) {
+                                    return why->second.any_field || std::ranges::contains(why->second.fields, field);
+                                });
+            unlisted += !listed;
             printf(
                 "%6s %8zu %8zu %8zu %8zu %8zu %8zu %s; %s\n", (id >> 16 ? std::format("{}/{}", id & 0xFFFF, id >> 16) : std::format("{}", id)).c_str(), difference.expected, difference.actual, difference.equal, difference.repeated, difference.missing,
-                difference.extra, fields.empty() ? " none" : fields.c_str(), why == reasons.end() ? "NOT LISTED" : why->second
+                difference.extra, fields.empty() ? " none" : fields.c_str(),
+                listed                 ? why->second.why
+                : why == reasons.end() ? "NOT LISTED"
+                                       : "NOT LISTED: fields its reason does not cover differ"
             );
         }
         printf("%zu of %zu messages equal, %zu repeats of a message the model keeps once (the latest, equal); %zu message ids differ with no reason listed\n", equal, expected, repeated, unlisted);
@@ -1123,22 +1115,38 @@ namespace {
             for (auto i = load->head; i < keyframe.record_index; i++) {
                 stream.Apply(contents.records[i]);
             }
-            printf("\nkeyframe %zu (%s, at %u ms): the snapshot from memory against the model of the stream up to it (records %zu to %zu)\n", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms, load->head, keyframe.record_index);
-            passed &= PrintComparison(Compare(stream.Join(), Decoded(contents.table, keyframe.records)), keyframe_differences);
-        }
-        for (size_t k = 0; k < contents.keyframes.size(); k++) {
-            std::map<uint16_t, size_t> undecoded;
-            for (const auto& record : contents.keyframes[k].records) {
-                if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message)) {
-                    undecoded[record.MessageId()]++;
+            auto model = stream.Join();
+            // CItemTable::AddDetailLow keeps an item's model file without bit 31, its fetch at once (c02): memory cannot give it back.
+            for (auto& message : model) {
+                if (message.id == 353 || message.id == 354) {
+                    message.Set(1, message.U(1) & 0x7FFFFFFF);
                 }
             }
-            for (const auto& [id, count] : undecoded) {
-                const auto why = keyframe_layout_errors.find(id);
-                passed &= why != keyframe_layout_errors.end();
-                printf("keyframe %zu: %zu messages %u do not decode against the file's table; %s\n", k + 1, count, id, why == keyframe_layout_errors.end() ? "NOT LISTED" : why->second);
+            printf("\nkeyframe %zu (%s, at %u ms): the snapshot from memory against the model of the stream up to it (records %zu to %zu)\n", k + 1, ReplayFile::KeyframeKindName(keyframe.kind), keyframe.time_ms, load->head, keyframe.record_index);
+            passed &= PrintComparison(Compare(model, Decoded(contents.table, keyframe.records)), keyframe_differences);
+        }
+        std::map<std::string, size_t> broken;
+        for (size_t k = 0; k < contents.keyframes.size(); k++) {
+            const auto& records = contents.keyframes[k].records;
+            for (const auto& record : records) {
+                if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message)) {
+                    broken[std::format("keyframe {}: message {} does not decode against the file's table", k + 1, record.MessageId())]++;
+                }
+            }
+            for (const auto& failure : ReplayState::CheckClientNeeds(Decoded(contents.table, records))) {
+                broken[std::format("keyframe {}: {}", k + 1, failure.substr(failure.find('(')))]++;
             }
         }
+        for (const auto& message : Decoded(contents.table, contents.records)) {
+            if (const auto failure = ReplayState::FieldAssert(message); !failure.empty()) {
+                broken[std::format("the stream: (message {}): {}", message.id, failure)]++;
+            }
+        }
+        printf("\nthe game's asserts on the keyframes' messages and the stream's fields: %s\n", broken.empty() ? "none broken" : "broken");
+        for (const auto& [what, count] : broken) {
+            printf("  %zu x %s\n", count, what.c_str());
+        }
+        passed &= broken.empty();
         const auto stream_leaks = CountLeaks(contents.table, contents.records);
         Leaks keyframe_leaks;
         auto names = CountNames(contents.table, contents.records, contents.header.flags);
@@ -1871,6 +1879,138 @@ namespace {
             }
         }
         Check(!ReplayWire::MakeKeyframePlan(v2, no_map_file).error.empty(), "a keyframe whose 406 names no map file is refused: the game's map load asserts on it");
+
+        const ReplayState::ClientItem client_item = {
+            .item_id = 100,
+            .model_file = 700,
+            .type = 2,
+            .formula = 485,
+            .multiplier = 1,
+            .interaction = 0x22000040,
+            .value = 12,
+            .model_id = 1197,
+            .quantity = 1,
+            .name = L"\x108\x107Player 3\x1",
+            .code = {0x2400, 0x2500, 0xC0000000},
+            .profession = 11,
+            .customizer = L"Recorder",
+        };
+        const auto report = ReplayState::ItemReport(v2.table, client_item);
+        Check(
+            report.size() == 2 && report[0].U(5) == 486 && report[0].U(6) == 1 && report[0].U(12) == 2 && report[0].fields.size() == 15 && report[0].U(14) == 0x2500 && report[1].id == 314,
+            "the fixed writer gives an item's 353 as the wire's from the client's memory: its formula plus one, its mods without the item code's terminator, no 346 for profession 11 (any), its customizer as a 314"
+        );
+        auto no_formula = client_item;
+        no_formula.formula = 0x5E5;
+        no_formula.code = {0xC0000000};
+        no_formula.profession = 3;
+        const auto bare = ReplayState::ItemReport(v2.table, no_formula);
+        Check(
+            bare.size() == 3 && bare[0].U(5) == 0 && bare[0].U(12) == 0 && bare[0].fields.size() == 13 && bare[1].id == 346 && bare[1].U(1) == 3,
+            "the fixed writer gives formula 0 for the client's 0x5E5 (none), no mod for a lone terminator, and a 346 for a profession"
+        );
+
+        auto from_memory = v2.keyframes.front();
+        size_t rewritten = 0;
+        for (auto& record : from_memory.records) {
+            ReplayState::Message message;
+            if (!ReplayState::Decode(v2.table, record.body, message) || message.id != 353) {
+                continue;
+            }
+            ReplayState::ClientItem kept = {
+                .item_id = message.U(0),
+                .model_file = message.U(1),
+                .type = message.U(2),
+                .dye_tint = message.U(3),
+                .dye_colours = message.U(4),
+                .formula = message.U(5) ? message.U(5) - 1 : 0x5E5,
+                .multiplier = message.U(5) ? message.U(6) : 0,
+                .interaction = message.U(7),
+                .value = message.U(8),
+                .model_id = message.U(9),
+                .quantity = message.U(10),
+                .name = message.fields[11].text,
+                .code = {},
+                .profession = 11,
+                .customizer = {},
+            };
+            for (size_t mod = 13; mod < message.fields.size(); mod++) {
+                kept.code.push_back(message.U(mod));
+            }
+            kept.code.push_back(0xC0000000);
+            const auto written = ReplayState::ItemReport(v2.table, kept);
+            rewritten += !written.empty() && ReplayState::Encode(v2.table, written.front(), record.body);
+        }
+        Check(
+            rewritten > 0 && ReplayWire::MakeKeyframePlan(v2, from_memory).error.empty() && ReplayState::CheckClientNeeds(Decoded(v2.table, from_memory.records)).empty(),
+            std::format("a keyframe whose {} items the fixed writer made from the client's memory plays and breaks none of the game's asserts", rewritten).c_str()
+        );
+        auto terminated = v2.keyframes.front();
+        for (auto& record : terminated.records) {
+            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == 353) {
+                message.Set(12, message.U(12) + 1);
+                message.fields.push_back({{0xC0000000}, {}});
+                ReplayState::Encode(v2.table, message, record.body);
+            }
+        }
+        const auto terminated_plan = ReplayWire::MakeKeyframePlan(v2, terminated);
+        const auto terminated_needs = ReplayState::CheckClientNeeds(Decoded(v2.table, terminated.records));
+        Check(
+            terminated_plan.error.contains("(id 353)") && terminated_plan.error.contains("f12") && !terminated_needs.empty() &&
+                std::ranges::all_of(
+                    terminated_needs,
+                    [](const std::string& need) {
+                        return need.contains("(message 353)") && need.contains("ItemCode.h:516");
+                    }
+                ),
+            "a keyframe whose 353s end their mods with the item code's terminator, as live test 7's writer made them, is refused and fails the check, by id and field"
+        );
+
+        ReplayState::InventoryFilter filter(v2.table);
+        std::vector<ReplayState::Message> shown_before;
+        std::vector<uint32_t> unknown_items;
+        const ReplayState::Message load_head{380, {N(1), N(2), N(3), N(4)}};
+        const ReplayState::Message worn{110, {N(10), N(100), N(0), N(0), N(0), N(0), N(0), N(0), N(0), N(0)}};
+        const auto first_map = filter.Keep(load_head, shown_before, unknown_items) && filter.Keep(worn, shown_before, unknown_items) && filter.Keep(report[0], shown_before, unknown_items);
+        Check(
+            first_map && filter.Keep(load_head, shown_before, unknown_items) && !filter.Keep(report[0], shown_before, unknown_items),
+            "an item shown in one map is not in the next: the same id's details there are held until shown (item ids are the instance's)"
+        );
+        std::vector<ReplayFile::Record> two_maps;
+        for (const auto* message : {&load_head, &worn, &report[0], &load_head, &report[0]}) {
+            ReplayFile::Record record;
+            ReplayState::Encode(v2.table, *message, record.body);
+            two_maps.push_back(std::move(record));
+        }
+        Check(CountLeaks(v2.table, two_maps).held_details == 1, "the no-inventory check counts the details of an item a later map never shows, though an earlier one showed its id");
+
+        auto without_item = v2.keyframes[1];
+        uint32_t taken = 0;
+        for (uint32_t item = 100; item < 105 && !taken; item++) {
+            const auto names_it = [&](const ReplayFile::Record& record) {
+                ReplayState::Message message;
+                return ReplayState::Decode(v2.table, record.body, message) && message.id != 353 && std::ranges::any_of(ReplayState::IdFields(v2.table, message.id), [&](const ReplayState::IdField& field) {
+                           return field.kind == ReplayState::IdKind::Item && field.field < message.fields.size() && std::ranges::contains(message.fields[field.field].numbers, item);
+                       });
+            };
+            const auto detailed_before = std::ranges::any_of(v2.records.begin(), v2.records.begin() + static_cast<std::ptrdiff_t>(without_item.record_index), [&](const ReplayFile::Record& record) {
+                ReplayState::Message message;
+                return ReplayState::Decode(v2.table, record.body, message) && message.id == 353 && message.U(0) == item;
+            });
+            const auto shown_after = std::ranges::any_of(v2.records.begin() + static_cast<std::ptrdiff_t>(without_item.record_index), v2.records.begin() + static_cast<std::ptrdiff_t>(v2.ChapterEnd(0)), names_it);
+            if (detailed_before && shown_after && std::ranges::none_of(without_item.records, names_it)) {
+                std::erase_if(without_item.records, [&](const ReplayFile::Record& record) {
+                    ReplayState::Message message;
+                    return ReplayState::Decode(v2.table, record.body, message) && message.id == 353 && message.U(0) == item;
+                });
+                taken = item;
+            }
+        }
+        const auto brought_plan = ReplayWire::MakeKeyframePlan(v2, without_item);
+        Check(
+            taken && brought_plan.error.empty() && std::ranges::count(brought_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckOrder(v2.table, Fed(v2, brought_plan)).empty(),
+            std::format("a record showing an item the keyframe lacks gets the item's details from the stream before the keyframe (item {})", taken).c_str()
+        );
         auto other = v2;
         other.header.flags = 0;
         Check(CountNames(other.table, named.keyframes.front().records, other.header.flags).not_placeholders == 0, "with the names settings off, names are not checked");
