@@ -114,10 +114,11 @@ namespace ReplayRecorder {
 
     uint32_t ServerTime();
     ReplayFile::Motion MotionOf(const WalkingAgent& walking, uint32_t clock);
+    // Every line is flushed: the game can end without the toolbox's exit, and a replay's last lines tell why.
+    void LogLine(void (*log)(const char* format, ...), const std::string& text);
     std::filesystem::path RecordingsFolder();
     std::vector<Message> ItemDetails(uint32_t item_id);
     ReplayState::World Snapshot();
-    void LogPlayback(const std::string& step);
     void DisarmPlayback();
     std::string ArmPlayback();
     void UpdatePlayback();

@@ -116,19 +116,19 @@ namespace ReplayRecorder {
                 std::error_code error;
                 std::filesystem::remove(recording_path, error);
                 status = std::format("{} removed: no message was recorded", RecordingName());
-                Log::Log("Replay Recorder: %s", status.c_str());
+                LogLine(Log::Log, status);
                 return;
             }
             if (!writer.Close(header)) {
                 status = std::format("Could not finish {}", RecordingName());
-                Log::Error("Replay Recorder: %s", status.c_str());
+                LogLine(Log::Error, status);
                 return;
             }
             status = std::format(
                 "Saved {}: {} chapters, {} keyframes, {} messages, {} agents' motions, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, motions_written, size / 1024, header.layout_errors,
                 header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : ""
             );
-            Log::Info("Replay Recorder: %s", status.c_str());
+            LogLine(Log::Info, status);
         }
 
         void PackRecord(const PacketBase* packet, std::vector<uint8_t>& out)
@@ -191,14 +191,16 @@ namespace ReplayRecorder {
                 records.push_back({time_ms, std::move(encoded)});
             }
             if (records.empty() || !writer.AppendKeyframe(time_ms, kind, records)) {
-                Log::Log("Replay Recorder: keyframe %s not written: the client's state could not be read", ReplayFile::KeyframeKindName(kind));
+                LogLine(Log::Log, std::format("keyframe {} not written: the client's state could not be read", ReplayFile::KeyframeKindName(kind)));
                 return;
             }
             keyframe_count++;
             next_keyframe_ms = time_ms + keyframe_interval_ms;
-            Log::Log(
-                "Replay Recorder: keyframe %u (%s) at %u ms: %zu messages, %zu not encoded against the client's table, %llu KB, read and written in %u ms", keyframe_count, ReplayFile::KeyframeKindName(kind), time_ms, records.size(), not_encoded,
-                bytes / 1024, ElapsedMs(started)
+            LogLine(
+                Log::Log, std::format(
+                              "keyframe {} ({}) at {} ms: {} messages, {} not encoded against the client's table, {} KB, read and written in {} ms", keyframe_count, ReplayFile::KeyframeKindName(kind), time_ms, records.size(), not_encoded, bytes / 1024,
+                              ElapsedMs(started)
+                          )
             );
         }
 
@@ -261,7 +263,7 @@ namespace ReplayRecorder {
             std::wstring error;
             if (!Resources::EnsureFolderExists(folder, error)) {
                 status = TextUtils::WStringToString(error);
-                Log::Error("Replay Recorder: %s", status.c_str());
+                LogLine(Log::Error, status);
                 return false;
             }
             recording_path = folder / std::format(L"{}_map{}.gwrec", TextUtils::StringToWString(TextUtils::FilenameTimestamp()), map_id);
@@ -284,12 +286,12 @@ namespace ReplayRecorder {
                     AgentNotifyParams_Func = reinterpret_cast<AgentNotifyParams_pt>(GW::Scanner::FunctionFromNearCall(equipped_item_getter + 0x11));
                 }
                 else {
-                    Log::Log("Replay Recorder: the char client's equipped item lookup is not found in this client: keyframes leave out what agents wear");
+                    LogLine(Log::Log, "the char client's equipped item lookup is not found in this client: keyframes leave out what agents wear");
                 }
             }
             if (!writer.Open(recording_path, header, message_table)) {
                 status = std::format("Could not create {}", RecordingName());
-                Log::Error("Replay Recorder: %s", status.c_str());
+                LogLine(Log::Error, status);
                 return false;
             }
             name_stripper.reset();
@@ -306,7 +308,7 @@ namespace ReplayRecorder {
             recording_start = last_record_at = last_flush_at = Clock::now();
             WriteChapter(map_id, explorable);
             status = std::format("Recording {}", RecordingName());
-            Log::Log("Replay Recorder: %s", status.c_str());
+            LogLine(Log::Log, status);
             return true;
         }
 
@@ -507,6 +509,12 @@ namespace ReplayRecorder {
         }
     } // namespace
 
+    void LogLine(void (*log)(const char* format, ...), const std::string& text)
+    {
+        log("Replay Recorder: %s", text.c_str());
+        Log::FlushFile();
+    }
+
     std::filesystem::path RecordingsFolder()
     {
         return settings.folder.empty() ? Resources::GetSettingsFolderPath() / L"replays" : std::filesystem::path(TextUtils::StringToWString(settings.folder));
@@ -566,7 +574,7 @@ void ReplayRecorderModule::Update(float)
     const auto play = settings.play_from_observe_window && settings.list_in_observe_window && ObserveGame_Func;
     if (play && !playback_armed && playback_status.empty()) {
         playback_status = ArmPlayback();
-        LogPlayback(playback_status);
+        LogLine(Log::Log, playback_status);
     }
     else if (!play && playback == Playback::Off && (playback_armed || !playback_status.empty())) {
         DisarmPlayback();

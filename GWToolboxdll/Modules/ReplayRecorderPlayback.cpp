@@ -233,7 +233,7 @@ namespace ReplayRecorder {
 
         void PostStage(const ReplayWire::Stage stage)
         {
-            LogPlayback(std::format("posting {}", ReplayWire::StageName(stage)));
+            LogLine(Log::Log, std::format("posting {}", ReplayWire::StageName(stage)));
             for (; next_post < plan.posts.size() && plan.posts[next_post].stage == stage; next_post++) {
                 auto bytes = plan.posts[next_post].bytes;
                 send_cipher.Apply(bytes.data(), bytes.size());
@@ -250,8 +250,7 @@ namespace ReplayRecorder {
 
         void FinishPlayback(const std::string& why)
         {
-            Log::Info("Replay Recorder: %s", why.c_str());
-            Log::FlushFile();
+            LogLine(Log::Info, why);
             playback_status = why;
             plan = {};
             replay = {};
@@ -280,7 +279,7 @@ namespace ReplayRecorder {
                 return;
             }
             stop_sent = true;
-            LogPlayback("stop observing asked of the game");
+            LogLine(Log::Log, "stop observing asked of the game");
             EnterStage(Playback::Ending);
             GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000017d);
         }
@@ -302,7 +301,7 @@ namespace ReplayRecorder {
             for (size_t i = 2; i < sizeof(ready); i++) {
                 ready[i] = static_cast<uint8_t>(random());
             }
-            LogPlayback("the game's connect replaced: the replay's connection and its ready record posted");
+            LogLine(Log::Log, "the game's connect replaced: the replay's connection and its ready record posted");
             // A kind-5 event with no socket gives the client the MsgConn its own playback runs on (GcSrv.cpp, MsgConn's null-socket branches).
             PostNetEvent(net_event_connected, 0, &connected, sizeof(connected));
             PostNetEvent(net_event_data, replay_connection_id, ready, sizeof(ready));
@@ -319,7 +318,7 @@ namespace ReplayRecorder {
             if (connection_open && playback == Playback::Transfer) {
                 connection_open = false;
                 PostNetEvent(net_event_closed, replay_connection_id, nullptr, 0);
-                LogPlayback("the game's join closed the previous load's connection");
+                LogLine(Log::Log, "the game's join closed the previous load's connection");
             }
             else if (connection_open) {
                 CloseReplayConnection(std::format("Left the replay of {}", TextUtils::WStringToString(playing_path.filename().wstring())));
@@ -332,7 +331,7 @@ namespace ReplayRecorder {
             GW::Hook::EnterHook();
             InstanceAck_Ret(mission);
             if (playback == Playback::Acknowledging && (MissionFlags() & instance_acknowledged) == instance_acknowledged) {
-                LogPlayback("c2s 145 due: the instance acknowledged");
+                LogLine(Log::Log, "c2s 145 due: the instance acknowledged");
                 PostStage(ReplayWire::Stage::Load);
                 EnterStage(Playback::Loading);
             }
@@ -344,7 +343,7 @@ namespace ReplayRecorder {
             GW::Hook::EnterHook();
             MapLoaded_Ret();
             if (playback == Playback::Loading) {
-                LogPlayback(std::format("c2s 144 due: the replay's map loaded; the stream to {} ms after the keyframe posted at once", plan.seek_ms));
+                LogLine(Log::Log, std::format("c2s 144 due: the replay's map loaded; the stream to {} ms after the keyframe posted at once", plan.seek_ms));
                 PostStage(ReplayWire::Stage::Entry);
                 played_ms = std::min(plan.seek_ms, plan.duration_ms);
                 last_update = Clock::now();
@@ -360,8 +359,7 @@ namespace ReplayRecorder {
             if (open && playback != Playback::Off) {
                 if (!world_map_refusal_logged) {
                     world_map_refusal_logged = true;
-                    Log::Info("Replay Recorder: the world map stays closed during a replay: it would show the map left for the replay over explored areas a keyframe does not hold");
-                    Log::FlushFile();
+                    LogLine(Log::Info, "the world map stays closed during a replay: it would show the map left for the replay over explored areas a keyframe does not hold");
                 }
                 return GW::Hook::LeaveHook();
             }
@@ -376,8 +374,7 @@ namespace ReplayRecorder {
             if (playback != Playback::Off) {
                 if (!mission_map_refusal_logged) {
                     mission_map_refusal_logged = true;
-                    Log::Info("Replay Recorder: the mission map stays closed during a replay: the game's observer mode draws it from a PvP map's image, which a PvE map has none of");
-                    Log::FlushFile();
+                    LogLine(Log::Info, "the mission map stays closed during a replay: the game's observer mode draws it from a PvP map's image, which a PvE map has none of");
                 }
                 return GW::Hook::LeaveHook();
             }
@@ -405,7 +402,7 @@ namespace ReplayRecorder {
             GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
             emulating_packet = false;
             followed_agent = agent_id;
-            LogPlayback(std::format("the view follows agent {} (s2c 172 emulated, as an observer's server sends it)", agent_id));
+            LogLine(Log::Log, std::format("the view follows agent {} (s2c 172 emulated, as an observer's server sends it)", agent_id));
         }
 
         void LoadKeyframe(ReplayWire::Plan made)
@@ -436,14 +433,14 @@ namespace ReplayRecorder {
                            : change.kind == ReplayWire::ChangeKind::BroughtIn ? std::format("; brought in: {} records before record {} ({})", change.count, change.record, change.why)
                                                                               : std::format("; message {}: 410's observer byte set ({})", change.record, change.why);
             }
-            LogPlayback(
-                std::format(
-                    "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once, then {} placement messages; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
-                    connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.placed, plan.posts.size(), plan.keyframe_records,
-                    plan.first_record, plan.end_record, plan.duration_ms, plan.controlled_agent, changes
-                )
+            LogLine(
+                Log::Log, std::format(
+                              "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once, then {} placement messages; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
+                              connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.placed, plan.posts.size(), plan.keyframe_records,
+                              plan.first_record, plan.end_record, plan.duration_ms, plan.controlled_agent, changes
+                          )
             );
-            LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, JoinedMap(), static_cast<uint32_t>(GW::Map::GetMapID())));
+            LogLine(Log::Log, std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, JoinedMap(), static_cast<uint32_t>(GW::Map::GetMapID())));
             EnterStage(Playback::Transfer);
         }
 
@@ -456,7 +453,7 @@ namespace ReplayRecorder {
                     "Skipped chapter {} (map {}, {}): {}", chapter + 1, skipped.map_id, ReplayRecorderModule::TimeText(end_ms - skipped.time_ms),
                     skipped.is_explorable ? "none of its keyframes can be played, the reasons are in the toolbox's log" : "an outpost, which the game's observer mode does not play yet"
                 );
-                LogPlayback(playback_note);
+                LogLine(Log::Log, playback_note);
             }
         }
 
@@ -465,7 +462,7 @@ namespace ReplayRecorder {
             auto made = ReplayWire::MakeSeekPlan(replay, time_ms);
             if (!made.error.empty()) {
                 playback_note = std::format("Cannot go to {}: {}", ReplayRecorderModule::TimeText(time_ms), made.error);
-                LogPlayback(playback_note);
+                LogLine(Log::Log, playback_note);
                 return false;
             }
             playback_note.clear();
@@ -479,13 +476,13 @@ namespace ReplayRecorder {
                 const auto from_ms = plan.start_ms + static_cast<uint32_t>(played_ms);
                 played_ms = std::min(made.start_ms + made.seek_ms - plan.start_ms, plan.duration_ms);
                 placement = ReplayWire::PlacementPosts(replay, plan, static_cast<uint32_t>(played_ms));
-                LogPlayback(
-                    std::format(
-                        "seek to {} ms: forward from {} ms in chapter {}, the stream from keyframe {} posted at once, no load, then {} placement messages", made.start_ms + made.seek_ms, from_ms, plan.chapter + 1, plan.keyframe + 1,
-                        std::accumulate(placement.begin(), placement.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
-                            return sum + post.records;
-                        })
-                    )
+                LogLine(
+                    Log::Log, std::format(
+                                  "seek to {} ms: forward from {} ms in chapter {}, the stream from keyframe {} posted at once, no load, then {} placement messages", made.start_ms + made.seek_ms, from_ms, plan.chapter + 1, plan.keyframe + 1,
+                                  std::accumulate(placement.begin(), placement.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
+                                      return sum + post.records;
+                                  })
+                              )
                 );
                 return false;
             }
@@ -504,8 +501,7 @@ namespace ReplayRecorder {
             if (!made.error.empty()) {
                 replay = {};
                 playback_status = std::format("{} cannot be played: {}", name, made.error);
-                Log::Error("Replay Recorder: %s", playback_status.c_str());
-                Log::FlushFile();
+                LogLine(Log::Error, playback_status);
                 GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
                 return;
             }
@@ -586,7 +582,7 @@ namespace ReplayRecorder {
                 }
                 for (const auto& [path, reason] : scan.left_out) {
                     if (logged_left_out.insert(path).second) {
-                        Log::Log("Replay Recorder: %s is not listed in the Observe window: %s", TextUtils::WStringToString(path.filename().wstring()).c_str(), reason.c_str());
+                        LogLine(Log::Log, std::format("{} is not listed in the Observe window: {}", TextUtils::WStringToString(path.filename().wstring()), reason));
                     }
                 }
                 observe_status = std::format("{} recordings listed in the Observe window, {} left out (the reasons are in the toolbox's log)", messages.size(), scan.left_out.size());
@@ -614,12 +610,6 @@ namespace ReplayRecorder {
         };
 
     } // namespace
-
-    void LogPlayback(const std::string& step)
-    {
-        Log::Log("Replay Recorder: %s", step.c_str());
-        Log::FlushFile();
-    }
 
     void DisarmPlayback()
     {
@@ -731,7 +721,7 @@ namespace ReplayRecorder {
                     if (flags & (join_pending | transfer_kept)) {
                         if (!join_wait_logged) {
                             join_wait_logged = true;
-                            LogPlayback(std::format("waiting for the game's own join to end before the transfer (mission flags {:#x})", flags));
+                            LogLine(Log::Log, std::format("waiting for the game's own join to end before the transfer (mission flags {:#x})", flags));
                         }
                         if (waited > connect_timeout || stop) {
                             CloseReplayConnection(std::format("The game was still joining a map (mission flags {:#x}): the replay's load was not started", flags));
@@ -743,7 +733,7 @@ namespace ReplayRecorder {
                     emulating_packet = true;
                     GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&transfer));
                     emulating_packet = false;
-                    LogPlayback(std::format("the transfer (s2c 422) emulated: mission flags {:#x} before, {:#x} after, the join's map {}", flags, MissionFlags(), JoinedMap()));
+                    LogLine(Log::Log, std::format("the transfer (s2c 422) emulated: mission flags {:#x} before, {:#x} after, the join's map {}", flags, MissionFlags(), JoinedMap()));
                 }
                 else if (waited > (flags & (join_pending | transfer_kept) ? transfer_wait : connect_timeout)) {
                     CloseReplayConnection(std::format("The game did not start the replay's connection (mission flags {:#x}, the join's map {}, a game connection {})", flags, JoinedMap(), *game_connection_global ? "open" : "none"));
@@ -759,7 +749,7 @@ namespace ReplayRecorder {
                     }
                     replay_connection = connection;
                     send_cipher = connection->receive_cipher;
-                    LogPlayback("the replay's connection is ready: its receive cipher copied");
+                    LogLine(Log::Log, "the replay's connection is ready: its receive cipher copied");
                     EnterStage(Playback::Acknowledging);
                     PostStage(ReplayWire::Stage::BeforeLoad);
                 }
@@ -782,8 +772,7 @@ namespace ReplayRecorder {
                 const auto elapsed = std::chrono::duration<double, std::milli>(now - last_update).count();
                 last_update = now;
                 if (stop) {
-                    Log::Info("Replay Recorder: playback stopped: back to the outpost");
-                    Log::FlushFile();
+                    LogLine(Log::Info, "playback stopped: back to the outpost");
                     StopObserving();
                     return;
                 }
@@ -813,8 +802,7 @@ namespace ReplayRecorder {
                     paused_by_end = !playback_paused;
                     playback_paused = true;
                     played_ms = plan.duration_ms;
-                    Log::Info("Replay Recorder: the replay has ended: paused on its last moment until a seek, Restart or Stop");
-                    Log::FlushFile();
+                    LogLine(Log::Info, "the replay has ended: paused on its last moment until a seek, Restart or Stop");
                 }
                 const auto target = GW::Agents::GetTargetId();
                 if (viewpoint_available && settings.follow_selected_agent && target != last_target) {
@@ -862,7 +850,7 @@ namespace ReplayRecorder {
         ObserveGame_Func = reinterpret_cast<ObserveGame_pt>(observe_game);
         if (!ObserveGame_Func || GW::Hook::CreateHook(&ObserveGame_Func, OnObserveGame, &ObserveGame_Ret) != 0) {
             ObserveGame_Func = nullptr;
-            Log::Log("Replay Recorder: the game's Observe function is not found in this client; recordings are not listed");
+            LogLine(Log::Log, "the game's Observe function is not found in this client; recordings are not listed");
             return "Not listed: the game's Observe function is not found in this client";
         }
         GW::Hook::EnableHooks(ObserveGame_Func);
