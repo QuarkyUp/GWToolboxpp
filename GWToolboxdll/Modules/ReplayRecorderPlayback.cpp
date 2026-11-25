@@ -7,6 +7,7 @@
 #include <GWCA/Managers/AgentMgr.h>
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/MemoryMgr.h>
+#include <GWCA/Managers/RenderMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
 #include <GWCA/Managers/UIMgr.h>
 #include <GWCA/Packets/StoC.h>
@@ -21,7 +22,6 @@
 #include <Utils/Replay/ReplayObserve.h>
 #include <Utils/Replay/ReplayWire.h>
 #include <Utils/TextUtils.h>
-#include "stdafx.h"
 
 namespace ReplayRecorder {
     namespace {
@@ -59,6 +59,8 @@ namespace ReplayRecorder {
 
         using PostNetEvent_pt = uint32_t(__cdecl*)(void* context, uint32_t connection, uint32_t kind, const void* data, uint32_t size);
 
+        using LoadingFrameFade_pt = void(__cdecl*)();
+
         constexpr uint32_t replay_connection_id = 0x7E500001;
 
         constexpr uint16_t closed_port = 1;
@@ -90,6 +92,10 @@ namespace ReplayRecorder {
         const std::vector<uint32_t> viewpoint_fields = {viewpoint_message_id, 0x10, 0x104};
 
         constexpr auto transfer_wait = std::chrono::seconds(60);
+
+        constexpr auto picture_wait = std::chrono::milliseconds(250);
+
+        constexpr uint32_t loading_frame_shown = 1;
 
         struct ViewpointMessage {
             uint32_t header = viewpoint_message_id;
@@ -149,6 +155,28 @@ namespace ReplayRecorder {
         AgentAdvance_pt AgentAdvance_Ret = nullptr;
 
         PostNetEvent_pt PostNetEvent_Func = nullptr;
+
+        LoadingFrameFade_pt LoadingFrameFade_Func = nullptr;
+
+        LoadingFrameFade_pt LoadingFrameFade_Ret = nullptr;
+
+        const uint32_t* loading_frame_flags = nullptr;
+
+        const uint32_t* loading_frame_id = nullptr;
+
+        uint32_t loading_frame_ending = 0;
+
+        enum class Still : uint8_t {
+            None,
+            Wanted,
+            Shown,
+        };
+
+        Still still = Still::None;
+
+        IDirect3DTexture9* last_picture = nullptr;
+
+        ImVec2 last_picture_size;
 
         MsgConn** game_connection_global = nullptr;
 
@@ -231,13 +259,17 @@ namespace ReplayRecorder {
             return char_context ? static_cast<uint32_t>(char_context->map_id) : 0;
         }
 
+        void PostData(std::vector<uint8_t> bytes)
+        {
+            send_cipher.Apply(bytes.data(), bytes.size());
+            PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
+        }
+
         void PostStage(const ReplayWire::Stage stage)
         {
             LogLine(Log::Log, std::format("posting {}", ReplayWire::StageName(stage)));
             for (; next_post < plan.posts.size() && plan.posts[next_post].stage == stage; next_post++) {
-                auto bytes = plan.posts[next_post].bytes;
-                send_cipher.Apply(bytes.data(), bytes.size());
-                PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
+                PostData(plan.posts[next_post].bytes);
             }
         }
 
@@ -261,6 +293,7 @@ namespace ReplayRecorder {
             transfer_due = false;
             stop_sent = false;
             playback_stop_requested = false;
+            still = Still::None;
             EnterStage(Playback::Off);
         }
 
@@ -395,6 +428,17 @@ namespace ReplayRecorder {
             return result;
         }
 
+        void __cdecl OnLoadingFrameFade()
+        {
+            GW::Hook::EnterHook();
+            LoadingFrameFade_Ret();
+            // The reporter's 0x56 fades the loading frame over 1.5 s once its picture is up (LdFrame.cpp): a replay's load ends it at the next update, outside its own message.
+            if ((playback == Playback::Loading || playback == Playback::Playing) && *loading_frame_flags & loading_frame_shown) {
+                loading_frame_ending = *loading_frame_id;
+            }
+            GW::Hook::LeaveHook();
+        }
+
         void FollowViewpoint(const uint32_t agent_id)
         {
             ViewpointMessage message{.agent = agent_id};
@@ -407,6 +451,9 @@ namespace ReplayRecorder {
 
         void LoadKeyframe(ReplayWire::Plan made)
         {
+            // Another chapter of the map shown loads behind its last picture: the 422's join destroys the game view (UI 0x10000111) and the same map is built again.
+            const auto same_map = connection_open && replay.chapters[made.chapter].map_id == replay.chapters[plan.chapter].map_id;
+            still = same_map && LoadingFrameFade_Func ? Still::Wanted : Still::None;
             plan = std::move(made);
             next_post = 0;
             placement.clear();
@@ -436,8 +483,12 @@ namespace ReplayRecorder {
             LogLine(
                 Log::Log, std::format(
                               "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once, then {} placement messages; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
-                              connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.placed, plan.posts.size(), plan.keyframe_records,
-                              plan.first_record, plan.end_record, plan.duration_ms, plan.controlled_agent, changes
+                              !connection_open         ? "the replay's first load"
+                              : still == Still::Wanted ? "a load while observing into another chapter of the map shown, behind its last picture"
+                              : LoadingFrameFade_Func  ? "a load while observing into another map, its loading screen ended at the reporter"
+                                                       : "a load while observing",
+                              plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.placed, plan.posts.size(), plan.keyframe_records, plan.first_record, plan.end_record, plan.duration_ms,
+                              plan.controlled_agent, changes
                           )
             );
             LogLine(Log::Log, std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, JoinedMap(), static_cast<uint32_t>(GW::Map::GetMapID())));
@@ -483,6 +534,33 @@ namespace ReplayRecorder {
                                       return sum + post.records;
                                   })
                               )
+                );
+                return false;
+            }
+            // Back in the chapter played: every agent removed by its 33, the clock set by 31, the keyframe fed again; the map and the game view kept (replay_check --seek).
+            if (ReplayWire::RewindsInPlace(plan, static_cast<uint32_t>(played_ms), made)) {
+                const auto from_ms = plan.start_ms + static_cast<uint32_t>(played_ms);
+                const auto rewind = ReplayWire::RewindPosts(replay, plan, static_cast<uint32_t>(played_ms), made);
+                for (const auto& post : rewind) {
+                    PostData(post.bytes);
+                }
+                plan = std::move(made);
+                next_post = static_cast<size_t>(std::ranges::find(plan.posts, ReplayWire::Stage::Stream, &ReplayWire::Post::stage) - plan.posts.begin());
+                played_ms = std::min(plan.seek_ms, plan.duration_ms);
+                followed_agent = plan.controlled_agent;
+                last_target = 0;
+                LogLine(
+                    Log::Log,
+                    std::format(
+                        "seek to {} ms: a rewind in place from {} ms in chapter {}, no load: {} messages (the 33s, 31, keyframe {} fed again), then the stream to the time and {} placement messages", plan.start_ms + plan.seek_ms, from_ms, plan.chapter + 1,
+                        std::accumulate(
+                            rewind.begin(), rewind.end(), size_t{0},
+                            [](const size_t sum, const ReplayWire::Post& post) {
+                                return sum + post.records;
+                            }
+                        ),
+                        plan.keyframe + 1, plan.placed
+                    )
                 );
                 return false;
             }
@@ -602,12 +680,12 @@ namespace ReplayRecorder {
             void** original;
         };
 
-        // Every hook but the agents' clock is required: ArmPlayback finds them first.
+        // Every hook but the agents' clock and the loading frame's fade is required: ArmPlayback finds them first.
         const PlaybackHook playback_hooks[] = {
             {reinterpret_cast<void**>(&GameConnect_Func), OnGameConnect, reinterpret_cast<void**>(&GameConnect_Ret)},          {reinterpret_cast<void**>(&Goodbye_Func), OnGoodbye, reinterpret_cast<void**>(&Goodbye_Ret)},
             {reinterpret_cast<void**>(&InstanceAck_Func), OnInstanceAck, reinterpret_cast<void**>(&InstanceAck_Ret)},          {reinterpret_cast<void**>(&MapLoaded_Func), OnMapLoaded, reinterpret_cast<void**>(&MapLoaded_Ret)},
             {reinterpret_cast<void**>(&WorldMapToggle_Func), OnWorldMapToggle, reinterpret_cast<void**>(&WorldMapToggle_Ret)}, {reinterpret_cast<void**>(&MissionMapCreate_Func), OnMissionMapCreate, reinterpret_cast<void**>(&MissionMapCreate_Ret)},
-            {reinterpret_cast<void**>(&AgentAdvance_Func), OnAgentAdvance, reinterpret_cast<void**>(&AgentAdvance_Ret)},
+            {reinterpret_cast<void**>(&AgentAdvance_Func), OnAgentAdvance, reinterpret_cast<void**>(&AgentAdvance_Ret)},       {reinterpret_cast<void**>(&LoadingFrameFade_Func), OnLoadingFrameFade, reinterpret_cast<void**>(&LoadingFrameFade_Ret)},
         };
 
     } // namespace
@@ -650,6 +728,8 @@ namespace ReplayRecorder {
         const auto mission_map_create = find("\x55\x8B\xEC\x83\xEC\x24\x56\x57\x8B\xF9\x6A\x04\xFF\x37\xE8\x00\x00\x00\x00\x6A\x00\x50\xE8", "xxxxxxxxxxxxxxx????xxxx");
         const auto agent_advance = find("\x55\x8B\xEC\x83\x7D\x08\x00\x7D\x00\x6A\x37\xBA\x00\x00\x00\x00\xB9\x00\x00\x00\x00\xE8", "xxxxxxxx?xxx????x????x");
         const auto observe_agent = find("\x55\x8B\xEC\xE8\x00\x00\x00\x00\xFF\x75\x08\x8B\x48\x2C\x81\xC1\x44\x06\x00\x00\xE8\x00\x00\x00\x00\x83\x7D\x0C\x00", "xxxx????xxxxxxxxxxxxx????xxxx");
+        // The loading frame's 0x56: its flags at +1, the frame it fades pushed at +0x2b (FrameFade's first argument).
+        const auto loading_frame_fade = find("\xA1\x00\x00\x00\x00\x83\xC8\x02\xA3\x00\x00\x00\x00\xA8\x01\x74\x00\xD9\x05\x00\x00\x00\x00\x6A\x01", "x????xxxx????xxx?xx????xx");
         const std::pair<const char*, bool> checks[] = {
             {"the game connect", game_connect != 0},
             {"the game connection's goodbye", goodbye != 0},
@@ -680,6 +760,11 @@ namespace ReplayRecorder {
         WorldMapToggle_Func = reinterpret_cast<WorldMapToggle_pt>(world_map_toggle);
         MissionMapCreate_Func = reinterpret_cast<MissionMapCreate_pt>(mission_map_create);
         AgentAdvance_Func = reinterpret_cast<AgentAdvance_pt>(agent_advance);
+        if (loading_frame_fade && !memcmp(reinterpret_cast<const void*>(loading_frame_fade + 0x2B), "\xFF\x35", 2)) {
+            LoadingFrameFade_Func = reinterpret_cast<LoadingFrameFade_pt>(loading_frame_fade);
+            loading_frame_flags = *reinterpret_cast<const uint32_t**>(loading_frame_fade + 1);
+            loading_frame_id = *reinterpret_cast<const uint32_t**>(loading_frame_fade + 0x2D);
+        }
         if (std::ranges::any_of(playback_hooks, [](const PlaybackHook& hook) {
                 return *hook.target && GW::Hook::CreateHook(hook.target, hook.detour, hook.original) != 0;
             })) {
@@ -702,8 +787,8 @@ namespace ReplayRecorder {
         viewpoint_available = !*follow_missing;
         playback_armed = true;
         return std::format(
-            "Ready: Observe on one of your recordings plays it{}{}", viewpoint_available ? "" : std::format(" (following other agents is not available: {})", follow_missing),
-            AgentAdvance_Func ? "" : " (pause and speeds run on the toolbox's clock: the agents' clock is not found in this client)"
+            "Ready: Observe on one of your recordings plays it{}{}{}", viewpoint_available ? "" : std::format(" (following other agents is not available: {})", follow_missing),
+            AgentAdvance_Func ? "" : " (pause and speeds run on the toolbox's clock: the agents' clock is not found in this client)", LoadingFrameFade_Func ? "" : " (its loads fade out as the game's: the loading frame's fade is not found in this client)"
         );
     }
 
@@ -712,11 +797,23 @@ namespace ReplayRecorder {
         const auto now = Clock::now();
         const auto waited = now - stage_since;
         const auto stop = playback_stop_requested || !settings.play_from_observe_window || !settings.list_in_observe_window;
+        if (const auto frame_id = std::exchange(loading_frame_ending, 0); frame_id && frame_id == *loading_frame_id) {
+            GW::UI::DestroyUIComponent(GW::UI::GetFrameById(frame_id));
+            LogLine(Log::Log, "the loading frame ended at the reporter (the game fades it over 1.5 s)");
+        }
+        // The last picture stays until the game view is back (the loading frame gone) and goes on a lost device.
+        const auto device = GW::Render::GetDevice();
+        if (still == Still::Shown && ((playback == Playback::Playing && !*loading_frame_id) || !device || device->TestCooperativeLevel() != D3D_OK)) {
+            still = Still::None;
+        }
         switch (playback.load()) {
             case Playback::Off:
                 return;
             case Playback::Transfer: {
                 const auto flags = MissionFlags();
+                if (still == Still::Wanted && waited < picture_wait) {
+                    return;
+                }
                 if (transfer_due) {
                     // The 422 handler only keeps a transfer while a join is pending (+0x190 & 0x20) and runs it when that join ends (event 0x1e, MsCliGame.cpp).
                     if (flags & (join_pending | transfer_kept)) {
@@ -784,14 +881,11 @@ namespace ReplayRecorder {
                     played_ms = std::min(played_ms + elapsed * playback_speed, static_cast<double>(plan.duration_ms));
                 }
                 for (; next_post < plan.posts.size() && plan.posts[next_post].time_ms <= played_ms; next_post++) {
-                    auto bytes = plan.posts[next_post].bytes;
-                    send_cipher.Apply(bytes.data(), bytes.size());
-                    PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
+                    PostData(plan.posts[next_post].bytes);
                 }
                 // An in-place seek's placement goes after the stream to its time.
                 for (auto& post : std::exchange(placement, {})) {
-                    send_cipher.Apply(post.bytes.data(), post.bytes.size());
-                    PostNetEvent(net_event_data, replay_connection_id, post.bytes.data(), post.bytes.size());
+                    PostData(std::move(post.bytes));
                 }
                 if (next_post == plan.posts.size() && !playback_ended) {
                     if (auto next = plan.chapter + 1 < replay.chapters.size() ? ReplayWire::MakeSeekPlan(replay, replay.chapters[plan.chapter + 1].time_ms) : ReplayWire::Plan{}; next.error.empty() && next.chapter > plan.chapter) {
@@ -939,6 +1033,54 @@ bool* ReplayRecorderModule::FollowSelectedAgent()
     return &settings.follow_selected_agent;
 }
 
+void ReplayRecorderModule::Draw(IDirect3DDevice9* device)
+{
+    if (still == Still::Wanted && !last_picture) {
+        // The game's frame before the 422 (the toolbox draws after this): copied out of a multisampled back buffer through a plain one, into a texture a device reset keeps.
+        IDirect3DSurface9* back_buffer = nullptr;
+        IDirect3DSurface9* resolved = nullptr;
+        IDirect3DSurface9* system = nullptr;
+        D3DSURFACE_DESC desc{};
+        auto copied = SUCCEEDED(device->GetRenderTarget(0, &back_buffer)) && SUCCEEDED(back_buffer->GetDesc(&desc));
+        if (copied && desc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+            copied = SUCCEEDED(device->CreateRenderTarget(desc.Width, desc.Height, desc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &resolved, nullptr)) && SUCCEEDED(device->StretchRect(back_buffer, nullptr, resolved, nullptr, D3DTEXF_NONE));
+        }
+        copied = copied && SUCCEEDED(device->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &system, nullptr)) && SUCCEEDED(device->GetRenderTargetData(resolved ? resolved : back_buffer, system)) &&
+                 SUCCEEDED(device->CreateTexture(desc.Width, desc.Height, 1, 0, desc.Format, D3DPOOL_MANAGED, &last_picture, nullptr));
+        D3DLOCKED_RECT from{};
+        D3DLOCKED_RECT to{};
+        if (copied && SUCCEEDED(system->LockRect(&from, nullptr, D3DLOCK_READONLY))) {
+            if (SUCCEEDED(last_picture->LockRect(0, &to, nullptr, 0))) {
+                for (UINT row = 0; row < desc.Height; row++) {
+                    memcpy(static_cast<uint8_t*>(to.pBits) + row * to.Pitch, static_cast<const uint8_t*>(from.pBits) + row * from.Pitch, std::min(from.Pitch, to.Pitch));
+                }
+                last_picture->UnlockRect(0);
+                last_picture_size = {static_cast<float>(desc.Width), static_cast<float>(desc.Height)};
+                still = Still::Shown;
+            }
+            system->UnlockRect();
+        }
+        for (const auto surface : {back_buffer, resolved, system}) {
+            if (surface) {
+                surface->Release();
+            }
+        }
+        LogLine(Log::Log, still == Still::Shown ? "the last picture copied: the load goes behind it" : "the last picture could not be copied: the load shows its loading screen");
+        if (still != Still::Shown) {
+            still = Still::None;
+        }
+    }
+    const auto& display = ImGui::GetIO().DisplaySize;
+    if (last_picture && (still != Still::Shown || display.x != last_picture_size.x || display.y != last_picture_size.y)) {
+        last_picture->Release();
+        last_picture = nullptr;
+        still = Still::None;
+    }
+    if (last_picture) {
+        ImGui::GetBackgroundDrawList()->AddImage(last_picture, {0.f, 0.f}, display);
+    }
+}
+
 bool ReplayRecorderModule::CanTerminate()
 {
     return playback == Playback::Off;
@@ -957,4 +1099,8 @@ void ReplayRecorderModule::Terminate()
         ObserveGame_Func = nullptr;
     }
     observe_applied = false;
+    if (last_picture) {
+        last_picture->Release();
+        last_picture = nullptr;
+    }
 }

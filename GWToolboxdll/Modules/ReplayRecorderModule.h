@@ -68,6 +68,7 @@ public:
     bool CanTerminate() override;
     void Terminate() override;
     void Update(float) override;
+    void Draw(IDirect3DDevice9* device) override;
     void LoadSettings(SettingsDoc& doc, ToolboxIni* legacy) override;
     void SaveSettings(SettingsDoc& doc) override;
     void DrawSettingsInternal() override;
