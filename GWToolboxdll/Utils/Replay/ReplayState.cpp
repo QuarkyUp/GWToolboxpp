@@ -1302,6 +1302,13 @@ namespace ReplayState {
             case CharMapInitStart:
                 map_init = {message};
                 return;
+            case GAME_SMSG_PARTY_LOCK:
+                // With f0 0 the party table's lock is cleared (PyCliParty.cpp): a load's own state, nothing kept.
+                if (!message.U(0)) {
+                    instance.erase({message.id});
+                    return;
+                }
+                break;
             case GAME_SMSG_CARTOGRAPHY_DATA:
                 if (!map_init.empty()) {
                     map_init.push_back(message);
@@ -1353,7 +1360,17 @@ namespace ReplayState {
             return;
         }
         if (Contains(item_ids, message.id)) {
-            items[message.U(0)][message.id] = message;
+            auto& item = items[message.U(0)];
+            // 354 frees the item before reporting it as 353 does (ItemCliOnReportDetailAllReset); 353's AddDetailLow unassigns it and sets its profession to any (11).
+            if (message.id == GAME_SMSG_ITEM_REUSE_ID) {
+                item.clear();
+            }
+            else if (message.id == GAME_SMSG_ITEM_GENERAL_INFO) {
+                for (const auto replaced : std::initializer_list<uint16_t>{GAME_SMSG_ITEM_REUSE_ID, ItemProfession, GAME_SMSG_ITEM_UPDATE_OWNER}) {
+                    item.erase(replaced);
+                }
+            }
+            item[message.id] = message;
             return;
         }
         if (const auto key = InstanceKey(message); !key.empty()) {

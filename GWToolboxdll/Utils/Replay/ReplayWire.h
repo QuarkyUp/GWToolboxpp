@@ -74,6 +74,9 @@ namespace ReplayWire {
     Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe);
     Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms);
     bool SeeksInPlace(const Plan& playing, uint32_t played_ms, const Plan& sought);
+    bool RewindsInPlace(const Plan& playing, uint32_t played_ms, const Plan& sought);
+    std::vector<ReplayState::Message> Rewind(const ReplayFile::Contents& contents, const Plan& playing, uint32_t played_ms, const Plan& sought);
+    std::vector<Post> RewindPosts(const ReplayFile::Contents& contents, const Plan& playing, uint32_t played_ms, const Plan& sought);
     std::vector<ReplayState::Message> Placement(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
     std::vector<Post> PlacementPosts(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
 } // namespace ReplayWire

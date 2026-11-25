@@ -26,6 +26,10 @@ namespace {
     using namespace ReplayMessages;
 
     constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, GAME_SMSG_AGENT_UPDATE_ATTRIBUTE, GAME_SMSG_PLAYER_UPDATE_PROFESSION};
+    constexpr uint16_t agent_row_ids[] = {GAME_SMSG_AGENT_UPDATE_SCALE,           GAME_SMSG_AGENT_UPDATE_NPC_NAME,   GAME_SMSG_AGENT_ATTR_UPDATE_INT,
+                                          GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, GAME_SMSG_AGENT_UPDATE_PROFESSION, GAME_SMSG_AGENT_CREATE_NPC,
+                                          GAME_SMSG_AGENT_INITIAL_EFFECTS,        GAME_SMSG_AGENT_UPDATE_EFFECTS,    CharAgentMorale,
+                                          GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT};
     constexpr std::wstring_view numbered_placeholders[] = {L"Player ", L"Mercenary ", L"Guild ", L"G"};
 
     struct OrderFailure {
@@ -1787,6 +1791,9 @@ namespace {
         size_t refused = 0;
         size_t failed = 0;
         size_t in_place = 0;
+        size_t rewinds = 0;
+        size_t rewind_kept = 0;
+        size_t rewind_props = 0;
         size_t most_records = 0;
         size_t most_bytes = 0;
         size_t placed = 0;
@@ -1999,9 +2006,138 @@ namespace {
                     }
                 }
             }
+            // Back from a later time of the chapter played, the module rewinds in place (ReplayWire::RewindsInPlace), Restart into the chapter played among them.
+            std::map<uint32_t, std::pair<ReplayWire::Plan, std::vector<ReplayState::Message>>> loads;
+            for (const auto time_ms : times) {
+                if (auto sought = ReplayWire::MakeSeekPlan(contents, time_ms); sought.error.empty() && sought.chapter == chapter) {
+                    ReplayState::World loaded(contents.table);
+                    for (const auto& message : Fed(contents, sought, sought.seek_ms)) {
+                        loaded.Apply(message);
+                    }
+                    loads.emplace(time_ms, std::pair{std::move(sought), loaded.Join()});
+                }
+            }
+            size_t rewinds = 0;
+            size_t rewinds_differing = 0;
+            for (const auto& [k, from] : playing) {
+                for (const auto later_ms : times) {
+                    if (later_ms < from.start_ms) {
+                        continue;
+                    }
+                    const auto played_ms = std::min(later_ms - from.start_ms, from.duration_ms);
+                    const auto before = Fed(contents, from, played_ms);
+                    ReplayState::ClientAgents client;
+                    ReplayState::World played(contents.table);
+                    for (const auto& message : before) {
+                        client.Breaks(message);
+                        played.Apply(message);
+                    }
+                    for (const auto& [time_ms, load] : loads) {
+                        const auto& [sought, loaded] = load;
+                        if (!ReplayWire::RewindsInPlace(from, played_ms, sought)) {
+                            continue;
+                        }
+                        rewinds++;
+                        const auto what = std::format("a rewind to {} ms from keyframe {} played to {} ms", time_ms, k + 1, from.start_ms + played_ms);
+                        const auto rewind = ReplayWire::Rewind(contents, from, played_ms, sought);
+                        const auto connect = std::ranges::find(rewind, GAME_SMSG_AGENT_INSTANCE_TIMER, &ReplayState::Message::id);
+                        std::set<uint32_t> destroyed;
+                        for (auto message = rewind.begin(); message != connect; ++message) {
+                            if (message->id != GAME_SMSG_AGENT_DESPAWNED) {
+                                fail(std::format("{}: message {} comes before its 31, where only 33s go", what, message->id));
+                            }
+                            destroyed.insert(message->U(0));
+                        }
+                        if (connect == rewind.end()) {
+                            fail(std::format("{}: no 31", what));
+                        }
+                        // The client asserts a 33's agent (AgMsg.cpp:316) and a 32's absence (AgAgent.cpp:162): a 33 for each agent it holds, none for another.
+                        if (destroyed != client.Created()) {
+                            fail(std::format("{}: 33s for {} agents, the client holds {}", what, destroyed.size(), client.Created().size()));
+                        }
+                        for (const auto& message : rewind) {
+                            if (std::ranges::contains(std::initializer_list<uint16_t>{CharAccountNameData, MissionTeam, GAME_SMSG_ITEM_STREAM_CREATE}, message.id) ||
+                                (message.id >= GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT && message.id <= GAME_SMSG_INSTANCE_LOAD_INFO)) {
+                                fail(std::format("{}: it feeds message {}, which a rewind leaves out", what, message.id));
+                            }
+                            if (message.id == GAME_SMSG_AGENT_SET_PLAYER && message.U(1) & 2) {
+                                fail(std::format("{}: its 34 asks for a game view, which asserts while one is up (UiGame.cpp:497)", what));
+                            }
+                        }
+                        if (rewind != ReplayWire::Rewind(contents, from, played_ms, sought)) {
+                            fail(std::format("{}: not the same twice", what));
+                        }
+                        auto fed = before;
+                        fed.insert(fed.end(), rewind.begin(), rewind.end());
+                        const auto stream = Fed(contents, sought, sought.seek_ms);
+                        fed.insert(fed.end(), stream.begin() + static_cast<std::ptrdiff_t>(JoinMessages(sought)), stream.end());
+                        for (const auto& need : CheckClientNeeds(fed)) {
+                            fail(std::format("{}, what the client needs: {}", what, need));
+                        }
+                        auto state = played;
+                        for (auto message = fed.begin() + static_cast<std::ptrdiff_t>(before.size()); message != fed.end(); ++message) {
+                            state.Apply(*message);
+                        }
+                        auto built = state.Join();
+                        std::set<std::vector<uint32_t>> loaded_identities;
+                        for (const auto& message : loaded) {
+                            loaded_identities.insert(ReplayState::Identity(message));
+                        }
+                        std::set<uint32_t> created;
+                        for (const auto& message : built) {
+                            if (message.id == GAME_SMSG_AGENT_SPAWNED) {
+                                created.insert(message.U(0));
+                            }
+                        }
+                        // Only the teardown empties the NPC and gadget class tables and an agent's rows never made (its 33 asserts, AgMsg.cpp:316); 360 keeps nothing (f09).
+                        const auto kept = std::erase_if(built, [&](const ReplayState::Message& message) {
+                            const auto identity = ReplayState::Identity(message);
+                            const auto defined = message.id == GAME_SMSG_NPC_UPDATE_PROPERTIES || message.id == GAME_SMSG_NPC_UPDATE_MODEL || message.id == GadgetClassDefine || message.id == ItemToClient360;
+                            const auto row = std::ranges::contains(agent_row_ids, message.id) && identity.size() > 1 && !created.contains(identity[1]);
+                            return (defined || row) && !loaded_identities.contains(identity);
+                        });
+                        // A prop's animation (270) and layers (273) have no way back to the map's default but its load: they stay until the stream sets them.
+                        const auto props = std::erase_if(built, [&](const ReplayState::Message& message) {
+                            return (message.id == GAME_SMSG_MANIPULATE_MAP_OBJECT || message.id == GAME_SMSG_MANIPULATE_MAP_OBJECT2) && !loaded_identities.contains(ReplayState::Identity(message));
+                        });
+                        proof.rewind_kept += kept;
+                        proof.rewind_props += props;
+                        // 34's bit 1 asks for a game view, not state; 406's spawn, plane, facing and server time (the instance's age) stay the played load's: 406 loads the map.
+                        auto expected = loaded;
+                        for (auto* side : {&expected, &built}) {
+                            for (auto& message : *side) {
+                                if (message.id == GAME_SMSG_AGENT_SET_PLAYER) {
+                                    message.Set(1, message.U(1) & ~2u);
+                                }
+                                if (message.id == GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT) {
+                                    for (const auto field : {1, 2, 3, 5}) {
+                                        message.fields[field] = {};
+                                    }
+                                }
+                            }
+                        }
+                        const auto differences = Compare(expected, built);
+                        if (std::ranges::any_of(differences | std::views::values, &Difference::Differs)) {
+                            rewinds_differing++;
+                            if (verbose && rewinds_differing < 4) {
+                                PrintComparison(differences, {});
+                            }
+                            fail(std::format("{}: its state is not the one the same keyframe loaded gives", what));
+                        }
+                    }
+                }
+                for (size_t other = 0; other < contents.chapters.size(); other++) {
+                    if (const auto elsewhere = ReplayWire::MakeSeekPlan(contents, contents.chapters[other].time_ms);
+                        other != chapter && elsewhere.error.empty() && elsewhere.chapter != chapter && (ReplayWire::SeeksInPlace(from, 0, elsewhere) || ReplayWire::RewindsInPlace(from, from.duration_ms, elsewhere))) {
+                        fail(std::format("a seek from keyframe {} into chapter {} is planned with no load", k + 1, elsewhere.chapter + 1));
+                    }
+                }
+            }
             proof.in_place += in_place;
+            proof.rewinds += rewinds;
             if (verbose) {
                 printf("chapter %zu: %zu seeks in place (forward from an earlier keyframe, no load), %zu of them not the whole stream's state\n", chapter + 1, in_place, in_place_differing);
+                printf("chapter %zu: %zu rewinds in place (back from a later time, no load), %zu of them not the state the same keyframe loaded gives\n", chapter + 1, rewinds, rewinds_differing);
             }
         }
         if (verbose) {
@@ -2010,8 +2146,8 @@ namespace {
                 proof.placed, proof.placed_apart, contents.motions.empty() ? "no samples: orders-only estimates from different keyframes" : "a failure each", ErrorSummary(proof.sampled_errors).c_str(), ErrorSummary(proof.orders_errors).c_str()
             );
             printf(
-                "seek: %zu seeks, %zu refused (each with its reason), %zu in place; the most an in-place seek posts at once: %zu stream records, %zu bytes; %zu failures: %s\n", proof.seeks, proof.refused, proof.in_place, proof.most_records,
-                proof.most_bytes, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed"
+                "seek: %zu seeks, %zu refused (each with its reason), %zu in place, %zu rewinds in place (%zu NPC and gadget class definitions and rows of agents never made kept by the client's tables, which a load empties; %zu props' states set after the time; the instance's age the played load's); the most an in-place seek posts at once: %zu stream records, %zu bytes; %zu failures: %s\n",
+                proof.seeks, proof.refused, proof.in_place, proof.rewinds, proof.rewind_kept, proof.rewind_props, proof.most_records, proof.most_bytes, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed"
             );
         }
         return proof;

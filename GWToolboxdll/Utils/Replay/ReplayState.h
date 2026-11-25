@@ -62,6 +62,7 @@ namespace ReplayState {
     class ClientAgents {
     public:
         std::string Breaks(const Message& message);
+        [[nodiscard]] const std::set<uint32_t>& Created() const { return created; }
 
     private:
         std::set<uint32_t> created;

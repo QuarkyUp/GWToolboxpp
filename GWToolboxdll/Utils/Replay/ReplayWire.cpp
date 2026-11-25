@@ -18,6 +18,23 @@ namespace ReplayWire {
 
         constexpr size_t instance_info_map_type = 2;
         constexpr size_t instance_info_observer = 5;
+        // A second one asserts (48 ChCliApi.cpp:385, 430 MsnTeam.cpp:105, 324 ItCliApi.cpp:2010) or is the instance's load, which a rewind keeps.
+        constexpr uint16_t rewind_left_out[] = {
+            CharAccountNameData,
+            MissionTeam,
+            GAME_SMSG_ITEM_STREAM_CREATE,
+            GAME_SMSG_INSTANCE_LOAD_HEAD,
+            GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME,
+            MissionConfigEnd,
+            GAME_SMSG_READY_FOR_MAP_SPAWN,
+            GAME_SMSG_MISSION_STREAM_START,
+            GAME_SMSG_INSTANCE_LOAD_FINISH,
+            GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT,
+            MissionManifestChunk,
+            MissionManifestComplete,
+            MissionManifestPhase,
+            GAME_SMSG_INSTANCE_LOAD_INFO
+        };
         constexpr uint16_t item_detail_ids[] = {GAME_SMSG_ITEM_UPDATE_OWNER, GAME_SMSG_ITEM_UPDATE_QUANTITY, GAME_SMSG_ITEM_UPDATE_NAME, ItemProfession, ItemReportDetailLow, GAME_SMSG_ITEM_GENERAL_INFO, GAME_SMSG_ITEM_REUSE_ID};
 
         void Append(std::vector<Post>& posts, const Stage stage, const uint32_t time_ms, const std::vector<uint8_t>& body)
@@ -269,6 +286,134 @@ namespace ReplayWire {
     bool SeeksInPlace(const Plan& playing, const uint32_t played_ms, const Plan& sought)
     {
         return sought.chapter == playing.chapter && sought.end_record == playing.end_record && sought.start_ms + sought.seek_ms >= playing.start_ms + played_ms;
+    }
+
+    bool RewindsInPlace(const Plan& playing, const uint32_t played_ms, const Plan& sought)
+    {
+        return sought.chapter == playing.chapter && sought.end_record == playing.end_record && sought.start_ms + sought.seek_ms < playing.start_ms + played_ms;
+    }
+
+    std::vector<ReplayState::Message> Rewind(const ReplayFile::Contents& contents, const Plan& playing, const uint32_t played_ms, const Plan& sought)
+    {
+        constexpr uint32_t reporter_game_view = 2;
+        constexpr size_t buff_added_field = 3;
+        ReplayState::ClientAgents held;
+        std::set<uint32_t> quests;
+        std::set<std::pair<uint32_t, uint32_t>> effects;
+        std::set<std::pair<uint32_t, uint32_t>> upkeeps;
+        bool party_locked = false;
+        const auto hold = [&](const std::vector<uint8_t>& body) {
+            ReplayState::Message message;
+            if (!ReplayState::Decode(contents.table, body, message)) {
+                return;
+            }
+            held.Breaks(message);
+            switch (message.id) {
+                case GAME_SMSG_QUEST_ADD:
+                case GAME_SMSG_QUEST_GENERAL_INFO:
+                    quests.insert(message.U(0));
+                    break;
+                case GAME_SMSG_QUEST_REMOVE:
+                    quests.erase(message.U(0));
+                    break;
+                case GAME_SMSG_EFFECT_APPLIED:
+                    effects.insert({message.U(0), message.U(buff_added_field)});
+                    break;
+                case GAME_SMSG_EFFECT_REMOVED:
+                    effects.erase({message.U(0), message.U(1)});
+                    break;
+                case GAME_SMSG_EFFECT_UPKEEP_ADDED:
+                case GAME_SMSG_EFFECT_UPKEEP_APPLIED:
+                    upkeeps.insert({message.U(0), message.U(buff_added_field)});
+                    break;
+                case GAME_SMSG_EFFECT_UPKEEP_REMOVED:
+                    upkeeps.erase({message.U(0), message.U(1)});
+                    break;
+                case GAME_SMSG_PARTY_LOCK:
+                    party_locked = message.U(0) != 0;
+                    break;
+                default:
+                    break;
+            }
+        };
+        for (const auto& record : contents.keyframes[playing.keyframe].records) {
+            hold(record.body);
+        }
+        for (const auto index : playing.stream_records) {
+            if (contents.records[index].time_ms > playing.start_ms + played_ms) {
+                break;
+            }
+            hold(contents.records[index].body);
+        }
+        std::vector<ReplayState::Message> rewind;
+        for (const auto agent : held.Created()) {
+            auto& destroy = rewind.emplace_back(ReplayState::Blank(contents.table, GAME_SMSG_AGENT_DESPAWNED));
+            destroy.Set(0, agent);
+        }
+        const auto& keyframe = contents.keyframes[sought.keyframe];
+        std::vector<ReplayState::Message> messages(keyframe.records.size());
+        for (size_t i = 0; i < messages.size(); i++) {
+            ReplayState::Decode(contents.table, keyframe.records[i].body, messages[i]);
+        }
+        const auto connect = std::find_if(std::ranges::find(messages, GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, &ReplayState::Message::id), messages.end(), [](const ReplayState::Message& kept) {
+            return kept.id == GAME_SMSG_AGENT_INSTANCE_TIMER;
+        });
+        if (connect == messages.end()) {
+            return {};
+        }
+        // The client's own way into a time with the map kept: every agent gone by its 33, the clock set by 31 (its notify queue empty), the keyframe fed again.
+        rewind.push_back(*connect);
+        // What the 33s leave in the char and party clients goes by the server's own removals, as a load's teardown frees it: a re-fed 66 for a held buff is ignored.
+        const auto remove = [&](const uint16_t id, const uint32_t first, const std::optional<uint32_t> second = std::nullopt) {
+            auto& removal = rewind.emplace_back(ReplayState::Blank(contents.table, id));
+            removal.Set(0, first);
+            if (second) {
+                removal.Set(1, *second);
+            }
+        };
+        for (const auto quest : quests) {
+            remove(GAME_SMSG_QUEST_REMOVE, quest);
+        }
+        for (const auto& [agent, effect] : effects) {
+            remove(GAME_SMSG_EFFECT_REMOVED, agent, effect);
+        }
+        for (const auto& [agent, upkeep] : upkeeps) {
+            remove(GAME_SMSG_EFFECT_UPKEEP_REMOVED, agent, upkeep);
+        }
+        if (party_locked) {
+            remove(GAME_SMSG_PARTY_LOCK, 0);
+        }
+        for (auto kept = messages.begin(); kept != messages.end(); ++kept) {
+            if (kept == connect || std::ranges::contains(rewind_left_out, kept->id)) {
+                continue;
+            }
+            rewind.push_back(*kept);
+            // A second 55 asserts (ChCliAttrib.cpp:369): the attribute state kept, its points given back by the messages that change them.
+            if (kept->id == CharAttributeState) {
+                rewind.back() = ReplayState::Blank(contents.table, CharAttribPointsAvail);
+                rewind.back().Set(0, kept->U(0));
+                rewind.back().Set(1, kept->U(1));
+                auto& total = rewind.emplace_back(ReplayState::Blank(contents.table, CharAttribPointsTotal));
+                total.Set(0, kept->U(0));
+                total.Set(1, kept->U(2));
+            }
+            // Bit 1 asks for a game view and asserts while one is up (IUi::OnAgentInitReporting, UiGame.cpp:497); bit 0 sets the controlled agent and the camera on it.
+            if (kept->id == GAME_SMSG_AGENT_SET_PLAYER) {
+                rewind.back().Set(1, kept->U(1) & ~reporter_game_view);
+            }
+        }
+        return rewind;
+    }
+
+    std::vector<Post> RewindPosts(const ReplayFile::Contents& contents, const Plan& playing, const uint32_t played_ms, const Plan& sought)
+    {
+        std::vector<Post> posts;
+        for (const auto& message : Rewind(contents, playing, played_ms, sought)) {
+            if (std::vector<uint8_t> body; ReplayState::Encode(contents.table, message, body)) {
+                Append(posts, Stage::Stream, 0, body);
+            }
+        }
+        return posts;
     }
 
     std::vector<ReplayState::Message> Placement(const ReplayFile::Contents& contents, const Plan& plan, const uint32_t played_ms)
