@@ -63,11 +63,12 @@ namespace ReplayState {
     private:
         std::set<uint32_t> created;
         std::set<uint32_t> attack_intervals;
+        std::set<uint32_t> gadget_classes;
     };
 
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
-    enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };
+    enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill, GadgetClass };
     const char* IdKindName(IdKind kind);
 
     struct IdField {

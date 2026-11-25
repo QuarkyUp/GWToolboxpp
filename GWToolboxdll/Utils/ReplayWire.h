@@ -71,5 +71,6 @@ namespace ReplayWire {
 
     Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe);
     Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms);
+    bool SeeksInPlace(const Plan& playing, uint32_t played_ms, const Plan& sought);
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 } // namespace ReplayWire

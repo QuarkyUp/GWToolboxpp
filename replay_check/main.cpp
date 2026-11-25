@@ -909,9 +909,11 @@ namespace {
         }
         std::map<uint32_t, Difference> differences;
         for (const auto& [identity, sides] : paired) {
+            // One-time notices (159 kind 22) and a look's notices (159 kinds 0, 14, 15; 160 kinds 14, 15) are compared apart from the other notices.
             constexpr uint32_t notice_message = 159;
-            constexpr uint32_t one_time_notice = 22;
-            auto& difference = differences[identity[0] == notice_message && identity.size() > 2 && identity[2] == one_time_notice ? notice_message | one_time_notice << 16 : identity[0]];
+            constexpr uint32_t slot_notice_message = 160;
+            const auto split = identity.size() > 2 && ((identity[0] == notice_message && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15, 22}, identity[2])) || (identity[0] == slot_notice_message && identity.size() > 3));
+            auto& difference = differences[split ? identity[0] | (identity[2] + 1) << 16 : identity[0]];
             const auto& [left, right] = sides;
             difference.expected += left.size();
             difference.actual += right.size();
@@ -962,7 +964,7 @@ namespace {
         {90, "a player removed during the load: the model holds the players present at its end"},
         {93, "chat: transient"},
         {94, "chat: transient"},
-        {159 | 22 << 16, "a notice of kind 22, once in all the loads at hand: a one-time event, not kept by the model"},
+        {159 | 23 << 16, "a notice of kind 22, once in all the loads at hand: a one-time event, not kept by the model"},
         {160, "integer value updates: transient, not kept by the model"},
         {241, "an agent's effects row: a 240 after it for the same agent replaces it, the model keeping the latest"},
         {314, "a bag's item: left out by the no-inventory rule"},
@@ -1011,7 +1013,7 @@ namespace {
         {141, "the mission map's points: the mission map stays closed in replays (6b, OnMissionMapCreate)"},
         {154, "an agent's scale: not read; models at their default size"},
         {155, {"an agent's name: GWCA's encoded name, not written when it is its NPC's own (the agent shows the NPC's name); rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10)", {1}}},
-        {159, "notices 30 (guild), 0, 14 and 15 are not read; one-time notices are not kept"},
+        {159, "notice 30 (guild) is not read; one-time notices are not kept"},
         {162, {"rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10); a periodic keyframe's values are the client's", {2}}},
         {166, "rows of agents not in the world (an outpost's heroes) are not written: outposts are not played (session 10)"},
         {170, "an ally added after the load: not read; missing from the party's allies until the stream's next 170"},
@@ -1037,7 +1039,7 @@ namespace {
         {408, "the manifest's hash: 0, as in gwlab's loads, which loaded (session 7)"},
         {409, "the manifest's phases: written as gwlab's loads have them, which loaded (session 7)"},
         {428, "not read: gwlab's map 779 load had 0 and loaded (session 7)"},
-        {159 | 22 << 16, "a one-time notice: not kept"},
+        {159 | 23 << 16, "a one-time notice: not kept"},
     };
 
     bool PrintComparison(const std::map<uint32_t, Difference>& differences, const std::map<uint32_t, Reason>& reasons)
@@ -1064,7 +1066,7 @@ namespace {
                                 });
             unlisted += !listed;
             printf(
-                "%6s %8zu %8zu %8zu %8zu %8zu %8zu %s; %s\n", (id >> 16 ? std::format("{}/{}", id & 0xFFFF, id >> 16) : std::format("{}", id)).c_str(), difference.expected, difference.actual, difference.equal, difference.repeated, difference.missing,
+                "%6s %8zu %8zu %8zu %8zu %8zu %8zu %s; %s\n", (id >> 16 ? std::format("{}/{}", id & 0xFFFF, (id >> 16) - 1) : std::format("{}", id)).c_str(), difference.expected, difference.actual, difference.equal, difference.repeated, difference.missing,
                 difference.extra, fields.empty() ? " none" : fields.c_str(),
                 listed                 ? why->second.why
                 : why == reasons.end() ? "NOT LISTED"
@@ -1516,6 +1518,9 @@ namespace {
         size_t seeks = 0;
         size_t refused = 0;
         size_t failed = 0;
+        size_t in_place = 0;
+        size_t most_records = 0;
+        size_t most_bytes = 0;
     };
 
     SeekProof ProveSeek(const ReplayFile::Contents& contents, const bool verbose)
@@ -1560,6 +1565,15 @@ namespace {
                 next_record = contents.keyframes[keyframes.front()].record_index;
             }
             std::map<size_t, ReplayFile::Keyframe> model_keyframes;
+            std::map<size_t, ReplayWire::Plan> playing;
+            for (const auto k : keyframes) {
+                if (auto plan = ReplayWire::MakeKeyframePlan(contents, contents.keyframes[k]); plan.error.empty() && plan.map_type == ReplayWire::game_map_type) {
+                    plan.keyframe = k;
+                    playing.emplace(k, std::move(plan));
+                }
+            }
+            size_t in_place = 0;
+            size_t in_place_differing = 0;
             auto at_keyframe = whole;
             auto keyframe_record = next_record;
             for (const auto k : keyframes) {
@@ -1633,10 +1647,53 @@ namespace {
                     }
                     fail(std::format("a seek to {} ms: its state built on the model's keyframe is not the whole stream's", time_ms));
                 }
+                // Forward from an earlier keyframe played, the module posts its stream to the time with no load (ReplayWire::SeeksInPlace).
+                for (const auto& [k, from] : playing) {
+                    if (k == plan.keyframe || !ReplayWire::SeeksInPlace(from, 0, plan)) {
+                        continue;
+                    }
+                    in_place++;
+                    const auto played_ms = std::min(target_ms - from.start_ms, from.duration_ms);
+                    const auto from_fed = Fed(contents, from, played_ms);
+                    for (const auto& failure : ReplayState::CheckOrder(contents.table, from_fed)) {
+                        fail(std::format("a seek to {} ms in place from keyframe {}, the order of real loads: {}", time_ms, k + 1, ReplayState::Describe(failure)));
+                    }
+                    for (const auto& need : ReplayState::CheckClientNeeds(from_fed)) {
+                        fail(std::format("a seek to {} ms in place from keyframe {}, what the client needs: {}", time_ms, k + 1, need));
+                    }
+                    const auto posted = std::accumulate(from.posts.begin(), from.posts.end(), std::pair<size_t, size_t>{}, [&](std::pair<size_t, size_t> sum, const ReplayWire::Post& post) {
+                        if (post.stage == ReplayWire::Stage::Stream && post.time_ms <= played_ms) {
+                            sum.first += post.records;
+                            sum.second += post.bytes.size();
+                        }
+                        return sum;
+                    });
+                    proof.most_records = std::max(proof.most_records, posted.first);
+                    proof.most_bytes = std::max(proof.most_bytes, posted.second);
+                    ReplayState::World in_place_state(contents.table);
+                    for (const auto& message : Fed(contents, ReplayWire::MakeKeyframePlan(contents, model_keyframes.at(k)), played_ms)) {
+                        in_place_state.Apply(message);
+                    }
+                    const auto in_place_differences = Compare(expected, in_place_state.Join());
+                    if (std::ranges::any_of(in_place_differences | std::views::values, &Difference::Differs)) {
+                        in_place_differing++;
+                        if (verbose) {
+                            PrintComparison(in_place_differences, {});
+                        }
+                        fail(std::format("a seek to {} ms in place from keyframe {}: its state built on the model's keyframe is not the whole stream's", time_ms, k + 1));
+                    }
+                }
+            }
+            proof.in_place += in_place;
+            if (verbose) {
+                printf("chapter %zu: %zu seeks in place (forward from an earlier keyframe, no load), %zu of them not the whole stream's state\n", chapter + 1, in_place, in_place_differing);
             }
         }
         if (verbose) {
-            printf("seek: %zu seeks, %zu refused (each with its reason), %zu failures: %s\n", proof.seeks, proof.refused, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed");
+            printf(
+                "seek: %zu seeks, %zu refused (each with its reason), %zu in place; the most an in-place seek posts at once: %zu stream records, %zu bytes; %zu failures: %s\n", proof.seeks, proof.refused, proof.in_place, proof.most_records,
+                proof.most_bytes, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed"
+            );
         }
         return proof;
     }
@@ -2294,8 +2351,103 @@ namespace {
             taken && brought_plan.error.empty() && std::ranges::count(brought_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckOrder(v2.table, Fed(v2, brought_plan)).empty(),
             std::format("a record showing an item the keyframe lacks gets the item's details from the stream before the keyframe (item {})", taken).c_str()
         );
+        const auto insert = [](ReplayFile::Contents& contents, const size_t at, const uint16_t id, const std::vector<uint32_t>& values) {
+            auto message = ReplayState::Blank(contents.table, id);
+            size_t field = 0;
+            for (const auto value : values) {
+                message.Set(field++, value);
+            }
+            std::vector<uint8_t> body;
+            ReplayState::Encode(contents.table, message, body);
+            contents.records.insert(contents.records.begin() + static_cast<std::ptrdiff_t>(at), {contents.records[at].time_ms, std::move(body)});
+            for (auto& chapter : contents.chapters) {
+                chapter.first_record += chapter.first_record > at;
+            }
+            for (auto& keyframe : contents.keyframes) {
+                keyframe.record_index += keyframe.record_index >= at;
+            }
+        };
+        constexpr uint32_t gadget_agent = 9001;
+        constexpr uint32_t gadget_class = 901;
+        auto gadget = v2;
+        insert(gadget, gadget.keyframes[1].record_index, 263, {gadget_class, 0x1234, 0, 100});
+        insert(gadget, gadget.keyframes[1].record_index, 32, {gadget_agent, gadget_class, 2, 1});
+        insert(gadget, gadget.keyframes[1].record_index + 3, 33, {gadget_agent});
+        insert(gadget, gadget.keyframes[1].record_index + 4, 32, {gadget_agent, gadget_class, 2, 1});
+        const auto gadget_plan = ReplayWire::MakeKeyframePlan(gadget, gadget.keyframes[1]);
+        auto as_session_8 = Decoded(gadget.table, gadget.keyframes[1].records);
+        for (auto i = gadget.keyframes[1].record_index; i < gadget.ChapterEnd(0); i++) {
+            if (ReplayState::Message message; ReplayState::Decode(gadget.table, gadget.records[i].body, message)) {
+                as_session_8.push_back(message);
+            }
+        }
+        const auto gadget_needs = ReplayState::CheckClientNeeds(as_session_8);
+        Check(
+            gadget_plan.error.empty() && std::ranges::count(gadget_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckClientNeeds(Fed(gadget, gadget_plan)).empty() &&
+                std::ranges::any_of(
+                    gadget_needs,
+                    [named = std::format("agent {} is a gadget of class {} that no 263 defined", gadget_agent, gadget_class)](const std::string& need) {
+                        return need.contains(named) && need.contains("File.cpp:367");
+                    }
+                ),
+            "a gadget created again after a keyframe gets its class's 263 from the stream before it; fed as session 8's plan fed it (no 263), it fails the check by record, agent and class"
+        );
+        auto no_class = gadget;
+        const auto class_at = gadget.keyframes[1].record_index - 2;
+        no_class.records.erase(no_class.records.begin() + static_cast<std::ptrdiff_t>(class_at));
+        for (auto& keyframe : no_class.keyframes) {
+            keyframe.record_index -= keyframe.record_index > class_at;
+        }
+        for (auto& chapter : no_class.chapters) {
+            chapter.first_record -= chapter.first_record > class_at;
+        }
+        const auto no_class_plan = ReplayWire::MakeKeyframePlan(no_class, no_class.keyframes[1]);
+        Check(
+            no_class_plan.error.empty() && std::ranges::count(no_class_plan.changes, ReplayWire::ChangeKind::LeftOut, &ReplayWire::Change::kind) > 0 && ReplayState::CheckClientNeeds(Fed(no_class, no_class_plan)).empty(),
+            "a gadget whose class no 263 of its chapter defines is left out, with the records naming it"
+        );
+        auto dressed = v2;
+        const auto mercenary =
+            std::ranges::find_if(dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.chapters[0].first_record), dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.keyframes[0].record_index), [&](const ReplayFile::Record& record) {
+                ReplayState::Message message;
+                return ReplayState::Decode(dressed.table, record.body, message) && message.id == 32 && message.U(2) == 1 && (message.U(1) & 0xF0000000) == 0x20000000;
+            });
+        Check(mercenary != dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.keyframes[0].record_index), "the v2 file's load creates an NPC agent before its first keyframe");
+        ReplayState::Message mercenary_create;
+        ReplayState::Decode(dressed.table, mercenary->body, mercenary_create);
+        const auto dressed_agent = mercenary_create.U(0);
+        const auto at = static_cast<size_t>(mercenary - dressed.records.begin());
+        const std::vector<std::vector<uint32_t>> look = {{159, 0, dressed_agent, 0x4b592115}, {159, 14, dressed_agent, 0x906e4}, {159, 15, dressed_agent, 10}, {160, 14, dressed_agent, 1, 0x906e6}, {160, 15, dressed_agent, 1, 10}};
+        for (size_t i = 0; i < look.size(); i++) {
+            const auto& values = look[i];
+            insert(dressed, at + i, static_cast<uint16_t>(values[0]), {values.begin() + 1, values.end()});
+        }
+        ReplayState::World dressed_world(dressed.table);
+        for (auto i = dressed.chapters[0].first_record; i < dressed.keyframes[0].record_index; i++) {
+            dressed_world.Apply(dressed.records[i]);
+        }
+        const auto dressed_join = dressed_world.Join();
+        const auto create_at = std::ranges::find_if(dressed_join, [&](const ReplayState::Message& message) {
+            return message.id == 32 && message.U(0) == dressed_agent;
+        });
+        const auto looks_before = std::ranges::count_if(dressed_join.begin(), create_at, [&](const ReplayState::Message& message) {
+            return (message.id == 159 || message.id == 160) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
+        });
+        auto undressed_join = dressed_join;
+        std::erase_if(undressed_join, [&](const ReplayState::Message& message) {
+            return (message.id == 159 || message.id == 160) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
+        });
+        auto past_slots = ReplayState::Blank(dressed.table, 160);
+        for (const auto [field, value] : {std::pair<size_t, uint32_t>{0, 14}, {1, dressed_agent}, {2, 5}, {3, 0x906e6}}) {
+            past_slots.Set(field, value);
+        }
+        Check(
+            create_at != dressed_join.end() && looks_before == static_cast<std::ptrdiff_t>(look.size()) && !PrintComparison(Compare(dressed_join, undressed_join), keyframe_differences) && ReplayState::FieldAssert(past_slots).contains("ChCliApi.cpp:2156"),
+            "a mercenary's look (159 kinds 0, 14, 15 and 160 kinds 14, 15) is kept by the model and joined before its agent's 32; a keyframe without it fails --compare; a sixth armour slot breaks the game's assert"
+        );
         const auto seeks = ProveSeek(v2, false);
         Check(seeks.seeks > 0 && !seeks.failed, std::format("every seek plan of the v2 file ({} seeks) passes the order checks and its state is the whole stream's at its time", seeks.seeks).c_str());
+        Check(seeks.in_place > 0, std::format("forward seeks from an earlier keyframe play in place, with no load, and reach the whole stream's state ({} seeks)", seeks.in_place).c_str());
         const auto sought = ReplayWire::MakeSeekPlan(v2, v2.keyframes.back().time_ms + 1000);
         auto sought_fed = Fed(v2, sought, sought.seek_ms);
         ReplayState::World all(v2.table);

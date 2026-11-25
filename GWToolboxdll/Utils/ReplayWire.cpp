@@ -17,6 +17,7 @@ namespace ReplayWire {
             MissionInstanceLoadHead = 380,
             MissionLoadMap = 406,
             MissionInstanceInfo = 410,
+            GadgetClassDefine = 263,
         };
         constexpr size_t instance_info_map_type = 2;
         constexpr size_t instance_info_observer = 5;
@@ -156,10 +157,11 @@ namespace ReplayWire {
             plan.error = "the keyframe has no 410 before its 406";
             return plan;
         }
-        std::map<uint32_t, std::vector<size_t>> earlier_details;
+        std::map<std::pair<ReplayState::IdKind, uint32_t>, std::vector<size_t>> earlier_details;
         for (auto i = contents.chapters[chapter].first_record; i < keyframe.record_index; i++) {
-            if (ReplayState::Message message; std::ranges::contains(item_detail_ids, records[i].MessageId()) && ReplayState::Decode(contents.table, records[i].body, message)) {
-                earlier_details[message.U(0)].push_back(i);
+            const auto id = records[i].MessageId();
+            if (ReplayState::Message message; (std::ranges::contains(item_detail_ids, id) || id == GadgetClassDefine) && ReplayState::Decode(contents.table, records[i].body, message)) {
+                earlier_details[{id == GadgetClassDefine ? ReplayState::IdKind::GadgetClass : ReplayState::IdKind::Item, message.U(0)}].push_back(i);
             }
         }
         std::optional<Change> left_out;
@@ -188,19 +190,23 @@ namespace ReplayWire {
             }
             auto unbrought = order.Unbrought(contents.table, message);
             if (!unbrought.empty() && std::ranges::all_of(unbrought, [&earlier_details](const std::pair<ReplayState::IdField, uint32_t>& field) {
-                    return field.first.kind == ReplayState::IdKind::Item && earlier_details.contains(field.second);
+                    return earlier_details.contains({field.first.kind, field.second});
                 })) {
                 flush();
-                Change brought{ChangeKind::BroughtIn, i, 0, "an item's details from the stream before the keyframe, which the keyframe does not hold, posted before the record that shows it"};
-                for (const auto& item : unbrought | std::views::values) {
-                    const auto details = earlier_details.find(item);
+                Change brought{ChangeKind::BroughtIn, i, 0, "an item's details or a gadget's class from the stream before the keyframe, which the keyframe does not hold, posted before the record that needs them"};
+                for (const auto& [field, id] : unbrought) {
+                    const auto details = earlier_details.find({field.kind, id});
                     if (details == earlier_details.end()) {
                         continue;
                     }
                     for (const auto detail : details->second) {
                         ReplayState::Message decoded;
                         ReplayState::Decode(contents.table, records[detail].body, decoded);
-                        if (const auto broken = ReplayState::FieldAssert(decoded); !broken.empty()) {
+                        auto broken = ReplayState::FieldAssert(decoded);
+                        if (broken.empty()) {
+                            broken = agents.Breaks(decoded);
+                        }
+                        if (!broken.empty()) {
                             plan.error = std::format("record {} (message {}) breaks an assert of the game's: {}", detail, decoded.id, broken);
                             return plan;
                         }
@@ -232,6 +238,11 @@ namespace ReplayWire {
         flush();
         plan.duration_ms = last_ms - keyframe.time_ms;
         return plan;
+    }
+
+    bool SeeksInPlace(const Plan& playing, const uint32_t played_ms, const Plan& sought)
+    {
+        return sought.chapter == playing.chapter && sought.end_record == playing.end_record && sought.start_ms + sought.seek_ms >= playing.start_ms + played_ms;
     }
 
     Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms)

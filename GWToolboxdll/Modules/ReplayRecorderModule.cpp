@@ -88,6 +88,7 @@ namespace {
         CharAgentUpdateNpcName = 155,
         CharAgentMorale = 156,
         CharNotifyDword = 159,
+        CharAgentAttrUpdateIntTarget = 160,
         CharAgentAttrUpdateFloat = 162,
         CharAgentUpdateProfession = 166,
         CharUpdateAgentPartysize = 176,
@@ -133,6 +134,9 @@ namespace {
     };
 
     enum Notice : uint32_t {
+        LookAppearance = 0,
+        LookComposite = 14,
+        LookColour = 15,
         Level = 36,
         MaxEnergy = 41,
         MaxHealth = 42,
@@ -308,6 +312,16 @@ namespace {
         }
         return ReplayState::ItemReport(message_table, client_item);
     }
+
+    // GWCA's AgentInfo: what the char client's notices 0, 14 and 15 write (CharCliOnNotifyDword) and the agent view dresses an agent with (CCharAgent::SetCompositeModel).
+    struct AgentLook {
+        uint32_t appearance;
+        uint32_t composites[5];
+        uint32_t colours[5];
+        uint32_t h002C[2];
+        wchar_t* name_enc;
+    };
+    static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
 
     uint32_t TeamToken(const GW::AgentLiving* living, const GW::WorldContext* world)
     {
@@ -521,7 +535,10 @@ namespace {
                         mercenary.Set(9 + piece, reinterpret_cast<const uint32_t*>(&hero.chestpiece_dye_tint)[piece]);
                         mercenary.Set(9 + armor_pieces + piece, reinterpret_cast<const uint32_t*>(hero.chestpiece_dye)[piece]);
                     }
-                    mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
+                    // OnHeroDataAdd copies the name only with an appearance: an empty slot's is stale memory, its 116 an empty name.
+                    if (hero.appearance_bitmap) {
+                        mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
+                    }
                 }
                 apply(mercenary);
                 continue;
@@ -608,6 +625,18 @@ namespace {
                         update.fields[1].text = name;
                     }
                     apply(update);
+                }
+            }
+            if (living && agent->agent_id < world_context->agent_infos.size()) {
+                // A mercenary's look comes as the server sends it before the agent: notices 0, 14 and 15 (159 for slot 0, 160 for the others).
+                if (const auto& look = reinterpret_cast<const AgentLook&>(world_context->agent_infos[agent->agent_id]); look.appearance) {
+                    apply(make(CharNotifyDword, {LookAppearance, agent->agent_id, look.appearance}));
+                    apply(make(CharNotifyDword, {LookComposite, agent->agent_id, look.composites[0]}));
+                    apply(make(CharNotifyDword, {LookColour, agent->agent_id, look.colours[0]}));
+                    for (uint32_t slot = 1; slot < std::size(look.composites); slot++) {
+                        apply(make(CharAgentAttrUpdateIntTarget, {LookComposite, agent->agent_id, slot, look.composites[slot]}));
+                        apply(make(CharAgentAttrUpdateIntTarget, {LookColour, agent->agent_id, slot, look.colours[slot]}));
+                    }
                 }
             }
             if (living) {
@@ -1607,10 +1636,11 @@ namespace {
         }
         playback_ended = false;
         paused_by_end = false;
-        // Forward within the keyframe played, its stream to the time is what a load of it would post: posted at once, with no load.
-        if (made.chapter == plan.chapter && made.keyframe == plan.keyframe && made.seek_ms >= played_ms) {
-            played_ms = std::min(made.seek_ms, plan.duration_ms);
-            LogPlayback(std::format("seek to {} ms: forward within keyframe {}, the stream posted at once", plan.start_ms + made.seek_ms, plan.keyframe + 1));
+        // Forward in the part of the chapter played: its stream to the time, posted at once, gives the state a load of the later keyframe would (replay_check --seek).
+        if (ReplayWire::SeeksInPlace(plan, static_cast<uint32_t>(played_ms), made)) {
+            const auto from_ms = plan.start_ms + static_cast<uint32_t>(played_ms);
+            played_ms = std::min(made.start_ms + made.seek_ms - plan.start_ms, plan.duration_ms);
+            LogPlayback(std::format("seek to {} ms: forward from {} ms in chapter {}, the stream from keyframe {} posted at once, no load", made.start_ms + made.seek_ms, from_ms, plan.chapter + 1, plan.keyframe + 1));
             return false;
         }
         const auto after = std::ranges::upper_bound(replay.chapters, time_ms, {}, &ReplayFile::Chapter::time_ms) - replay.chapters.begin();
