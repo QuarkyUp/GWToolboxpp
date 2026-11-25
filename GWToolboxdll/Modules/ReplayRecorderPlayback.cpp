@@ -603,6 +603,21 @@ namespace ReplayRecorder {
             }
             emulating_rows = false;
         }
+
+        struct PlaybackHook {
+            void** target;
+            GW::Hook::HookTarget detour;
+            void** original;
+        };
+
+        // Every hook but the agents' clock is required: ArmPlayback finds them first.
+        const PlaybackHook playback_hooks[] = {
+            {reinterpret_cast<void**>(&GameConnect_Func), OnGameConnect, reinterpret_cast<void**>(&GameConnect_Ret)},          {reinterpret_cast<void**>(&Goodbye_Func), OnGoodbye, reinterpret_cast<void**>(&Goodbye_Ret)},
+            {reinterpret_cast<void**>(&InstanceAck_Func), OnInstanceAck, reinterpret_cast<void**>(&InstanceAck_Ret)},          {reinterpret_cast<void**>(&MapLoaded_Func), OnMapLoaded, reinterpret_cast<void**>(&MapLoaded_Ret)},
+            {reinterpret_cast<void**>(&WorldMapToggle_Func), OnWorldMapToggle, reinterpret_cast<void**>(&WorldMapToggle_Ret)}, {reinterpret_cast<void**>(&MissionMapCreate_Func), OnMissionMapCreate, reinterpret_cast<void**>(&MissionMapCreate_Ret)},
+            {reinterpret_cast<void**>(&AgentAdvance_Func), OnAgentAdvance, reinterpret_cast<void**>(&AgentAdvance_Ret)},
+        };
+
     } // namespace
 
     void LogPlayback(const std::string& step)
@@ -613,20 +628,12 @@ namespace ReplayRecorder {
 
     void DisarmPlayback()
     {
-        for (const auto hooked :
-             {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func), reinterpret_cast<void*>(WorldMapToggle_Func),
-              reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
-            if (hooked) {
-                GW::Hook::RemoveHook(hooked);
+        for (const auto& hook : playback_hooks) {
+            if (*hook.target) {
+                GW::Hook::RemoveHook(*hook.target);
             }
+            *hook.target = nullptr;
         }
-        GameConnect_Func = nullptr;
-        Goodbye_Func = nullptr;
-        InstanceAck_Func = nullptr;
-        MapLoaded_Func = nullptr;
-        WorldMapToggle_Func = nullptr;
-        MissionMapCreate_Func = nullptr;
-        AgentAdvance_Func = nullptr;
         viewpoint_available = false;
         playback_armed = false;
     }
@@ -687,17 +694,15 @@ namespace ReplayRecorder {
         WorldMapToggle_Func = reinterpret_cast<WorldMapToggle_pt>(world_map_toggle);
         MissionMapCreate_Func = reinterpret_cast<MissionMapCreate_pt>(mission_map_create);
         AgentAdvance_Func = reinterpret_cast<AgentAdvance_pt>(agent_advance);
-        if (GW::Hook::CreateHook(&GameConnect_Func, OnGameConnect, &GameConnect_Ret) != 0 || GW::Hook::CreateHook(&Goodbye_Func, OnGoodbye, &Goodbye_Ret) != 0 || GW::Hook::CreateHook(&InstanceAck_Func, OnInstanceAck, &InstanceAck_Ret) != 0 ||
-            GW::Hook::CreateHook(&MapLoaded_Func, OnMapLoaded, &MapLoaded_Ret) != 0 || GW::Hook::CreateHook(&WorldMapToggle_Func, OnWorldMapToggle, &WorldMapToggle_Ret) != 0 ||
-            GW::Hook::CreateHook(&MissionMapCreate_Func, OnMissionMapCreate, &MissionMapCreate_Ret) != 0 || (AgentAdvance_Func && GW::Hook::CreateHook(&AgentAdvance_Func, OnAgentAdvance, &AgentAdvance_Ret) != 0)) {
+        if (std::ranges::any_of(playback_hooks, [](const PlaybackHook& hook) {
+                return *hook.target && GW::Hook::CreateHook(hook.target, hook.detour, hook.original) != 0;
+            })) {
             DisarmPlayback();
             return "Playback not available: its hooks could not be made";
         }
-        for (const auto hooked :
-             {reinterpret_cast<void*>(GameConnect_Func), reinterpret_cast<void*>(Goodbye_Func), reinterpret_cast<void*>(InstanceAck_Func), reinterpret_cast<void*>(MapLoaded_Func), reinterpret_cast<void*>(WorldMapToggle_Func),
-              reinterpret_cast<void*>(MissionMapCreate_Func), reinterpret_cast<void*>(AgentAdvance_Func)}) {
-            if (hooked) {
-                GW::Hook::EnableHooks(hooked);
+        for (const auto& hook : playback_hooks) {
+            if (*hook.target) {
+                GW::Hook::EnableHooks(*hook.target);
             }
         }
         // s2c 172's handler passes {agent, u8} to the char client's observe call, which sets the viewpoint the camera follows (0x00811a20, x23-live, x25-live).
