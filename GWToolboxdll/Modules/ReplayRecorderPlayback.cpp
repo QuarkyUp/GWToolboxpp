@@ -25,7 +25,7 @@
 
 namespace ReplayRecorder {
     namespace {
-        // The game connection's MsgConn (MsgConnConnectAccept's allocation): no socket in playback, the mode 2 once ready, the receive cipher (t03, t09).
+        // The game connection's MsgConn (MsgConnConnectAccept's allocation): no socket in playback, the mode 2 once ready, the receive cipher.
         struct MsgConn {
             uint32_t socket;
             uint8_t h0004[0x5C];
@@ -107,7 +107,7 @@ namespace ReplayRecorder {
             uint32_t key = 0;
             uint32_t last_byte = 0;
         };
-        // The 422 handler (0x0084dbe0) reads +0x30, a field GWCA's GameSrvTransfer does not have.
+        // The 422 handler reads +0x30, a field GWCA's GameSrvTransfer does not have.
         static_assert(sizeof(TransferMessage) == 0x34);
 
         struct ConnectedEvent {
@@ -700,7 +700,7 @@ namespace ReplayRecorder {
                 GW::Hook::EnableHooks(*hook.target);
             }
         }
-        // s2c 172's handler passes {agent, u8} to the char client's observe call, which sets the viewpoint the camera follows (0x00811a20, x23-live, x25-live).
+        // s2c 172's handler passes {agent, u8} to the char client's observe call, which sets the viewpoint the camera follows.
         const auto follow_missing = message_table.size() <= viewpoint_message_id || message_table[viewpoint_message_id] != viewpoint_fields ? "s2c 172's fields are not {agent, u8} in this client"
                                     : !observe_agent                                                                                        ? "the char client's observe call is not found in this client"
                                     : !game_viewpoint_handler                                                                               ? "s2c 172's handler was not read before the recorder's callbacks"
@@ -959,7 +959,7 @@ void ReplayRecorderModule::Terminate()
 {
     ToolboxModule::Terminate();
     if (playback != Playback::Off) {
-        // The client's exit closes the socket of every GcSrv entry (0x004920f0) and asserts on ours, which has none: it must be gone first.
+        // The client's exit closes the socket of every GcSrv entry and asserts on ours, which has none: it must be gone first.
         CloseReplayConnection("The toolbox closed during a replay: the replay's connection closed before the game's own");
     }
     DisarmPlayback();

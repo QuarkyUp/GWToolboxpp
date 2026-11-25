@@ -43,7 +43,7 @@ namespace ReplayRecorder {
         };
         static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
 
-        // GWCA's GadgetInfo: a gadget class as 263's handler keeps it (0x0083d790, m11); a gadget's agent draws its model file (File.cpp:367 when 0).
+        // GWCA's GadgetInfo: a gadget class as 263's handler keeps it; a gadget's agent draws its model file (File.cpp:367 when 0).
         struct GadgetClass {
             uint32_t model_file;
             uint32_t flags;
@@ -68,7 +68,7 @@ namespace ReplayRecorder {
             uint32_t by_party_count;
         };
 
-        // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54 (GWCA's h0054), 430's handler its rows in MissionCommon::CTeamPartyTable (g01, g02).
+        // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54 (GWCA's h0054), 430's handler its rows in MissionCommon::CTeamPartyTable.
         struct MissionContext {
             uint8_t h0000[0x398];
             TeamTable teams;
@@ -76,7 +76,7 @@ namespace ReplayRecorder {
         static_assert(offsetof(MissionContext, teams) == 0x398 && GWCA_OFFSETOF(GW::CharContext, h0054) == 0x54);
         static_assert(GWCA_OFFSETOF(GW::WorldContext, h053C) == 0x53C);
 
-        // The fields of GWCA's HeroInfo it leaves unnamed, as CHeroMgr::OnHeroDataAdd fills them from 115 and 116 (g02).
+        // The fields of GWCA's HeroInfo it leaves unnamed, as CHeroMgr::OnHeroDataAdd fills them from 115 and 116.
         struct HeroData {
             uint8_t h0000[0x1C];
             uint32_t first_value;
@@ -90,14 +90,14 @@ namespace ReplayRecorder {
         };
         static_assert(sizeof(HeroData) == sizeof(GW::HeroInfo) && offsetof(HeroData, armour) == GWCA_OFFSETOF(GW::HeroInfo, chestpiece_dye_tint) && offsetof(HeroData, dyes) == GWCA_OFFSETOF(GW::HeroInfo, chestpiece_dye));
 
-        // A guild entry past GWCA's Guild: 289's sixth field (k09).
+        // A guild entry past GWCA's Guild: 289's sixth field.
         struct GuildEntry {
             uint8_t h0000[0xAC];
             uint32_t general_value;
         };
         static_assert(sizeof(GW::Guild) == offsetof(GuildEntry, general_value));
 
-        // GWCA's AgentContext: the server world's clock, which s2c 31 sets and 30 advances, before the shown world's (instance_timer) that follows it (n03, n05).
+        // GWCA's AgentContext: the server world's clock, which s2c 31 sets and 30 advances, before the shown world's (instance_timer) that follows it.
         struct AgentClocks {
             uint8_t h0000[0x148];
             uint32_t server_time;
@@ -213,7 +213,7 @@ namespace ReplayRecorder {
                 Apply(world, Make(MissionManifestPhase, {phase}));
             }
             Apply(world, Make(MissionManifestComplete, {0, static_cast<uint32_t>(map_id), 0}));
-            // 406's handler (0x0084d640) hands its map file to the map's load, which asserts it non-zero (File.cpp:367); AreaInfo::file_id is 0 for most PvE maps.
+            // 406's handler hands its map file to the map's load, which asserts it non-zero (File.cpp:367); AreaInfo::file_id is 0 for most PvE maps.
             auto load_map = Make(GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, {chapter_map_file ? chapter_map_file : PathfindingWindow::GetMapFileId(map_id)});
             if (load_map.fields.size() > 5 && load_map.fields[5].numbers.size() == sizeof(uint64_t)) {
                 constexpr uint32_t facing_steps = 255;

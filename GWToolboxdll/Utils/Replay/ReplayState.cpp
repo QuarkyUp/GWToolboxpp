@@ -886,7 +886,7 @@ namespace ReplayState {
                 }
             }
         }
-        // A ground item's 32 names its item by its class: the stream sends the item's details first (z02).
+        // A ground item's 32 names its item by its class: the stream sends the item's details first.
         if (const auto item = message.U(CreateClass); message.id == GAME_SMSG_AGENT_SPAWNED && message.U(CreateDef) == item_def && item && !brought.contains({IdKind::Item, item})) {
             unbrought.emplace_back(IdField{GAME_SMSG_AGENT_SPAWNED, static_cast<uint8_t>(CreateClass), IdKind::Item}, item);
         }
@@ -983,7 +983,7 @@ namespace ReplayState {
             case GAME_SMSG_AGENT_UPDATE_DESTINATION:
             case GAME_SMSG_AGENT_UPDATE_SPEED:
             case GAME_SMSG_AGENT_UPDATE_POSITION: {
-                // Each IAgent::OnMsgSrvUpdate* asserts its agent in the server's world (n01).
+                // Each IAgent::OnMsgSrvUpdate* asserts its agent in the server's world.
                 constexpr std::pair<uint16_t, uint32_t> assert_lines[] = {
                     {GAME_SMSG_AGENT_UPDATE_DIRECTION, 412},   {GAME_SMSG_AGENT_UPDATE_SPEED_BASE, 462}, {GAME_SMSG_AGENT_STOP_MOVING, 486},     {GAME_SMSG_AGENT_MOVE_TO_POINT, 513},
                     {GAME_SMSG_AGENT_UPDATE_DESTINATION, 535}, {GAME_SMSG_AGENT_UPDATE_SPEED, 554},      {GAME_SMSG_AGENT_UPDATE_POSITION, 579},

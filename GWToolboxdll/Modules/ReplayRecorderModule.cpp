@@ -18,7 +18,6 @@
 #include <Modules/ReplayRecorderInternal.h>
 #include <Modules/ReplayRecorderModule.h>
 #include <Modules/Resources.h>
-#include <Utils/EncString.h>
 #include <Utils/Replay/ReplayFile.h>
 #include <Utils/Replay/ReplayMessages.h>
 #include <Utils/Replay/ReplayState.h>

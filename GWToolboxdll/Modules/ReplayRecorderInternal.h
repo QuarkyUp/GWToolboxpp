@@ -51,7 +51,7 @@ namespace ReplayRecorder {
         uint32_t h000C;
     };
 
-    // The agent engine's agent of the server's world (IAgent::CAgent, AgAgent.cpp), as GWCA's AgentContext::agent_movement lists them: what 41, 42, 40, 43, 39 and 44 set (n02, live n06, n07).
+    // The agent engine's agent of the server's world (IAgent::CAgent, AgAgent.cpp), as GWCA's AgentContext::agent_movement lists them: what 41, 42, 40, 43, 39 and 44 set.
     struct WalkingAgent {
         uint8_t h0000[0x10];
         uint32_t agent_id;
