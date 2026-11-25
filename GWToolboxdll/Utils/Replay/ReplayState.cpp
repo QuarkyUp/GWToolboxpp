@@ -1,5 +1,6 @@
 #include <Utils/Replay/ReplayMessages.h>
 #include <Utils/Replay/ReplayState.h>
+#include <Utils/StoCHandlers.h>
 
 #include <algorithm>
 #include <bit>
@@ -456,35 +457,35 @@ namespace ReplayState {
             bool Walk(const uint32_t* descriptors, const size_t count)
             {
                 for (size_t i = 0; i < count && ok; i++) {
-                    const auto type = descriptors[i] & 0xF;
+                    const auto type = static_cast<StoCFieldType>(descriptors[i] & 0xF);
                     const auto sub = descriptors[i] >> 4 & 0xF;
                     const auto size = descriptors[i] >> 8;
                     switch (type) {
-                        case 0:
-                        case 1:
+                        case StoCFieldType::Id:
+                        case StoCFieldType::Float:
                             Numbers(1, 4);
                             break;
-                        case 2:
+                        case StoCFieldType::Vect2:
                             Numbers(2, 4);
                             break;
-                        case 3:
+                        case StoCFieldType::Vect3:
                             Numbers(3, 4);
                             break;
-                        case 4:
-                        case 8:
+                        case StoCFieldType::Int:
+                        case StoCFieldType::IntB:
                             if (size != 1 && size != 2 && size != 4) {
                                 return false;
                             }
                             Numbers(1, size);
                             break;
-                        case 5:
-                        case 9:
+                        case StoCFieldType::Blob:
+                        case StoCFieldType::BlobB:
                             Numbers(size, 1);
                             break;
-                        case 6:
-                        case 10:
+                        case StoCFieldType::ArrayData:
+                        case StoCFieldType::ArrayDataB:
                             break;
-                        case 7: {
+                        case StoCFieldType::String16: {
                             const auto length = Take(2);
                             if (length >= size) {
                                 return false;
@@ -499,7 +500,7 @@ namespace ReplayState {
                             }
                             break;
                         }
-                        case 11: {
+                        case StoCFieldType::ArrayCount: {
                             const auto items = Take(2);
                             if (sub > 2 || items > size) {
                                 return false;
@@ -507,7 +508,7 @@ namespace ReplayState {
                             Numbers(items, size_t{1} << sub);
                             break;
                         }
-                        case 12: {
+                        case StoCFieldType::NestedStruct: {
                             const auto repetitions = Take(1);
                             if (repetitions > size) {
                                 return false;
@@ -560,42 +561,42 @@ namespace ReplayState {
             bool Walk(const uint32_t* descriptors, const size_t count)
             {
                 for (size_t i = 0; i < count; i++) {
-                    const auto type = descriptors[i] & 0xF;
+                    const auto type = static_cast<StoCFieldType>(descriptors[i] & 0xF);
                     const auto sub = descriptors[i] >> 4 & 0xF;
                     const auto size = descriptors[i] >> 8;
                     switch (type) {
-                        case 0:
-                        case 1:
+                        case StoCFieldType::Id:
+                        case StoCFieldType::Float:
                             if (!Numbers(1, 4)) {
                                 return false;
                             }
                             break;
-                        case 2:
+                        case StoCFieldType::Vect2:
                             if (!Numbers(2, 4)) {
                                 return false;
                             }
                             break;
-                        case 3:
+                        case StoCFieldType::Vect3:
                             if (!Numbers(3, 4)) {
                                 return false;
                             }
                             break;
-                        case 4:
-                        case 8:
+                        case StoCFieldType::Int:
+                        case StoCFieldType::IntB:
                             if ((size != 1 && size != 2 && size != 4) || !Numbers(1, size)) {
                                 return false;
                             }
                             break;
-                        case 5:
-                        case 9:
+                        case StoCFieldType::Blob:
+                        case StoCFieldType::BlobB:
                             if (!Numbers(size, 1)) {
                                 return false;
                             }
                             break;
-                        case 6:
-                        case 10:
+                        case StoCFieldType::ArrayData:
+                        case StoCFieldType::ArrayDataB:
                             break;
-                        case 7: {
+                        case StoCFieldType::String16: {
                             const auto field = Next();
                             if (!field || field->text.size() >= size || !Put(static_cast<uint32_t>(field->text.size()), 2)) {
                                 return false;
@@ -605,7 +606,7 @@ namespace ReplayState {
                             }
                             break;
                         }
-                        case 11: {
+                        case StoCFieldType::ArrayCount: {
                             const auto field = Next();
                             if (!field || sub > 2 || field->numbers.size() > size || !Put(static_cast<uint32_t>(field->numbers.size()), 2)) {
                                 return false;
@@ -617,7 +618,7 @@ namespace ReplayState {
                             }
                             break;
                         }
-                        case 12: {
+                        case StoCFieldType::NestedStruct: {
                             const auto field = Next();
                             if (!field || field->numbers.size() != 1 || field->numbers[0] > size || !Put(field->numbers[0], 1)) {
                                 return false;
@@ -714,30 +715,30 @@ namespace ReplayState {
         }
         const auto& descriptors = table[message_id];
         for (size_t i = 1; i < descriptors.size(); i++) {
-            const auto type = descriptors[i] & 0xF;
+            const auto type = static_cast<StoCFieldType>(descriptors[i] & 0xF);
             const auto size = descriptors[i] >> 8;
             switch (type) {
-                case 0:
-                case 1:
-                case 4:
-                case 8:
+                case StoCFieldType::Id:
+                case StoCFieldType::Float:
+                case StoCFieldType::Int:
+                case StoCFieldType::IntB:
                     message.fields.push_back({{0}, {}});
                     break;
-                case 2:
+                case StoCFieldType::Vect2:
                     message.fields.push_back({{0, 0}, {}});
                     break;
-                case 3:
+                case StoCFieldType::Vect3:
                     message.fields.push_back({{0, 0, 0}, {}});
                     break;
-                case 5:
-                case 9:
+                case StoCFieldType::Blob:
+                case StoCFieldType::BlobB:
                     message.fields.push_back({std::vector<uint32_t>(size, 0), {}});
                     break;
-                case 7:
-                case 11:
+                case StoCFieldType::String16:
+                case StoCFieldType::ArrayCount:
                     message.fields.emplace_back();
                     break;
-                case 12:
+                case StoCFieldType::NestedStruct:
                     message.fields.push_back({{0}, {}});
                     return message;
                 default:
@@ -802,14 +803,14 @@ namespace ReplayState {
             const auto& descriptors = table[message_id];
             size_t field = 0;
             for (size_t i = 1; i < descriptors.size(); i++) {
-                const auto type = descriptors[i] & 0xF;
-                if (type == 6 || type == 10) {
+                const auto type = static_cast<StoCFieldType>(descriptors[i] & 0xF);
+                if (type == StoCFieldType::ArrayData || type == StoCFieldType::ArrayDataB) {
                     continue;
                 }
-                if (type == 12) {
+                if (type == StoCFieldType::NestedStruct) {
                     break;
                 }
-                if (type == 0 && (descriptors[i] >> 4 & 0xF) == 1) {
+                if (type == StoCFieldType::Id && (descriptors[i] >> 4 & 0xF) == 1) {
                     agent(field);
                 }
                 field++;

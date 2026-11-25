@@ -1,5 +1,6 @@
 #include <Utils/Replay/ReplayFile.h>
 #include <Utils/Replay/ReplayMessages.h>
+#include <Utils/StoCHandlers.h>
 
 #include <algorithm>
 #include <bit>
@@ -194,49 +195,49 @@ namespace ReplayFile {
                     if (offset > max_decoded_size) {
                         return false;
                     }
-                    const auto type = fields[i] & 0xF;
+                    const auto type = static_cast<StoCFieldType>(fields[i] & 0xF);
                     const auto sub = fields[i] >> 4 & 0xF;
                     const auto size = fields[i] >> 8;
                     switch (type) {
-                        case 0:
-                        case 1:
+                        case StoCFieldType::Id:
+                        case StoCFieldType::Float:
                             Align(4);
                             Copy(4);
                             break;
-                        case 2:
+                        case StoCFieldType::Vect2:
                             Align(4);
                             Copy(8);
                             break;
-                        case 3:
+                        case StoCFieldType::Vect3:
                             Align(4);
                             Copy(12);
                             break;
-                        case 4:
-                        case 8:
+                        case StoCFieldType::Int:
+                        case StoCFieldType::IntB:
                             if (size != 1 && size != 2 && size != 4) {
                                 return false;
                             }
                             Align(4);
                             Put(out, ReadDword(), size);
                             break;
-                        case 5:
-                        case 9:
+                        case StoCFieldType::Blob:
+                        case StoCFieldType::BlobB:
                             Copy(size);
                             break;
-                        case 6:
-                        case 10:
+                        case StoCFieldType::ArrayData:
+                        case StoCFieldType::ArrayDataB:
                             break;
-                        case 7:
+                        case StoCFieldType::String16:
                             if (!PackText(size)) {
                                 return false;
                             }
                             break;
-                        case 11:
+                        case StoCFieldType::ArrayCount:
                             if (!PackArray(sub, size)) {
                                 return false;
                             }
                             break;
-                        case 12: {
+                        case StoCFieldType::NestedStruct: {
                             Align(4);
                             const auto repetitions = ReadDword();
                             if (repetitions > size || repetitions > 0xFF) {
