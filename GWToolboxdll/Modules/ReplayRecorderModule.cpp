@@ -179,7 +179,91 @@ namespace {
     uint32_t chapter_map_file = 0;
     GW::Packet::StoC::PostProcess post_process{};
 
-    using AgentNotifyParams_pt = int(__cdecl*)(uint32_t agent_id, uint32_t* definition, uint8_t** params);
+    // GWCA's AgentInfo: what the char client's notices 0, 14 and 15 write (CharCliOnNotifyDword) and the agent view dresses an agent with (CCharAgent::SetCompositeModel).
+    struct AgentLook {
+        uint32_t appearance;
+        uint32_t composites[5];
+        uint32_t colours[5];
+        uint32_t h002C[2];
+        wchar_t* name_enc;
+    };
+    static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
+
+    struct TeamRow {
+        uint32_t team;
+        uint32_t party;
+        uint32_t value;
+        uint32_t colour;
+        uint32_t territory;
+        wchar_t name[20];
+    };
+
+    struct TeamTable {
+        uint32_t count;
+        const TeamRow* const* by_party;
+        uint32_t capacity;
+        uint32_t by_party_count;
+    };
+
+    // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54, 430's handler its rows in MissionCommon::CTeamPartyTable (g01, g02).
+    struct MissionContext {
+        uint8_t h0000[0x54];
+        uint32_t instance_head[4];
+        uint8_t h0064[0x334];
+        TeamTable teams;
+    };
+    static_assert(offsetof(MissionContext, instance_head) == 0x54 && offsetof(MissionContext, teams) == 0x398);
+
+    // GWCA's WorldContext h053C: 91's value (0x0080e7c0), whose bit 1 stops the char client's agent notices (CharCliOnNotifyDword).
+    struct WorldValue91 {
+        uint8_t h0000[0x53C];
+        uint32_t value_91;
+    };
+
+    // GWCA's HeroInfo as CHeroMgr::OnHeroDataAdd fills it from 115 and 116 (g02).
+    struct HeroData {
+        uint32_t hero;
+        uint32_t agent;
+        uint32_t level;
+        uint32_t primary;
+        uint32_t secondary;
+        uint32_t hero_file;
+        uint32_t model_file;
+        uint32_t first_value;
+        uint32_t skill_count;
+        uint32_t skills[8];
+        uint32_t flags;
+        uint32_t appearance;
+        uint32_t armour[5];
+        uint32_t dyes[5];
+        wchar_t name[20];
+    };
+    static_assert(sizeof(HeroData) == sizeof(GW::HeroInfo) && offsetof(HeroData, appearance) == 0x48);
+
+    // The char client's per-character data (AgentGetNotifyParams): what an agent wears, in s2c 110's slot order (CharCliOnEquipUpdate, CharCliAgentGetEquippedItemId).
+    struct CharacterData {
+        uint8_t h0000[0x24];
+        uint32_t worn[9];
+    };
+
+    // A guild entry past GWCA's Guild: 289's sixth field (k09).
+    struct GuildEntry {
+        uint8_t h0000[0xAC];
+        uint32_t general_value;
+    };
+    static_assert(sizeof(GW::Guild) == offsetof(GuildEntry, general_value));
+
+    // The game connection's MsgConn (MsgConnConnectAccept's allocation): no socket in playback, the mode 2 once ready, the receive cipher (t03, t09).
+    struct MsgConn {
+        uint32_t socket;
+        uint8_t h0004[0x5C];
+        uint32_t mode;
+        uint8_t h0064[0x18];
+        ReplayWire::Rc4 receive_cipher;
+    };
+    static_assert(offsetof(MsgConn, mode) == 0x60 && offsetof(MsgConn, receive_cipher) == 0x7C);
+
+    using AgentNotifyParams_pt = int(__cdecl*)(uint32_t agent_id, uint32_t* definition, const CharacterData** params);
     AgentNotifyParams_pt AgentNotifyParams_Func = nullptr;
 
     using ObserveGame_pt = void(__cdecl*)(uint32_t game_key);
@@ -313,16 +397,6 @@ namespace {
         return ReplayState::ItemReport(message_table, client_item);
     }
 
-    // GWCA's AgentInfo: what the char client's notices 0, 14 and 15 write (CharCliOnNotifyDword) and the agent view dresses an agent with (CCharAgent::SetCompositeModel).
-    struct AgentLook {
-        uint32_t appearance;
-        uint32_t composites[5];
-        uint32_t colours[5];
-        uint32_t h002C[2];
-        wchar_t* name_enc;
-    };
-    static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
-
     uint32_t TeamToken(const GW::AgentLiving* living, const GW::WorldContext* world)
     {
         // The tokens every load at hand gives: the players' team ('play', the world's own), foes ('mon1'), the rest ('nonc').
@@ -359,8 +433,9 @@ namespace {
         }
         const auto map_id = GW::Map::GetMapID();
 
-        // 380's handler keeps its fields at +0x5c, +0x60, +0x54 and +0x58 of the mission context.
-        apply(make(MissionInstanceLoadHead, {char_context->h0054[2] & 0xFF, char_context->h0054[3] & 0xFF, char_context->h0054[0] & 0xFF, char_context->h0054[1] & 0xFF}));
+        const auto& mission = reinterpret_cast<const MissionContext&>(*char_context);
+        // 380's handler keeps its fields 0 to 3 at the mission context's +0x5c, +0x60, +0x54 and +0x58.
+        apply(make(MissionInstanceLoadHead, {mission.instance_head[2] & 0xFF, mission.instance_head[3] & 0xFF, mission.instance_head[0] & 0xFF, mission.instance_head[1] & 0xFF}));
         apply(ReplayState::Blank(message_table, MissionConfigEnd));
         auto player_name = ReplayState::Blank(message_table, MissionInstanceLoadPlayerName);
         if (!player_name.fields.empty()) {
@@ -439,24 +514,9 @@ namespace {
         }
         apply(load_map);
         apply(make(CharPlayerTeam, {world_context->playerTeamToken}));
-        struct TeamRow {
-            uint32_t team;
-            uint32_t party;
-            uint32_t value;
-            uint32_t colour;
-            uint32_t territory;
-            wchar_t name[20];
-        };
-        struct TeamTable {
-            uint32_t count;
-            const TeamRow* const* by_party;
-            uint32_t capacity;
-            uint32_t by_party_count;
-        };
-        // 430's handler keeps its rows by party id in MissionCommon::CTeamPartyTable, at +0x398 of the mission context (GWCA's CharContext).
-        const auto teams = reinterpret_cast<const TeamTable*>(reinterpret_cast<const uint8_t*>(char_context) + 0x398);
-        for (uint32_t party = 0; teams->by_party && party < teams->by_party_count; party++) {
-            const auto row = teams->by_party[party];
+        const auto& teams = mission.teams;
+        for (uint32_t party = 0; teams.by_party && party < teams.by_party_count; party++) {
+            const auto row = teams.by_party[party];
             if (!row) {
                 continue;
             }
@@ -467,9 +527,9 @@ namespace {
             }
         }
         const auto explorable = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable;
-        // 91's handler keeps its value at the world context's +0x53c; of the loads at hand only the explorable ones in hard mode send it.
-        if (explorable && world_context->h053C[0]) {
-            apply(make(CharToClient91, {world_context->h053C[0]}));
+        // Of the loads at hand only the explorable ones in hard mode send 91.
+        if (const auto value_91 = reinterpret_cast<const WorldValue91&>(*world_context).value_91; explorable && value_91) {
+            apply(make(CharToClient91, {value_91}));
         }
         apply(make(CharPostProcess, {post_process.level, post_process.tint}));
         apply(make(MissionToClient404, {0}));
@@ -522,32 +582,29 @@ namespace {
                 apply(words);
             }
         }
-        for (const auto& hero : world_context->hero_info) {
-            const auto primary = static_cast<uint32_t>(hero.primary);
-            const auto secondary = static_cast<uint32_t>(hero.secondary);
-            const auto flag = hero.h0044 & 1;
-            // CHeroMgr::OnHeroDataAdd keeps 115's and 116's fields in this entry: 115's skills from +0x24, 116's appearance, armor and dyes from +0x48.
-            if (hero.hero_id >= GW::Constants::HeroID::Merc1 && hero.hero_id <= GW::Constants::HeroID::Merc8) {
-                auto mercenary = make(CharMercenaryInfo, {hero.hero_id, hero.level, primary, secondary, hero.hero_file_id, hero.model_file_id, hero.h001C, flag, hero.appearance_bitmap});
-                constexpr size_t armor_pieces = 5;
+        for (const auto& info : world_context->hero_info) {
+            const auto& hero = reinterpret_cast<const HeroData&>(info);
+            const auto flag = hero.flags & 1;
+            if (info.hero_id >= GW::Constants::HeroID::Merc1 && info.hero_id <= GW::Constants::HeroID::Merc8) {
+                auto mercenary = make(CharMercenaryInfo, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file, hero.first_value, flag, hero.appearance});
+                constexpr size_t armor_pieces = std::extent_v<decltype(HeroData::armour)>;
                 if (mercenary.fields.size() > 9 + 2 * armor_pieces) {
                     for (size_t piece = 0; piece < armor_pieces; piece++) {
-                        mercenary.Set(9 + piece, reinterpret_cast<const uint32_t*>(&hero.chestpiece_dye_tint)[piece]);
-                        mercenary.Set(9 + armor_pieces + piece, reinterpret_cast<const uint32_t*>(hero.chestpiece_dye)[piece]);
+                        mercenary.Set(9 + piece, hero.armour[piece]);
+                        mercenary.Set(9 + armor_pieces + piece, hero.dyes[piece]);
                     }
                     // OnHeroDataAdd copies the name only with an appearance: an empty slot's is stale memory, its 116 an empty name.
-                    if (hero.appearance_bitmap) {
+                    if (hero.appearance) {
                         mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
                     }
                 }
                 apply(mercenary);
                 continue;
             }
-            auto data = make(CharHeroDataAdd, {hero.hero_id, hero.level, primary, secondary, hero.hero_file_id, hero.model_file_id});
+            auto data = make(CharHeroDataAdd, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file});
             if (data.fields.size() > 8) {
-                constexpr uint32_t skills_at_most = 8;
-                data.fields[6].numbers.assign(&hero.h0024, &hero.h0024 + std::min(hero.h0020, skills_at_most));
-                data.Set(7, hero.h001C);
+                data.fields[6].numbers.assign(hero.skills, hero.skills + std::min<size_t>(hero.skill_count, std::size(hero.skills)));
+                data.Set(7, hero.first_value);
                 data.Set(8, flag);
             }
             apply(data);
@@ -671,13 +728,12 @@ namespace {
                 apply(make(CharAgentAttrUpdateFloat, {energy_regen_value, agent->agent_id, std::bit_cast<uint32_t>(living->energy_regen)}));
             }
             uint32_t definition = 0;
-            uint8_t* character = nullptr;
+            const CharacterData* character = nullptr;
             constexpr uint32_t character_definition = 1;
             if (!AgentNotifyParams_Func || !AgentNotifyParams_Func(agent->agent_id, &definition, &character) || definition != character_definition || !character) {
                 continue;
             }
-            // The char client keeps what an agent wears at +0x24, in s2c 110's slot order (CharCliOnEquipUpdate, CharCliAgentGetEquippedItemId).
-            const auto worn = reinterpret_cast<const uint32_t*>(character + 0x24);
+            const auto& worn = character->worn;
             if (living->IsPlayer()) {
                 auto equipment = make(CharEquipment, {agent->agent_id});
                 for (size_t slot = 0; slot + 1 < equipment.fields.size(); slot++) {
@@ -779,11 +835,11 @@ namespace {
                 if (info.fields.size() < (own ? 19u : 15u)) {
                     continue;
                 }
-                // 289 keeps its sixth field at +0xac past GWCA's Guild (k09); the last field of both is 0 in all 318 at hand.
+                // The last field of both is 0 in all 318 at hand.
                 const auto& cape = guild->cape;
                 std::vector<uint32_t> values = {guild->features};
                 if (own) {
-                    values.push_back(*reinterpret_cast<const uint32_t*>(reinterpret_cast<const uint8_t*>(guild) + 0xAC));
+                    values.push_back(reinterpret_cast<const GuildEntry*>(guild)->general_value);
                 }
                 values.insert(values.end(), {cape.cape_bg_color, cape.cape_detail_color, cape.cape_emblem_color, cape.cape_shape, cape.cape_detail, cape.cape_emblem, cape.cape_trim, guild->faction, guild->faction_point});
                 if (own) {
@@ -1158,8 +1214,6 @@ namespace {
     constexpr uint32_t instance_acknowledged = 0xC0;
     constexpr uint32_t join_pending = 0x20;
     constexpr uint32_t transfer_kept = 0x10;
-    constexpr uint32_t msgconn_mode_offset = 0x60;
-    constexpr uint32_t msgconn_receive_cipher_offset = 0x7C;
     constexpr uint32_t msgconn_encrypted = 2;
     constexpr auto connect_timeout = std::chrono::seconds(15);
     constexpr auto load_timeout = std::chrono::seconds(120);
@@ -1222,7 +1276,7 @@ namespace {
     AgentAdvance_pt AgentAdvance_Func = nullptr;
     AgentAdvance_pt AgentAdvance_Ret = nullptr;
     PostNetEvent_pt PostNetEvent_Func = nullptr;
-    uint8_t** game_connection_global = nullptr;
+    MsgConn** game_connection_global = nullptr;
     void** net_context_global = nullptr;
     bool playback_armed = false;
     std::string playback_status;
@@ -1250,7 +1304,7 @@ namespace {
     bool transfer_due = false;
     bool connection_open = false;
     bool stop_sent = false;
-    uint8_t* replay_connection = nullptr;
+    MsgConn* replay_connection = nullptr;
     size_t next_post = 0;
     double played_ms = 0;
     Clock::time_point stage_since;
@@ -1527,7 +1581,7 @@ namespace {
                 return std::format("Playback not available: {} is not found in this client", name);
             }
         }
-        game_connection_global = *reinterpret_cast<uint8_t***>(goodbye + 0x4B);
+        game_connection_global = *reinterpret_cast<MsgConn***>(goodbye + 0x4B);
         net_context_global = *reinterpret_cast<void***>(net_callback + 0x50);
         PostNetEvent_Func = reinterpret_cast<PostNetEvent_pt>(post_net_event);
         GameConnect_Func = reinterpret_cast<GameConnect_pt>(game_connect);
@@ -1710,13 +1764,13 @@ namespace {
             }
             case Playback::Connecting: {
                 const auto connection = *game_connection_global;
-                if (connection && *reinterpret_cast<uint32_t*>(connection + msgconn_mode_offset) == msgconn_encrypted) {
-                    if (*reinterpret_cast<uint32_t*>(connection) != 0) {
+                if (connection && connection->mode == msgconn_encrypted) {
+                    if (connection->socket) {
                         CloseReplayConnection("The game's connection is not the replay's: playback stopped");
                         return;
                     }
                     replay_connection = connection;
-                    memcpy(&send_cipher, connection + msgconn_receive_cipher_offset, sizeof(send_cipher));
+                    send_cipher = connection->receive_cipher;
                     LogPlayback("the replay's connection is ready: its receive cipher copied");
                     EnterStage(Playback::Acknowledging);
                     PostStage(ReplayWire::Stage::BeforeLoad);
