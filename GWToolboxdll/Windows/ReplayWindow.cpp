@@ -9,8 +9,6 @@
 #include <Modules/ReplayRecorderModule.h>
 #include <Modules/Resources.h>
 #include <Utils/EncString.h>
-#include <Utils/Replay/ReplayObserve.h>
-#include <Utils/TextUtils.h>
 #include <Windows/ReplayWindow.h>
 
 namespace {
@@ -20,15 +18,10 @@ namespace {
     uint32_t named_agent = 0;
     std::optional<uint32_t> dragged_ms;
 
-    std::string TimeText(const uint32_t time_ms)
-    {
-        return TextUtils::WStringToString(ReplayObserve::Duration(time_ms));
-    }
-
     std::string ChapterName(const ReplayRecorderModule::TimelineChapter& chapter)
     {
         const auto& name = Resources::GetMapName(static_cast<GW::Constants::MapID>(chapter.map_id))->string();
-        return std::format("{} ({})", name.empty() ? std::format("map {}", chapter.map_id) : name, TimeText(chapter.end_ms - chapter.start_ms));
+        return std::format("{} ({})", name.empty() ? std::format("map {}", chapter.map_id) : name, ReplayRecorderModule::TimeText(chapter.end_ms - chapter.start_ms));
     }
 
     const ReplayRecorderModule::TimelineChapter* ChapterAt(const Playback& playback, const uint32_t time_ms)
@@ -80,7 +73,8 @@ namespace {
         if (ImGui::IsItemHovered()) {
             const auto chapter = ChapterAt(playback, hovered_ms);
             ImGui::SetTooltip(
-                "%s%s\nClick or drag to go there; the ticks are keyframes.", TimeText(hovered_ms).c_str(), chapter ? std::format(", {}{}", ChapterName(*chapter), chapter->explorable ? "" : ": an outpost, skipped (not played yet)").c_str() : ""
+                "%s%s\nClick or drag to go there; the ticks are keyframes.", ReplayRecorderModule::TimeText(hovered_ms).c_str(),
+                chapter ? std::format(", {}{}", ChapterName(*chapter), chapter->explorable ? "" : ": an outpost, skipped (not played yet)").c_str() : ""
             );
         }
     }
@@ -107,12 +101,15 @@ void ReplayWindow::Draw(IDirect3DDevice9*)
     ImGui::TextUnformatted(playback.name.c_str());
     DrawTimeline(recorder, playback);
     const auto chapter = playback.chapter < playback.chapters.size() ? &playback.chapters[playback.chapter] : nullptr;
-    ImGui::Text("%s / %s%s", TimeText(playback.position_ms).c_str(), TimeText(playback.length_ms).c_str(), chapter ? std::format(", chapter {} of {}: {}", playback.chapter + 1, playback.chapters.size(), ChapterName(*chapter)).c_str() : "");
+    ImGui::Text(
+        "%s / %s%s", ReplayRecorderModule::TimeText(playback.position_ms).c_str(), ReplayRecorderModule::TimeText(playback.length_ms).c_str(),
+        chapter ? std::format(", chapter {} of {}: {}", playback.chapter + 1, playback.chapters.size(), ChapterName(*chapter)).c_str() : ""
+    );
     if (!playback.note.empty()) {
         ImGui::TextWrapped("%s", playback.note.c_str());
     }
     if (!playback.playing) {
-        ImGui::TextDisabled("Loading the map at %s: the keyframe at or before it, then the recording to it at once", TimeText(playback.position_ms).c_str());
+        ImGui::TextDisabled("Loading the map at %s: the keyframe at or before it, then the recording to it at once", ReplayRecorderModule::TimeText(playback.position_ms).c_str());
         ImGui::End();
         return;
     }

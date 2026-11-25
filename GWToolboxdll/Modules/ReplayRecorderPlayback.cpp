@@ -408,11 +408,6 @@ namespace ReplayRecorder {
             LogPlayback(std::format("the view follows agent {} (s2c 172 emulated, as an observer's server sends it)", agent_id));
         }
 
-        std::string TimeText(const uint32_t time_ms)
-        {
-            return TextUtils::WStringToString(ReplayObserve::Duration(time_ms));
-        }
-
         void LoadKeyframe(ReplayWire::Plan made)
         {
             plan = std::move(made);
@@ -458,7 +453,7 @@ namespace ReplayRecorder {
                 const auto& skipped = replay.chapters[chapter];
                 const auto end_ms = chapter + 1 < replay.chapters.size() ? replay.chapters[chapter + 1].time_ms : skipped.time_ms;
                 playback_note = std::format(
-                    "Skipped chapter {} (map {}, {}): {}", chapter + 1, skipped.map_id, TimeText(end_ms - skipped.time_ms),
+                    "Skipped chapter {} (map {}, {}): {}", chapter + 1, skipped.map_id, ReplayRecorderModule::TimeText(end_ms - skipped.time_ms),
                     skipped.is_explorable ? "none of its keyframes can be played, the reasons are in the toolbox's log" : "an outpost, which the game's observer mode does not play yet"
                 );
                 LogPlayback(playback_note);
@@ -469,7 +464,7 @@ namespace ReplayRecorder {
         {
             auto made = ReplayWire::MakeSeekPlan(replay, time_ms);
             if (!made.error.empty()) {
-                playback_note = std::format("Cannot go to {}: {}", TimeText(time_ms), made.error);
+                playback_note = std::format("Cannot go to {}: {}", ReplayRecorderModule::TimeText(time_ms), made.error);
                 LogPlayback(playback_note);
                 return false;
             }
@@ -882,6 +877,11 @@ namespace ReplayRecorder {
 } // namespace ReplayRecorder
 
 using namespace ReplayRecorder;
+
+std::string ReplayRecorderModule::TimeText(const uint32_t time_ms)
+{
+    return TextUtils::WStringToString(ReplayObserve::Duration(time_ms));
+}
 
 ReplayRecorderModule::PlaybackView ReplayRecorderModule::GetPlayback() const
 {

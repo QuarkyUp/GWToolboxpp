@@ -53,6 +53,7 @@ public:
         std::string note;
     };
 
+    [[nodiscard]] static std::string TimeText(uint32_t time_ms);
     [[nodiscard]] PlaybackView GetPlayback() const;
     void SetPlaybackPaused(bool paused);
     void SetPlaybackSpeed(int speed);
