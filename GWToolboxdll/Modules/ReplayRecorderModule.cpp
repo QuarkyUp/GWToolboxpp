@@ -1691,17 +1691,18 @@ namespace {
                     EnterStage(Playback::Acknowledging);
                     PostStage(ReplayWire::Stage::BeforeLoad);
                 }
-                else if (waited > connect_timeout || stop) {
+                else if (waited > connect_timeout) {
                     CloseReplayConnection("The replay's connection did not become ready");
                 }
                 return;
             }
             case Playback::Acknowledging:
             case Playback::Loading:
+                // A stop asked during a load waits for the map: closing the connection then would leave the game with none, where stop observing brings it back.
                 if (*game_connection_global != replay_connection) {
                     FinishPlayback("The replay's connection is gone");
                 }
-                else if (waited > load_timeout || stop) {
+                else if (waited > load_timeout) {
                     CloseReplayConnection("The replay's map did not load");
                 }
                 return;
