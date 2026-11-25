@@ -942,10 +942,11 @@ namespace {
 
     struct Reason {
         Reason(const char* why) : why(why), any_field(true) {}
-        Reason(const char* why, std::initializer_list<size_t> fields) : why(why), any_field(false), fields(fields) {}
+        Reason(const char* why, std::initializer_list<size_t> fields, const bool extra_only = false) : why(why), any_field(false), extra_only(extra_only), fields(fields) {}
 
         const char* why;
         bool any_field;
+        bool extra_only = false;
         std::vector<size_t> fields;
     };
 
@@ -986,7 +987,7 @@ namespace {
     const std::map<uint32_t, Reason> keyframe_differences = {
         {31, {"the clock: the model's 31 is the stream's clock at its last 30, the snapshot's the client's instance time", {0}}},
         {32,
-         "gadgets (chests, doors, shrines) and agents of def 3 are left out: GWCA gives them as neither living nor items, and gadget classes (263) are not in GWCA; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
+         "gadgets (chests, doors, shrines) and agents of def 3 are left out: GWCA gives them as neither living nor items; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
         {36, "an agent's class change since its 32: the snapshot writes the agent as the client holds it"},
         {37, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
         {38, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
@@ -1023,10 +1024,10 @@ namespace {
         {239, "the recorder's display settings: not the viewer's"},
         {240, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
         {241, "an agent's effect bits: the model keeps the stream's latest row (a 241), the snapshot writes them as a load does (240)"},
-        {263, "gadget classes: not in GWCA; gadgets are left out until the stream sends them"},
+        {263, {"classes of the maps before: the client's table keeps every class since the game started (m11), the snapshot writes them all", {}, true}},
         {270, "props' animations: not in GWCA; props at their default state until the stream sends them"},
         {273, "props' layers: not in GWCA; props at their default state until the stream sends them"},
-        {277, "gadgets' states: gadgets are left out (263)"},
+        {277, "gadgets' states: gadgets are left out (32)"},
         {284, "not read: no field, its purpose unknown"},
         {302, "not read: a guild value of unknown purpose"},
         {314, {"the item's customizer through the names settings: memory's text is the recorder's where the stream's 314 names another, a placeholder either way; the item's description, which observers have no window for", {1}}},
@@ -1061,7 +1062,7 @@ namespace {
                 fields += std::format(" f{} x{}", field, count);
             }
             const auto why = reasons.find(id);
-            const auto listed = why != reasons.end() && std::ranges::all_of(difference.fields | std::views::keys, [&why](const size_t field) {
+            const auto listed = why != reasons.end() && !(why->second.extra_only && difference.missing) && std::ranges::all_of(difference.fields | std::views::keys, [&why](const size_t field) {
                                     return why->second.any_field || std::ranges::contains(why->second.fields, field);
                                 });
             unlisted += !listed;
@@ -1070,7 +1071,7 @@ namespace {
                 difference.extra, fields.empty() ? " none" : fields.c_str(),
                 listed                 ? why->second.why
                 : why == reasons.end() ? "NOT LISTED"
-                                       : "NOT LISTED: fields its reason does not cover differ"
+                                       : "NOT LISTED: what its reason does not cover differs"
             );
         }
         printf("%zu of %zu messages equal, %zu repeats of a message the model keeps once (the latest, equal); %zu message ids differ with no reason listed\n", equal, expected, repeated, unlisted);
@@ -2375,36 +2376,25 @@ namespace {
         insert(gadget, gadget.keyframes[1].record_index + 3, 33, {gadget_agent});
         insert(gadget, gadget.keyframes[1].record_index + 4, 32, {gadget_agent, gadget_class, 2, 1});
         const auto gadget_plan = ReplayWire::MakeKeyframePlan(gadget, gadget.keyframes[1]);
-        auto as_session_8 = Decoded(gadget.table, gadget.keyframes[1].records);
-        for (auto i = gadget.keyframes[1].record_index; i < gadget.ChapterEnd(0); i++) {
-            if (ReplayState::Message message; ReplayState::Decode(gadget.table, gadget.records[i].body, message)) {
-                as_session_8.push_back(message);
-            }
+        const auto gadget_named = std::format("agent {} is a gadget of class {} that no 263 defined", gadget_agent, gadget_class);
+        const auto names_gadget = [&gadget_named](const std::string& what) {
+            return what.contains(gadget_named) && what.contains("File.cpp:367");
+        };
+        const auto gadget_stream = StreamNeeds(gadget, gadget.keyframes[1]);
+        auto with_class = gadget;
+        auto class_define = ReplayState::Blank(with_class.table, 263);
+        for (const auto [field, value] : {std::pair<size_t, uint32_t>{0, gadget_class}, {1, 0x1234}, {3, 100}}) {
+            class_define.Set(field, value);
         }
-        const auto gadget_needs = ReplayState::CheckClientNeeds(as_session_8);
+        std::vector<uint8_t> class_body;
+        ReplayState::Encode(with_class.table, class_define, class_body);
+        auto& with_class_records = with_class.keyframes[1].records;
+        with_class_records.insert(with_class_records.end() - 1, {with_class.keyframes[1].time_ms, class_body});
+        const auto with_class_plan = ReplayWire::MakeKeyframePlan(with_class, with_class.keyframes[1]);
         Check(
-            gadget_plan.error.empty() && std::ranges::count(gadget_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckClientNeeds(Fed(gadget, gadget_plan)).empty() &&
-                std::ranges::any_of(
-                    gadget_needs,
-                    [named = std::format("agent {} is a gadget of class {} that no 263 defined", gadget_agent, gadget_class)](const std::string& need) {
-                        return need.contains(named) && need.contains("File.cpp:367");
-                    }
-                ),
-            "a gadget created again after a keyframe gets its class's 263 from the stream before it; fed as session 8's plan fed it (no 263), it fails the check by record, agent and class"
-        );
-        auto no_class = gadget;
-        const auto class_at = gadget.keyframes[1].record_index - 2;
-        no_class.records.erase(no_class.records.begin() + static_cast<std::ptrdiff_t>(class_at));
-        for (auto& keyframe : no_class.keyframes) {
-            keyframe.record_index -= keyframe.record_index > class_at;
-        }
-        for (auto& chapter : no_class.chapters) {
-            chapter.first_record -= chapter.first_record > class_at;
-        }
-        const auto no_class_plan = ReplayWire::MakeKeyframePlan(no_class, no_class.keyframes[1]);
-        Check(
-            no_class_plan.error.empty() && std::ranges::count(no_class_plan.changes, ReplayWire::ChangeKind::LeftOut, &ReplayWire::Change::kind) > 0 && ReplayState::CheckClientNeeds(Fed(no_class, no_class_plan)).empty(),
-            "a gadget whose class no 263 of its chapter defines is left out, with the records naming it"
+            names_gadget(gadget_plan.error) && std::ranges::any_of(gadget_stream | std::views::values, names_gadget) && with_class_plan.error.empty() && ReplayState::CheckClientNeeds(Fed(with_class, with_class_plan)).empty() &&
+                StreamNeeds(with_class, with_class.keyframes[1]).empty(),
+            "a gadget made again after a keyframe that lacks its class (every keyframe before this session's writer) is refused, by record, agent and class; with the class written in the keyframe, as the client's table gives it, it plays"
         );
         auto dressed = v2;
         const auto mercenary =

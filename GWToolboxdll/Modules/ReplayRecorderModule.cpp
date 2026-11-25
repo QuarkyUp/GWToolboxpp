@@ -1,6 +1,8 @@
 #include "stdafx.h"
 
 #include <GWCA/Context/CharContext.h>
+#include <GWCA/Context/GadgetContext.h>
+#include <GWCA/Context/GameContext.h>
 #include <GWCA/Context/GuildContext.h>
 #include <GWCA/Context/ItemContext.h>
 #include <GWCA/Context/PreGameContext.h>
@@ -108,6 +110,7 @@ namespace {
         CharTitleRankData = 243,
         CharTitleRankDisplay = 244,
         CharTitleTrackInfo = 246,
+        GadgetClassDefine = 263,
         GuildAssign = 280,
         GuildAllianceInfo = 288,
         GuildGeneralInfo = 289,
@@ -188,6 +191,15 @@ namespace {
         wchar_t* name_enc;
     };
     static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
+
+    // GWCA's GadgetInfo: a gadget class as 263's handler keeps it (0x0083d790, m11); a gadget's agent draws its model file (File.cpp:367 when 0).
+    struct GadgetClass {
+        uint32_t model_file;
+        uint32_t flags;
+        uint32_t scale;
+        wchar_t* name_enc;
+    };
+    static_assert(sizeof(GadgetClass) == sizeof(GW::GadgetInfo));
 
     struct TeamRow {
         uint32_t team;
@@ -763,6 +775,21 @@ namespace {
                 model.fields[1].numbers.assign(npc.model_files, npc.model_files + npc.files_count);
             }
             apply(model);
+        }
+        // The table keeps every class defined since the game started: a gadget the stream makes later finds its class in the keyframe.
+        if (const auto game_context = GW::GetGameContext(); game_context && game_context->gadget) {
+            const auto& classes = game_context->gadget->GadgetInfo;
+            for (uint32_t index = 0; index < classes.size(); index++) {
+                const auto& gadget_class = reinterpret_cast<const GadgetClass&>(classes[index]);
+                if (!gadget_class.model_file) {
+                    continue;
+                }
+                auto define = make(GadgetClassDefine, {index, gadget_class.model_file, gadget_class.flags, gadget_class.scale & 0xFF});
+                if (define.fields.size() > 4) {
+                    define.fields[4].text = gadget_class.name_enc ? gadget_class.name_enc : L"";
+                }
+                apply(define);
+            }
         }
         for (const auto& player : world_context->players) {
             if (!player.agent_id) {

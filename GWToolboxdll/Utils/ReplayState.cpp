@@ -218,23 +218,23 @@ namespace ReplayState {
         constexpr uint32_t any_profession = 11;
         constexpr size_t title_points_field = 2;
         constexpr IdField named_id_fields[] = {
-            {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},        {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
-            {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},       {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
-            {110, 1, IdKind::Item},      {110, 2, IdKind::Item},   {110, 3, IdKind::Item},      {110, 4, IdKind::Item},      {110, 5, IdKind::Item},        {110, 6, IdKind::Item},      {110, 7, IdKind::Item},      {110, 8, IdKind::Item},
-            {110, 9, IdKind::Item},      {111, 2, IdKind::Item},   {114, 0, IdKind::Hero},      {114, 2, IdKind::Inventory}, {115, 0, IdKind::Hero},        {116, 0, IdKind::Hero},      {174, 1, IdKind::Npc},       {176, 0, IdKind::Player},
-            {177, 0, IdKind::Player},    {177, 1, IdKind::Player}, {209, 1, IdKind::Skill},     {210, 1, IdKind::Skill},     {217, 2, IdKind::Skill},       {220, 0, IdKind::Skill},     {226, 1, IdKind::Skill},     {227, 1, IdKind::Skill},
-            {228, 1, IdKind::Skill},     {229, 1, IdKind::Skill},  {230, 1, IdKind::Skill},     {270, 0, IdKind::Prop},      {271, 0, IdKind::Prop},        {272, 0, IdKind::Prop},      {273, 0, IdKind::Prop},      {280, 0, IdKind::Guild},
-            {288, 0, IdKind::Guild},     {289, 0, IdKind::Guild},  {309, 0, IdKind::Item},      {313, 0, IdKind::Item},      {314, 0, IdKind::Item},        {318, 0, IdKind::Inventory}, {318, 1, IdKind::Item},      {318, 2, IdKind::Bag},
-            {319, 0, IdKind::Inventory}, {319, 3, IdKind::Bag},    {320, 0, IdKind::Inventory}, {324, 0, IdKind::Inventory}, {327, 0, IdKind::Inventory},   {327, 2, IdKind::Item},      {327, 3, IdKind::Item},      {328, 0, IdKind::Inventory},
-            {331, 0, IdKind::Inventory}, {331, 1, IdKind::Item},   {331, 2, IdKind::Bag},       {333, 0, IdKind::Inventory}, {333, 1, IdKind::Item},        {335, 0, IdKind::Inventory}, {338, 0, IdKind::Inventory}, {338, 1, IdKind::Item},
-            {338, 2, IdKind::Item},      {345, 0, IdKind::Item},   {346, 0, IdKind::Item},      {350, 0, IdKind::Item},      {263, 0, IdKind::GadgetClass}, {353, 0, IdKind::Item},      {354, 0, IdKind::Item},      {410, 0, IdKind::Player},
-            {435, 0, IdKind::Party},     {460, 0, IdKind::Party},  {460, 1, IdKind::Player},    {465, 0, IdKind::Party},     {465, 1, IdKind::Player},      {467, 0, IdKind::Party},     {468, 0, IdKind::Party},
+            {60, 0, IdKind::Player},     {73, 0, IdKind::Quest},   {76, 0, IdKind::Quest},      {77, 0, IdKind::Quest},      {80, 0, IdKind::Quest},      {81, 0, IdKind::Quest},      {82, 0, IdKind::Quest},      {83, 0, IdKind::Quest},
+            {84, 0, IdKind::Quest},      {66, 1, IdKind::Skill},   {86, 0, IdKind::Npc},        {87, 0, IdKind::Npc},        {89, 0, IdKind::Player},     {90, 0, IdKind::Player},     {109, 1, IdKind::Item},      {109, 2, IdKind::Item},
+            {110, 1, IdKind::Item},      {110, 2, IdKind::Item},   {110, 3, IdKind::Item},      {110, 4, IdKind::Item},      {110, 5, IdKind::Item},      {110, 6, IdKind::Item},      {110, 7, IdKind::Item},      {110, 8, IdKind::Item},
+            {110, 9, IdKind::Item},      {111, 2, IdKind::Item},   {114, 0, IdKind::Hero},      {114, 2, IdKind::Inventory}, {115, 0, IdKind::Hero},      {116, 0, IdKind::Hero},      {174, 1, IdKind::Npc},       {176, 0, IdKind::Player},
+            {177, 0, IdKind::Player},    {177, 1, IdKind::Player}, {209, 1, IdKind::Skill},     {210, 1, IdKind::Skill},     {217, 2, IdKind::Skill},     {220, 0, IdKind::Skill},     {226, 1, IdKind::Skill},     {227, 1, IdKind::Skill},
+            {228, 1, IdKind::Skill},     {229, 1, IdKind::Skill},  {230, 1, IdKind::Skill},     {270, 0, IdKind::Prop},      {271, 0, IdKind::Prop},      {272, 0, IdKind::Prop},      {273, 0, IdKind::Prop},      {280, 0, IdKind::Guild},
+            {288, 0, IdKind::Guild},     {289, 0, IdKind::Guild},  {309, 0, IdKind::Item},      {313, 0, IdKind::Item},      {314, 0, IdKind::Item},      {318, 0, IdKind::Inventory}, {318, 1, IdKind::Item},      {318, 2, IdKind::Bag},
+            {319, 0, IdKind::Inventory}, {319, 3, IdKind::Bag},    {320, 0, IdKind::Inventory}, {324, 0, IdKind::Inventory}, {327, 0, IdKind::Inventory}, {327, 2, IdKind::Item},      {327, 3, IdKind::Item},      {328, 0, IdKind::Inventory},
+            {331, 0, IdKind::Inventory}, {331, 1, IdKind::Item},   {331, 2, IdKind::Bag},       {333, 0, IdKind::Inventory}, {333, 1, IdKind::Item},      {335, 0, IdKind::Inventory}, {338, 0, IdKind::Inventory}, {338, 1, IdKind::Item},
+            {338, 2, IdKind::Item},      {345, 0, IdKind::Item},   {346, 0, IdKind::Item},      {350, 0, IdKind::Item},      {353, 0, IdKind::Item},      {354, 0, IdKind::Item},      {410, 0, IdKind::Player},    {435, 0, IdKind::Party},
+            {460, 0, IdKind::Party},     {460, 1, IdKind::Player}, {465, 0, IdKind::Party},     {465, 1, IdKind::Player},    {467, 0, IdKind::Party},     {468, 0, IdKind::Party},
         };
         constexpr IdField id_bringers[] = {
-            {32, 0, IdKind::Agent},  {55, 0, IdKind::Agent},  {89, 1, IdKind::Agent},  {154, 0, IdKind::Agent},       {155, 0, IdKind::Agent},  {159, 1, IdKind::Agent},  {160, 2, IdKind::Agent},     {167, 0, IdKind::Agent},
-            {240, 0, IdKind::Agent}, {241, 0, IdKind::Agent}, {350, 0, IdKind::Item},  {353, 0, IdKind::Item},        {354, 0, IdKind::Item},   {319, 3, IdKind::Bag},    {324, 0, IdKind::Inventory}, {288, 0, IdKind::Guild},
-            {289, 0, IdKind::Guild}, {467, 0, IdKind::Party}, {89, 0, IdKind::Player}, {176, 0, IdKind::Player},      {177, 0, IdKind::Player}, {410, 0, IdKind::Player}, {73, 0, IdKind::Quest},      {80, 0, IdKind::Quest},
-            {116, 0, IdKind::Hero},  {115, 0, IdKind::Hero},  {86, 0, IdKind::Npc},    {263, 0, IdKind::GadgetClass}, {273, 0, IdKind::Prop},   {66, 1, IdKind::Skill},   {226, 1, IdKind::Skill},     {228, 1, IdKind::Skill},
+            {32, 0, IdKind::Agent},  {55, 0, IdKind::Agent},  {89, 1, IdKind::Agent},  {154, 0, IdKind::Agent},  {155, 0, IdKind::Agent},  {159, 1, IdKind::Agent},  {160, 2, IdKind::Agent},     {167, 0, IdKind::Agent},
+            {240, 0, IdKind::Agent}, {241, 0, IdKind::Agent}, {350, 0, IdKind::Item},  {353, 0, IdKind::Item},   {354, 0, IdKind::Item},   {319, 3, IdKind::Bag},    {324, 0, IdKind::Inventory}, {288, 0, IdKind::Guild},
+            {289, 0, IdKind::Guild}, {467, 0, IdKind::Party}, {89, 0, IdKind::Player}, {176, 0, IdKind::Player}, {177, 0, IdKind::Player}, {410, 0, IdKind::Player}, {73, 0, IdKind::Quest},      {80, 0, IdKind::Quest},
+            {116, 0, IdKind::Hero},  {115, 0, IdKind::Hero},  {86, 0, IdKind::Npc},    {273, 0, IdKind::Prop},   {66, 1, IdKind::Skill},   {226, 1, IdKind::Skill},  {228, 1, IdKind::Skill},
         };
         constexpr uint16_t row_ids[] = {CharAgentUpdateScale,    CharAgentUpdateNpcName, CharNotifyDword, CharAgentAttrUpdateIntTarget, CharAgentUpdateProfession, CharAgentAllyAdd,
                                         CharAgentInitialEffects, CharAgentUpdateEffects, CharAgentMorale, CharAgentAttrUpdateFloat};
@@ -779,8 +779,6 @@ namespace ReplayState {
                 return "quest";
             case IdKind::Hero:
                 return "hero";
-            case IdKind::GadgetClass:
-                return "gadget class";
             case IdKind::Npc:
                 return "npc";
             case IdKind::Prop:
@@ -876,10 +874,6 @@ namespace ReplayState {
         // A ground item's 32 names its item by its class: the stream sends the item's details first (z02).
         if (const auto item = message.U(CreateClass); message.id == AgentCreate && message.U(CreateDef) == item_def && item && !brought.contains({IdKind::Item, item})) {
             unbrought.emplace_back(IdField{AgentCreate, static_cast<uint8_t>(CreateClass), IdKind::Item}, item);
-        }
-        // A gadget's 32 names its class, which only 263 defines (GadgetCliGetClass, m01).
-        if (const auto gadget_class = message.U(CreateClass); message.id == AgentCreate && message.U(CreateDef) == gadget_def && gadget_class && !brought.contains({IdKind::GadgetClass, gadget_class})) {
-            unbrought.emplace_back(IdField{AgentCreate, static_cast<uint8_t>(CreateClass), IdKind::GadgetClass}, gadget_class);
         }
         return unbrought;
     }

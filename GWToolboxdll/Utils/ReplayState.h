@@ -68,7 +68,7 @@ namespace ReplayState {
 
     std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
-    enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill, GadgetClass };
+    enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };
     const char* IdKindName(IdKind kind);
 
     struct IdField {
