@@ -75,6 +75,7 @@ namespace {
         CharNpcProperties = 86,
         CharNpcModel = 87,
         CharPlayerCreate = 89,
+        CharToClient91 = 91,
         CharHeroSkillStatusBitmap = 101,
         CharPostProcess = 107,
         CharNpcUpdateWeapons = 109,
@@ -82,6 +83,7 @@ namespace {
         CharContextValue112 = 112,
         CharHeroActivate = 114,
         CharHeroDataAdd = 115,
+        CharMercenaryInfo = 116,
         CharToClient153 = 153,
         CharAgentUpdateNpcName = 155,
         CharAgentMorale = 156,
@@ -166,7 +168,7 @@ namespace {
     bool record_requested = false;
     bool stopped_until_login = false;
     bool load_keyframe_due = false;
-    bool connect_seen = false;
+    bool load_finished = false;
     uint32_t next_keyframe_ms = 0;
     uint32_t keyframe_count = 0;
     uint32_t chapter_count = 0;
@@ -423,11 +425,37 @@ namespace {
         }
         apply(load_map);
         apply(make(CharPlayerTeam, {world_context->playerTeamToken}));
-        // The team row as every explorable load at hand has it (no outpost's has one), and the zero of 404 as every load.
+        struct TeamRow {
+            uint32_t team;
+            uint32_t party;
+            uint32_t value;
+            uint32_t colour;
+            uint32_t territory;
+            wchar_t name[20];
+        };
+        struct TeamTable {
+            uint32_t count;
+            const TeamRow* const* by_party;
+            uint32_t capacity;
+            uint32_t by_party_count;
+        };
+        // 430's handler keeps its rows by party id in MissionCommon::CTeamPartyTable, at +0x398 of the mission context (GWCA's CharContext).
+        const auto teams = reinterpret_cast<const TeamTable*>(reinterpret_cast<const uint8_t*>(char_context) + 0x398);
+        for (uint32_t party = 0; teams->by_party && party < teams->by_party_count; party++) {
+            const auto row = teams->by_party[party];
+            if (!row) {
+                continue;
+            }
+            auto team = make(MissionTeam, {row->party, row->team, row->value, row->colour, row->territory});
+            if (team.fields.size() > 5) {
+                team.fields[5].text.assign(row->name, wcsnlen(row->name, std::size(row->name)));
+                apply(team);
+            }
+        }
         const auto explorable = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable;
-        if (auto team = make(MissionTeam, {1, world_context->playerTeamToken, 64, 0, 2}); explorable && team.fields.size() > 5) {
-            team.fields[5].text = char_context->player_name;
-            apply(team);
+        // 91's handler keeps its value at the world context's +0x53c; of the loads at hand only the explorable ones in hard mode send it.
+        if (explorable && world_context->h053C[0]) {
+            apply(make(CharToClient91, {world_context->h053C[0]}));
         }
         apply(make(CharPostProcess, {post_process.level, post_process.tint}));
         apply(make(MissionToClient404, {0}));
@@ -481,7 +509,31 @@ namespace {
             }
         }
         for (const auto& hero : world_context->hero_info) {
-            apply(make(CharHeroDataAdd, {hero.hero_id, hero.level, static_cast<uint32_t>(hero.primary), static_cast<uint32_t>(hero.secondary), hero.hero_file_id, hero.model_file_id}));
+            const auto primary = static_cast<uint32_t>(hero.primary);
+            const auto secondary = static_cast<uint32_t>(hero.secondary);
+            const auto flag = hero.h0044 & 1;
+            // CHeroMgr::OnHeroDataAdd keeps 115's and 116's fields in this entry: 115's skills from +0x24, 116's appearance, armor and dyes from +0x48.
+            if (hero.hero_id >= GW::Constants::HeroID::Merc1 && hero.hero_id <= GW::Constants::HeroID::Merc8) {
+                auto mercenary = make(CharMercenaryInfo, {hero.hero_id, hero.level, primary, secondary, hero.hero_file_id, hero.model_file_id, hero.h001C, flag, hero.appearance_bitmap});
+                constexpr size_t armor_pieces = 5;
+                if (mercenary.fields.size() > 9 + 2 * armor_pieces) {
+                    for (size_t piece = 0; piece < armor_pieces; piece++) {
+                        mercenary.Set(9 + piece, reinterpret_cast<const uint32_t*>(&hero.chestpiece_dye_tint)[piece]);
+                        mercenary.Set(9 + armor_pieces + piece, reinterpret_cast<const uint32_t*>(hero.chestpiece_dye)[piece]);
+                    }
+                    mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
+                }
+                apply(mercenary);
+                continue;
+            }
+            auto data = make(CharHeroDataAdd, {hero.hero_id, hero.level, primary, secondary, hero.hero_file_id, hero.model_file_id});
+            if (data.fields.size() > 8) {
+                constexpr uint32_t skills_at_most = 8;
+                data.fields[6].numbers.assign(&hero.h0024, &hero.h0024 + std::min(hero.h0020, skills_at_most));
+                data.Set(7, hero.h001C);
+                data.Set(8, flag);
+            }
+            apply(data);
         }
         if (const auto inventory = GW::Items::GetInventory()) {
             apply(make(ItemInventoryCreate, {inventory->inventory_id(), 0}));
@@ -805,7 +857,7 @@ namespace {
         writer.AppendChapter({0, ElapsedMs(recording_start), map_id, explorable, map_info ? static_cast<uint32_t>(map_info->type) : 0});
         chapter_count++;
         chapter_map_file = 0;
-        connect_seen = false;
+        load_finished = false;
         load_keyframe_due = true;
     }
 
@@ -878,7 +930,7 @@ namespace {
             record_requested = false;
             return;
         }
-        connect_seen = true;
+        load_finished = true;
         load_keyframe_due = false;
         WriteKeyframe(ReplayFile::KeyframeKind::Start);
     }
@@ -930,8 +982,9 @@ namespace {
             status = "Stopped: an observed match is never recorded";
             return;
         }
-        if (packet->header == AgentConnect) {
-            connect_seen = true;
+        // A map's after-load keyframe waits for the load's last message: an outpost's 446, 366, 398 and 404 come about 0.5 s after its 31.
+        if (packet->header == MissionInstanceLoadFinish) {
+            load_finished = true;
         }
         if (packet->header == MissionLoadMap) {
             chapter_map_file = static_cast<const GW::Packet::StoC::InstanceLoadFile*>(packet)->map_fileID;
@@ -1045,7 +1098,7 @@ namespace {
             FinishRecording();
             return;
         }
-        if (loaded && load_keyframe_due && connect_seen) {
+        if (loaded && load_keyframe_due && load_finished) {
             load_keyframe_due = false;
             WriteKeyframe(ReplayFile::KeyframeKind::AfterLoad);
         }

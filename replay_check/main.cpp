@@ -1001,8 +1001,6 @@ namespace {
         {87, "an NPC the client holds that the stream has not defined since the load: defined, unused unless an agent's class names it"},
         {109, {"a hero's weapons after a swap: the model keeps the load's 109 and the swap's 111s, the snapshot the char client's slots now (k04): the same weapons", {1, 2}}},
         {110, "a hero's weapons after a swap: the model keeps the swap's 111s as a 110, the snapshot writes the hero's 109 from the char client's slots (k04)"},
-        {115, "a hero's six values (115's array) are not read: the hero panel's"},
-        {116, "mercenaries' 116 is not written: their 115 is the hero data their 114 needs (5c)"},
         {124, "not read: unknown purpose, no use of it seen in the observer's view (session 7)"},
         {125, "not read: unknown purpose, no use of it seen in the observer's view (session 7)"},
         {138, "the explored areas: not written; the world map stays closed in replays (OnWorldMapToggle)"},
