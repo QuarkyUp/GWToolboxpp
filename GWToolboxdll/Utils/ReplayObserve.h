@@ -71,6 +71,6 @@ namespace ReplayObserve {
     [[nodiscard]] uint32_t Category(uint32_t type, uint32_t title);
     std::wstring Duration(uint32_t milliseconds);
 
-    Scan ScanFolder(const std::filesystem::path& folder, uint32_t client_build, uint64_t table_digest, const std::set<uint32_t>& taken_keys, uint64_t now_unix_ms);
+    Scan ScanFolder(const std::filesystem::path& folder, uint32_t client_build, uint64_t table_digest, const std::set<uint32_t>& taken_keys, uint64_t now_unix_ms, const std::filesystem::path& recording);
     std::string CheckRow(const ReplayFile::MessageTable& table, const RowMessage& message);
 } // namespace ReplayObserve

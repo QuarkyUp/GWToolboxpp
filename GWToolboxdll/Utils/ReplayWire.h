@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayState.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -64,6 +65,8 @@ namespace ReplayWire {
         uint32_t map_type = 0;
         std::vector<Change> changes;
         std::vector<Post> posts;
+        std::vector<size_t> stream_records;
+        size_t placed = 0;
         std::string error;
     };
 
@@ -72,5 +75,7 @@ namespace ReplayWire {
     Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe);
     Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms);
     bool SeeksInPlace(const Plan& playing, uint32_t played_ms, const Plan& sought);
+    std::vector<ReplayState::Message> Placement(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
+    std::vector<Post> PlacementPosts(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 } // namespace ReplayWire

@@ -667,7 +667,7 @@ namespace {
             descriptors += std::format(" {:#x}", descriptor);
         }
         printf("client build %u; the 414 table from %ls:%s\n\n", contents.header.client_build, reference_path.filename().c_str(), descriptors.c_str());
-        const auto scan = ReplayObserve::ScanFolder(folder, contents.header.client_build, contents.header.table_digest, {}, NowUnixMs());
+        const auto scan = ReplayObserve::ScanFolder(folder, contents.header.client_build, contents.header.table_digest, {}, NowUnixMs(), {});
         const auto proof = ProveRows(contents.table, scan, true);
         const auto passed = proof.rows && !proof.layout_errors && !proof.disallowed_types && !proof.keys_out_of_range && !proof.duplicate_keys;
         printf(
@@ -940,6 +940,47 @@ namespace {
         return differences;
     }
 
+    size_t CheckedWalks(std::vector<ReplayState::Message>& sent, std::vector<ReplayState::Message>& built)
+    {
+        // A 32 with a stop time makes its agent mid-walk (CAgent's constructor); the model writes it standing where it walked to on its leg, its order after it.
+        size_t checked = 0;
+        for (auto it = sent.begin(); it != sent.end();) {
+            const auto agent_id = it->U(0);
+            const auto standing = std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
+                return message.id == 32 && message.U(0) == agent_id;
+            });
+            const auto order = std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
+                return (message.id == 41 || message.id == 42) && message.U(0) == agent_id;
+            });
+            if (it->id != 32 || !it->U(13) || standing == built.end() || order == built.end() || standing->U(13) || order->U(1, 0) != it->U(18, 0) || order->U(1, 1) != it->U(18, 1)) {
+                ++it;
+                continue;
+            }
+            const auto along = (standing->F(4, 0) - it->F(4, 0)) * (it->F(21, 0) - it->F(4, 0)) + (standing->F(4, 1) - it->F(4, 1)) * (it->F(21, 1) - it->F(4, 1));
+            const auto across = (standing->F(4, 0) - it->F(4, 0)) * (it->F(21, 1) - it->F(4, 1)) - (standing->F(4, 1) - it->F(4, 1)) * (it->F(21, 0) - it->F(4, 0));
+            const auto leg = std::hypot(it->F(21, 0) - it->F(4, 0), it->F(21, 1) - it->F(4, 1));
+            if (along < 0.f || along > leg * leg + 1.f || std::abs(across) > leg) {
+                ++it;
+                continue;
+            }
+            auto rest = *standing;
+            for (const auto field : {4, 13, 15, 17, 18, 19, 20, 21, 22}) {
+                rest.fields[field] = it->fields[field];
+            }
+            if (rest != *it) {
+                ++it;
+                continue;
+            }
+            built.erase(order);
+            built.erase(std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
+                return message.id == 32 && message.U(0) == agent_id;
+            }));
+            it = sent.erase(it);
+            checked++;
+        }
+        return checked;
+    }
+
     struct Reason {
         Reason(const char* why) : why(why), any_field(true) {}
         Reason(const char* why, std::initializer_list<size_t> fields, const bool extra_only = false) : why(why), any_field(false), extra_only(extra_only), fields(fields) {}
@@ -987,14 +1028,14 @@ namespace {
     const std::map<uint32_t, Reason> keyframe_differences = {
         {31, {"the clock: the model's 31 is the stream's clock at its last 30, the snapshot's the client's instance time", {0}}},
         {32,
-         "gadgets (chests, doors, shrines) and agents of def 3 are left out: GWCA gives them as neither living nor items; a moving agent's speed and its time field are not read (288 and 0 written), and a periodic keyframe's places are the client's where the model's are estimates"},
+         "gadgets (chests, doors, shrines) and agents of def 3 are left out: GWCA gives them as neither living nor items; an agent's places and speeds are the client's server world's (CAgent), where the model's places are the orders' estimates and its speeds the 32's before a 39 or 43"},
         {36, "an agent's class change since its 32: the snapshot writes the agent as the client holds it"},
         {37, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
         {38, "an agent's move since its 32: the snapshot writes it where it stands; it waits there until its next move"},
-        {39, "an agent's speed change: not read; its next move gives it again"},
-        {41, "a move in progress: the snapshot writes the agent where it stands; it waits there until its next move"},
-        {42, "a move in progress: the snapshot writes the agent where it stands; it waits there until its next move"},
-        {43, "a move's pace: not read; its next move gives it again"},
+        {39, "an agent's speed change: the keyframe's 32 carries the speed it set (CAgent's max speed)"},
+        {41, "a walk in progress: the keyframe writes the client's order (CAgent's target), the model the stream's latest order to the agents its estimate has walking"},
+        {42, "a walk in progress: the keyframe writes the client's order (CAgent's target and its agent), the model the stream's latest order to the agents its estimate has walking"},
+        {43, "a move type's change: the keyframe's 32 carries the move speed it set (CAgent's move speed)"},
         {46, "a rotation in progress: the 32 carries the agent's facing now"},
         {55, "the attribute points: not in GWCA; the attribute window, which an observer does not have (5c)"},
         {59, "an attribute changed after the load: the 58 written from GWCA holds its level"},
@@ -1140,9 +1181,14 @@ namespace {
             for (const auto& record : records) {
                 world.Apply(record);
             }
-            const auto built = world.Join();
-            printf("\nchapter %zu: its real load (records %zu to %zu) against the model's join built from it: %zu messages built, layout errors %u\n", c + 1, load->head, load->end, built.size(), world.LayoutErrors());
-            passed &= PrintComparison(Compare(Decoded(contents.table, records), built), listed_differences);
+            auto built = world.Join();
+            auto sent = Decoded(contents.table, records);
+            const auto walks = CheckedWalks(sent, built);
+            printf(
+                "\nchapter %zu: its real load (records %zu to %zu) against the model's join built from it: %zu messages built, layout errors %u; %zu agents made mid-walk, written where they walked to with their order after them\n", c + 1, load->head,
+                load->end, built.size(), world.LayoutErrors(), walks
+            );
+            passed &= PrintComparison(Compare(sent, built), listed_differences);
             passed &= !world.LayoutErrors();
         }
         for (size_t k = 0; k < contents.keyframes.size(); k++) {
@@ -1515,6 +1561,48 @@ namespace {
         return with;
     }
 
+    std::vector<float> PlacementErrors(const ReplayFile::Contents& contents, const ReplayWire::Plan& from, const ReplayFile::Keyframe& later)
+    {
+        // A later keyframe's 32s hold the client's own places at its time: the placement there from an earlier keyframe against them.
+        std::map<uint32_t, std::pair<float, float>> client;
+        for (const auto& message : Decoded(contents.table, later.records)) {
+            if (message.id == 32 && message.U(2) == 1) {
+                client[message.U(0)] = {message.F(4, 0), message.F(4, 1)};
+            }
+        }
+        std::vector<float> errors;
+        for (const auto& message : ReplayWire::Placement(contents, from, later.time_ms - from.start_ms)) {
+            if (const auto found = client.find(message.U(0)); message.id == 44 && found != client.end()) {
+                errors.push_back(std::hypot(message.F(1, 0) - found->second.first, message.F(1, 1) - found->second.second));
+            }
+        }
+        return errors;
+    }
+
+    std::string ErrorSummary(std::vector<float> errors)
+    {
+        if (errors.empty()) {
+            return "no agent";
+        }
+        std::ranges::sort(errors);
+        const auto mean = std::accumulate(errors.begin(), errors.end(), 0.0) / static_cast<double>(errors.size());
+        const auto over = std::ranges::count_if(errors, [](const float error) {
+            return error > 100.f;
+        });
+        return std::format("{} agents, mean {:.0f}, median {:.0f}, p90 {:.0f}, most {:.0f} units, {} over 100", errors.size(), mean, errors[errors.size() / 2], errors[errors.size() * 9 / 10], errors.back(), over);
+    }
+
+    std::map<uint32_t, std::pair<float, float>> Placed(const std::vector<ReplayState::Message>& placement)
+    {
+        std::map<uint32_t, std::pair<float, float>> placed;
+        for (const auto& message : placement) {
+            if (message.id == 44) {
+                placed[message.U(0)] = {message.F(1, 0), message.F(1, 1)};
+            }
+        }
+        return placed;
+    }
+
     struct SeekProof {
         size_t seeks = 0;
         size_t refused = 0;
@@ -1522,6 +1610,10 @@ namespace {
         size_t in_place = 0;
         size_t most_records = 0;
         size_t most_bytes = 0;
+        size_t placed = 0;
+        size_t placed_apart = 0;
+        std::vector<float> sampled_errors;
+        std::vector<float> orders_errors;
     };
 
     SeekProof ProveSeek(const ReplayFile::Contents& contents, const bool verbose)
@@ -1575,6 +1667,27 @@ namespace {
             }
             size_t in_place = 0;
             size_t in_place_differing = 0;
+            auto orders_only = contents;
+            orders_only.motions.clear();
+            for (const auto& [k, from] : playing) {
+                const auto later = std::ranges::find_if(playing, [&](const auto& entry) {
+                    return entry.first > k;
+                });
+                if (later == playing.end()) {
+                    continue;
+                }
+                const auto& truth = contents.keyframes[later->first];
+                auto sampled = PlacementErrors(contents, from, truth);
+                auto estimated = PlacementErrors(orders_only, from, truth);
+                if (verbose) {
+                    printf(
+                        "chapter %zu, keyframe %zu's client places against the placement from keyframe %zu: with the file's %zu samples, %s; orders only, %s\n", chapter + 1, later->first + 1, k + 1, contents.motions.size(), ErrorSummary(sampled).c_str(),
+                        ErrorSummary(estimated).c_str()
+                    );
+                }
+                proof.sampled_errors.insert(proof.sampled_errors.end(), sampled.begin(), sampled.end());
+                proof.orders_errors.insert(proof.orders_errors.end(), estimated.begin(), estimated.end());
+            }
             auto at_keyframe = whole;
             auto keyframe_record = next_record;
             for (const auto k : keyframes) {
@@ -1621,6 +1734,14 @@ namespace {
                 }
                 for (const auto& need : needs) {
                     fail(std::format("a seek to {} ms, what the client needs: {}", time_ms, need));
+                }
+                const auto placement = ReplayWire::Placement(contents, plan, plan.seek_ms);
+                proof.placed += plan.placed;
+                if (plan.seek_ms && plan.placed != placement.size()) {
+                    fail(std::format("a seek to {} ms posts {} placement messages, its placement holds {}", time_ms, plan.placed, placement.size()));
+                }
+                if (placement != ReplayWire::Placement(contents, plan, plan.seek_ms)) {
+                    fail(std::format("a seek to {} ms: its placement is not the same twice", time_ms));
                 }
                 const auto& model_keyframe = model_keyframes.at(plan.keyframe);
                 const auto model_plan = ReplayWire::MakeKeyframePlan(contents, model_keyframe);
@@ -1675,6 +1796,20 @@ namespace {
                     for (const auto& message : Fed(contents, ReplayWire::MakeKeyframePlan(contents, model_keyframes.at(k)), played_ms)) {
                         in_place_state.Apply(message);
                     }
+                    // The same time reached in place: the placement from the keyframe played is the load's for every agent the samples hold.
+                    const auto loaded = Placed(placement);
+                    for (const auto& [agent_id, place] : Placed(ReplayWire::Placement(contents, from, played_ms))) {
+                        if (const auto found = loaded.find(agent_id); found != loaded.end() && std::hypot(found->second.first - place.first, found->second.second - place.second) > 1.f) {
+                            proof.placed_apart++;
+                            if (!contents.motions.empty()) {
+                                fail(
+                                    std::format(
+                                        "a seek to {} ms in place from keyframe {}: agent {} is placed {:.0f} units from the load's placement", time_ms, k + 1, agent_id, std::hypot(found->second.first - place.first, found->second.second - place.second)
+                                    )
+                                );
+                            }
+                        }
+                    }
                     const auto in_place_differences = Compare(expected, in_place_state.Join());
                     if (std::ranges::any_of(in_place_differences | std::views::values, &Difference::Differs)) {
                         in_place_differing++;
@@ -1691,6 +1826,10 @@ namespace {
             }
         }
         if (verbose) {
+            printf(
+                "positions: %zu placement messages posted by the seeks; in place, %zu agents placed more than 1 unit from the load's placement (%s); the placement at later keyframes against their client places: with the file's samples, %s; orders only, %s\n",
+                proof.placed, proof.placed_apart, contents.motions.empty() ? "no samples: orders-only estimates from different keyframes" : "a failure each", ErrorSummary(proof.sampled_errors).c_str(), ErrorSummary(proof.orders_errors).c_str()
+            );
             printf(
                 "seek: %zu seeks, %zu refused (each with its reason), %zu in place; the most an in-place seek posts at once: %zu stream records, %zu bytes; %zu failures: %s\n", proof.seeks, proof.refused, proof.in_place, proof.most_records,
                 proof.most_bytes, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed"
@@ -1980,6 +2119,8 @@ namespace {
         auto unfinished = header;
         unfinished.flags &= ~ReplayFile::Complete;
         write(L"unfinished.gwrec", unfinished, table, false);
+        unfinished.start_time_unix_ms = now - 110 * 3600000ull;
+        write(L"cut.gwrec", unfinished, table, false);
         auto other_table = table;
         other_table[ReplayObserve::row_message_id].push_back(0x404);
         auto other_table_header = header;
@@ -2001,16 +2142,16 @@ namespace {
         }
 
         const std::set<uint32_t> server_keys = {ReplayObserve::first_key, ReplayObserve::first_key + 2};
-        const auto scan = ReplayObserve::ScanFolder(rows_folder, 39167, ReplayFile::TableDigest(table), server_keys, now);
-        Check(scan.rows.size() == std::size(listed) + 2 && scan.left_out.size() == 5, "the rows folder gives one row per recording (seven) and leaves five files out");
+        const auto scan = ReplayObserve::ScanFolder(rows_folder, 39167, ReplayFile::TableDigest(table), server_keys, now, rows_folder / L"unfinished.gwrec");
+        Check(scan.rows.size() == std::size(listed) + 3 && scan.left_out.size() == 5, "the rows folder gives one row per recording (eight) and leaves five files out");
         if (scan.rows.empty()) {
             return;
         }
         const auto proof = ProveRows(table, scan, false);
         Check(!proof.layout_errors && !proof.disallowed_types && !proof.keys_out_of_range && !proof.duplicate_keys, "every row is valid by the live 414 table, its type allowed, its key ours and unique");
         Check(
-            std::ranges::count(scan.rows, std::optional<size_t>(), &ReplayObserve::Row::keyframe) == 1 && std::ranges::count(scan.rows, std::optional<size_t>(0), &ReplayObserve::Row::keyframe) == std::ssize(listed) + 1,
-            "a recording of outposts alone is listed, not playable; the others play from a keyframe"
+            std::ranges::count(scan.rows, std::optional<size_t>(), &ReplayObserve::Row::keyframe) == 2 && std::ranges::count(scan.rows, std::optional<size_t>(0), &ReplayObserve::Row::keyframe) == std::ssize(listed) + 1,
+            "a recording of outposts alone and one cut short before its first keyframe are listed, not playable; the others play from a keyframe"
         );
         const auto two = std::ranges::find(scan.rows, std::filesystem::path(L"two-maps.gwrec"), [](const ReplayObserve::Row& row) {
             return row.path.filename();
@@ -2042,7 +2183,9 @@ namespace {
             return found == scan.left_out.end() ? std::string("listed") : found->reason;
         };
         Check(left_out_for(L"other-build.gwrec") == "recorded on client build 39112, this client is build 39167", "another build's recording is left out, the builds named");
-        Check(left_out_for(L"unfinished.gwrec").starts_with("unfinished"), "an unfinished recording is left out");
+        Check(left_out_for(L"unfinished.gwrec") == "being recorded", "the recording being made is left out");
+        const auto cut = std::ranges::find(scan.rows, rows_folder / L"cut.gwrec", &ReplayObserve::Row::path);
+        Check(left_out_for(L"cut.gwrec") == "listed" && cut != scan.rows.end() && cut->header.duration_ms > 0, "a recording cut short with no end written (a power loss) is listed, as long as its last record");
         Check(left_out_for(L"other-table.gwrec") == "its message table is not this client's", "a recording of another message table is left out");
         Check(left_out_for(L"empty.gwrec") == "no messages", "an empty recording is left out");
         Check(left_out_for(L"not-a-recording.gwrec") == "not a recording (no magic)", "a file failing the header check is left out");
@@ -2440,6 +2583,7 @@ namespace {
         Check(seeks.in_place > 0, std::format("forward seeks from an earlier keyframe play in place, with no load, and reach the whole stream's state ({} seeks)", seeks.in_place).c_str());
         const auto sought = ReplayWire::MakeSeekPlan(v2, v2.keyframes.back().time_ms + 1000);
         auto sought_fed = Fed(v2, sought, sought.seek_ms);
+        sought_fed.resize(sought_fed.size() - sought.placed);
         ReplayState::World all(v2.table);
         ReplayState::World one_short(v2.table);
         for (size_t i = 0; i < sought_fed.size(); i++) {
@@ -2461,6 +2605,125 @@ namespace {
         Check(CountNames(other.table, named.keyframes.front().records, other.header.flags).not_placeholders == 0, "with the names settings off, names are not checked");
     }
 
+    void TestPositions(const std::filesystem::path& folder)
+    {
+        ReplayFile::Contents plain;
+        std::string error;
+        Check(ReplayFile::Read(folder / L"self-test-v2.gwrec", plain, error) && plain.keyframes.size() > 1 && plain.motions.empty(), "the recording without samples is read for the positions");
+        auto plan = ReplayWire::MakeKeyframePlan(plain, plain.keyframes[1]);
+        plan.keyframe = 1;
+        const auto sample_record = plain.keyframes[1].record_index + 40;
+        // The client's own walks, sampled as the recorder does: each living agent off the orders' straight line, on a detour leg before its order's point.
+        constexpr float off_x = 37.f;
+        constexpr float off_y = -21.f;
+        constexpr float leg_x = 200.f;
+        constexpr float leg_y = 100.f;
+        constexpr float pace = 288.f;
+        ReplayFile::Motions sample{sample_record, plain.records[sample_record].time_ms, plain.records[sample_record].time_ms, {}};
+        const auto model = ReplayWire::Placement(plain, plan, plain.records[sample_record - 1].time_ms - plan.start_ms);
+        for (const auto& message : model) {
+            if (message.id != 44) {
+                continue;
+            }
+            const auto x = message.F(1, 0) + off_x;
+            const auto y = message.F(1, 1) + off_y;
+            sample.agents.push_back({message.U(0), x, y, message.U(2), pace, 1.f, 0, true, x + leg_x, y + leg_y, message.U(2), x + 3 * leg_x, y + 3 * leg_y, message.U(2), 0});
+        }
+        auto sampled = plain;
+        sampled.motions = {sample};
+        const auto path = folder / L"self-test-positions.gwrec";
+        ReplayFile::Writer writer;
+        auto ok = writer.Open(path, plain.header, plain.table);
+        for (size_t i = 0; i <= plain.records.size(); i++) {
+            for (const auto& chapter : plain.chapters) {
+                ok &= chapter.first_record != i || writer.AppendChapter(chapter);
+            }
+            for (const auto& keyframe : plain.keyframes) {
+                ok &= keyframe.record_index != i || writer.AppendKeyframe(keyframe.time_ms, keyframe.kind, keyframe.records);
+            }
+            ok &= i != sample_record || writer.AppendMotions(sample.time_ms, sample.clock, sample.agents);
+            ok &= i == plain.records.size() || writer.Append(plain.records[i].time_ms, plain.records[i].body.data(), plain.records[i].body.size());
+        }
+        ok &= writer.Close(plain.header);
+        ReplayFile::Contents read;
+        Check(
+            ok && ReplayFile::Read(path, read, error) && read.motions == sampled.motions && read.records == plain.records && read.keyframes == plain.keyframes,
+            "samples written by the recorder's writer (AppendMotions) read back as written, before the record they were written before"
+        );
+
+        // Each agent the stream leaves alone after the sample walks its leg, then on to its order's point, at its pace: the client's straight walk.
+        std::set<uint32_t> moved;
+        uint32_t walked_ms = 0;
+        std::vector<std::pair<uint32_t, std::map<uint32_t, std::pair<float, float>>>> expected_at;
+        for (auto i = sample_record; i < plain.ChapterEnd(0) && expected_at.size() < 6; i++) {
+            ReplayState::Message message;
+            ReplayState::Decode(plain.table, plain.records[i].body, message);
+            if (message.id == 30) {
+                walked_ms += message.U(0);
+            }
+            else if (message.id >= 32 && message.id <= 46) {
+                moved.insert(message.U(0));
+            }
+            if (i + 1 < plain.records.size() && plain.records[i + 1].time_ms == plain.records[i].time_ms) {
+                continue;
+            }
+            if (i % 13) {
+                continue;
+            }
+            std::map<uint32_t, std::pair<float, float>> expected;
+            for (const auto& motion : sample.agents) {
+                if (moved.contains(motion.agent)) {
+                    continue;
+                }
+                auto left = pace * static_cast<float>(walked_ms) / 1000.f;
+                const auto leg = std::hypot(leg_x, leg_y);
+                const auto t = std::min(left, leg) / leg;
+                left = std::max(left - leg, 0.f);
+                auto x = motion.x + leg_x * t;
+                auto y = motion.y + leg_y * t;
+                const auto rest = std::hypot(2 * leg_x, 2 * leg_y);
+                x += 2 * leg_x * std::min(left, rest) / rest;
+                y += 2 * leg_y * std::min(left, rest) / rest;
+                expected[motion.agent] = {x, y};
+            }
+            expected_at.emplace_back(plain.records[i].time_ms, std::move(expected));
+        }
+        size_t agents = 0;
+        size_t on_place = 0;
+        size_t estimate_apart = 0;
+        size_t in_place_apart = 0;
+        uint64_t digest = 0xCBF29CE484222325;
+        auto later = ReplayWire::MakeKeyframePlan(read, read.keyframes[0]);
+        later.keyframe = 0;
+        for (const auto& [time_ms, expected] : expected_at) {
+            const auto placed = Placed(ReplayWire::Placement(read, plan, time_ms - plan.start_ms));
+            const auto estimated = Placed(ReplayWire::Placement(plain, plan, time_ms - plan.start_ms));
+            const auto from_earlier = Placed(ReplayWire::Placement(read, later, time_ms - later.start_ms));
+            for (const auto& [agent_id, place] : expected) {
+                agents++;
+                const auto near = [&place](const std::map<uint32_t, std::pair<float, float>>& at, const uint32_t id) {
+                    const auto found = at.find(id);
+                    return found != at.end() && std::hypot(found->second.first - place.first, found->second.second - place.second) < 0.1f;
+                };
+                on_place += near(placed, agent_id);
+                estimate_apart += !near(estimated, agent_id);
+                in_place_apart += !near(from_earlier, agent_id);
+            }
+            for (const auto& post : ReplayWire::PlacementPosts(read, plan, time_ms - plan.start_ms)) {
+                for (const auto byte : post.bytes) {
+                    digest = (digest ^ byte) * 0x100000001B3;
+                }
+            }
+        }
+        const auto again = Placed(ReplayWire::Placement(read, plan, expected_at.back().first - plan.start_ms));
+        Check(agents > 5 && on_place == agents, std::format("every seek's placement after the sample is the sample walked on by its leg and order ({} of {} agents at {} times)", on_place, agents, expected_at.size()).c_str());
+        Check(in_place_apart == 0 && again == Placed(ReplayWire::Placement(read, plan, expected_at.back().first - plan.start_ms)), "the same time from an earlier keyframe (in place) gives the same placement, and the same seek twice the same");
+        Check(estimate_apart == agents, std::format("without samples the placement is the orders' estimate, not the client's: {} of {} agents off", estimate_apart, agents).c_str());
+        const auto sought = ReplayWire::MakeSeekPlan(read, expected_at.back().first);
+        Check(sought.error.empty() && sought.placed > 0 && ReplayState::CheckClientNeeds(Fed(read, sought, sought.seek_ms)).empty(), "a seek's plan posts its placement after the stream to its time, every agent it names in the client");
+        printf("the placement's digest at the self-test's seek times: %016llx (the same every run)\n", static_cast<unsigned long long>(digest));
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
@@ -2471,6 +2734,7 @@ namespace {
         TestRows(folder);
         TestWire(folder);
         TestFormat(folder);
+        TestPositions(folder);
 
         std::mt19937 random(20261123);
         const auto table = SyntheticTable(random);

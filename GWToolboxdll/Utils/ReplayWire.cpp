@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <format>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <ranges>
 #include <utility>
@@ -206,6 +207,7 @@ namespace ReplayWire {
                         }
                         order.Bring(contents.table, decoded);
                         Append(plan.posts, Stage::Stream, records[i].time_ms - keyframe.time_ms, records[detail].body);
+                        plan.stream_records.push_back(detail);
                         brought.count++;
                     }
                     earlier_details.erase(details);
@@ -228,6 +230,7 @@ namespace ReplayWire {
             order.Bring(contents.table, message);
             last_ms = std::max(last_ms, records[i].time_ms);
             Append(plan.posts, Stage::Stream, records[i].time_ms - keyframe.time_ms, records[i].body);
+            plan.stream_records.push_back(i);
         }
         flush();
         plan.duration_ms = last_ms - keyframe.time_ms;
@@ -237,6 +240,45 @@ namespace ReplayWire {
     bool SeeksInPlace(const Plan& playing, const uint32_t played_ms, const Plan& sought)
     {
         return sought.chapter == playing.chapter && sought.end_record == playing.end_record && sought.start_ms + sought.seek_ms >= playing.start_ms + played_ms;
+    }
+
+    std::vector<ReplayState::Message> Placement(const ReplayFile::Contents& contents, const Plan& plan, const uint32_t played_ms)
+    {
+        // Every agent where the latest sample at or before the time has it (the keyframe's, a motions entry's), walked by its order over the rest of what the plan posted.
+        const auto& keyframe = contents.keyframes[plan.keyframe];
+        const auto time_ms = plan.start_ms + played_ms;
+        ReplayState::World world(contents.table);
+        for (const auto& record : keyframe.records) {
+            world.Apply(record);
+        }
+        auto motions = std::ranges::lower_bound(contents.motions, keyframe.record_index, {}, &ReplayFile::Motions::record_index);
+        const auto sample = [&](const size_t before) {
+            for (; motions != contents.motions.end() && motions->record_index <= before && motions->time_ms <= time_ms; ++motions) {
+                for (const auto& motion : motions->agents) {
+                    world.Apply(motion);
+                }
+            }
+        };
+        for (const auto index : plan.stream_records) {
+            if (contents.records[index].time_ms > time_ms) {
+                break;
+            }
+            sample(index);
+            world.Apply(contents.records[index]);
+        }
+        sample(plan.end_record);
+        return world.Placement();
+    }
+
+    std::vector<Post> PlacementPosts(const ReplayFile::Contents& contents, const Plan& plan, const uint32_t played_ms)
+    {
+        std::vector<Post> posts;
+        for (const auto& message : Placement(contents, plan, played_ms)) {
+            if (std::vector<uint8_t> body; ReplayState::Encode(contents.table, message, body)) {
+                Append(posts, Stage::Stream, played_ms, body);
+            }
+        }
+        return posts;
     }
 
     Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms)
@@ -266,6 +308,16 @@ namespace ReplayWire {
                 }
                 plan.keyframe = k;
                 plan.seek_ms = std::max(time_ms, plan.start_ms) - plan.start_ms;
+                if (plan.seek_ms) {
+                    const auto after = std::ranges::find_if(plan.posts, [&plan](const Post& post) {
+                        return post.stage == Stage::Stream && post.time_ms > plan.seek_ms;
+                    });
+                    auto placement = PlacementPosts(contents, plan, plan.seek_ms);
+                    plan.placed = std::accumulate(placement.begin(), placement.end(), size_t{0}, [](const size_t sum, const Post& post) {
+                        return sum + post.records;
+                    });
+                    plan.posts.insert(after, std::make_move_iterator(placement.begin()), std::make_move_iterator(placement.end()));
+                }
                 return plan;
             }
         }

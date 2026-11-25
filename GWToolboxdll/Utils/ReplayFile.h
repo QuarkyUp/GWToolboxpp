@@ -12,11 +12,12 @@
 
 namespace ReplayFile {
     constexpr char magic[8] = {'G', 'W', 'T', 'B', 'R', 'E', 'C', '\0'};
-    constexpr uint16_t format_version = 2;
+    constexpr uint16_t format_version = 3;
     constexpr uint16_t header_size = 96;
     constexpr size_t max_body_size = 0xFFFF;
     constexpr uint16_t chapter_entry_id = 0xF001;
     constexpr uint16_t keyframe_entry_id = 0xF002;
+    constexpr uint16_t motions_entry_id = 0xF003;
 
     enum Flags : uint32_t {
         NamesStripped = 1 << 0,
@@ -81,12 +82,43 @@ namespace ReplayFile {
         bool operator==(const Keyframe&) const = default;
     };
 
+    // An agent's walk as the client's server world keeps it (IAgent::CAgent): where it is at the sample, and while walking its leg's end and its order's point and agent.
+    struct Motion {
+        uint32_t agent = 0;
+        float x = 0.f;
+        float y = 0.f;
+        uint32_t plane = 0;
+        float max_speed = 0.f;
+        float move_speed = 0.f;
+        uint32_t facing = 0;
+        bool walking = false;
+        float leg_x = 0.f;
+        float leg_y = 0.f;
+        uint32_t leg_plane = 0;
+        float target_x = 0.f;
+        float target_y = 0.f;
+        uint32_t target_plane = 0;
+        uint32_t target_agent = 0;
+
+        bool operator==(const Motion&) const = default;
+    };
+
+    struct Motions {
+        size_t record_index = 0;
+        uint32_t time_ms = 0;
+        uint32_t clock = 0;
+        std::vector<Motion> agents;
+
+        bool operator==(const Motions&) const = default;
+    };
+
     struct Contents {
         Header header;
         MessageTable table;
         std::vector<Record> records;
         std::vector<Chapter> chapters;
         std::vector<Keyframe> keyframes;
+        std::vector<Motions> motions;
         bool truncated_tail = false;
 
         [[nodiscard]] size_t ChapterEnd(size_t chapter) const { return chapter + 1 < chapters.size() ? chapters[chapter + 1].first_record : records.size(); }
@@ -140,6 +172,7 @@ namespace ReplayFile {
         bool Append(uint32_t time_ms, const uint8_t* body, size_t body_size);
         bool AppendChapter(const Chapter& chapter);
         bool AppendKeyframe(uint32_t time_ms, KeyframeKind kind, const std::vector<Record>& records);
+        bool AppendMotions(uint32_t time_ms, uint32_t clock, const std::vector<Motion>& agents);
         bool Flush();
         bool Close(const Header& header);
 

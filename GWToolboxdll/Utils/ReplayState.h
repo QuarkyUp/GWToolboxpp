@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -107,7 +108,9 @@ namespace ReplayState {
 
         bool Apply(const ReplayFile::Record& record);
         void Apply(const Message& message);
+        void Apply(const ReplayFile::Motion& motion);
         [[nodiscard]] std::vector<Message> Join() const;
+        [[nodiscard]] std::vector<Message> Placement() const;
         [[nodiscard]] uint32_t LayoutErrors() const { return layout_errors; }
         [[nodiscard]] uint32_t ControlledAgent() const;
 
@@ -119,9 +122,17 @@ namespace ReplayState {
             uint32_t expiry = 0;
         };
 
+        struct Leg {
+            float x = 0.f;
+            float y = 0.f;
+            uint32_t plane = 0;
+        };
+
         struct Agent {
             Message create;
             Message move;
+            std::optional<Leg> leg;
+            float pace = 0.f;
             std::map<Key, Message> slots;
             std::map<uint32_t, Effect> effects;
             std::array<uint32_t, 9> equipment{};
@@ -142,6 +153,8 @@ namespace ReplayState {
         };
 
         void Tick(uint32_t milliseconds);
+        static void Walk(Agent& agent, uint32_t milliseconds);
+        [[nodiscard]] static float Pace(const Agent& agent);
         void ApplyToAgent(Agent& agent, const Message& message);
         void JoinRows(uint32_t agent_id, const Agent& agent, bool before_connect, std::vector<Message>& out, std::set<Key>& emitted) const;
         void JoinAgent(uint32_t agent_id, const Agent& agent, std::vector<Message>& out, std::set<Key>& emitted) const;

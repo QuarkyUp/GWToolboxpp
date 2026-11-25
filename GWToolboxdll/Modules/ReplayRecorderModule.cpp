@@ -1,5 +1,6 @@
 #include "stdafx.h"
 
+#include <GWCA/Context/AgentContext.h>
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/Context/GadgetContext.h>
 #include <GWCA/Context/GameContext.h>
@@ -65,6 +66,8 @@ namespace {
         AgentConnect = 31,
         AgentCreate = 32,
         AgentReporter = 34,
+        AgentUpdateMovePath = 41,
+        AgentUpdateMoveTarget = 42,
         CharAccountNameData = 48,
         CharAttackInterval = 53,
         CharAttributeState = 55,
@@ -179,6 +182,17 @@ namespace {
     uint32_t next_keyframe_ms = 0;
     uint32_t keyframe_count = 0;
     uint32_t chapter_count = 0;
+    uint64_t motions_written = 0;
+
+    struct SampledWalk {
+        ReplayFile::Motion motion;
+        uint32_t stop_time = 0;
+        float velocity_x = 0.f;
+        float velocity_y = 0.f;
+
+        bool operator==(const SampledWalk&) const = default;
+    };
+    std::map<uint32_t, SampledWalk> sampled_walks;
     uint32_t chapter_map_file = 0;
     GW::Packet::StoC::PostProcess post_process{};
 
@@ -265,6 +279,87 @@ namespace {
     };
     static_assert(sizeof(GW::Guild) == offsetof(GuildEntry, general_value));
 
+    struct MapPoint {
+        float x;
+        float y;
+        uint32_t plane;
+        uint32_t h000C;
+    };
+
+    // The agent engine's agent of the server's world (IAgent::CAgent, AgAgent.cpp), as GWCA's AgentContext::agent_movement lists them: what 41, 42, 40, 43, 39 and 44 set (n02, live n06, n07).
+    struct WalkingAgent {
+        uint8_t h0000[0x10];
+        uint32_t agent_id;
+        uint8_t h0014[0x08];
+        uint32_t def;
+        uint8_t h0020[0x28];
+        uint32_t stop_time;
+        uint8_t h004C[0x0C];
+        uint32_t point_time;
+        float max_speed;
+        float move_speed;
+        uint8_t h0064[0x14];
+        MapPoint point;
+        MapPoint leg;
+        uint32_t target_agent;
+        MapPoint target;
+        uint32_t h00AC;
+        float velocity_x;
+        float velocity_y;
+        uint8_t h00B8[0x0C];
+        uint32_t facing;
+    };
+    static_assert(offsetof(WalkingAgent, def) == offsetof(GW::AgentMovement, agentDef) && offsetof(WalkingAgent, point) == 0x78 && offsetof(WalkingAgent, velocity_x) == 0xB0 && offsetof(WalkingAgent, facing) == 0xC4);
+
+    // GWCA's AgentContext: the server world's clock, which s2c 31 sets and 30 advances, before the shown world's (instance_timer) that follows it (n03, n05).
+    struct AgentClocks {
+        uint8_t h0000[0x148];
+        uint32_t server_time;
+        uint8_t h014C[0x60];
+        uint32_t shown_time;
+    };
+    static_assert(offsetof(AgentClocks, shown_time) == GWCA_OFFSETOF(GW::AgentContext, instance_timer));
+
+    uint32_t ServerTime()
+    {
+        const auto context = GW::GetAgentContext();
+        return context ? reinterpret_cast<const AgentClocks&>(*context).server_time : GW::Map::GetInstanceTime();
+    }
+
+    ReplayFile::Motion MotionOf(const WalkingAgent& walking, const uint32_t clock)
+    {
+        constexpr uint32_t facing_mask = 0xF;
+        ReplayFile::Motion motion = {
+            .agent = walking.agent_id,
+            .max_speed = walking.max_speed,
+            .move_speed = walking.move_speed,
+            .facing = walking.facing & facing_mask,
+            .walking = walking.stop_time != 0,
+        };
+        // CAgent's position at a time: its point moved by its velocity since the point's time, its leg's end once the leg's stop time is past.
+        if (motion.walking && static_cast<int32_t>(clock - walking.stop_time) >= 0) {
+            motion.x = walking.leg.x;
+            motion.y = walking.leg.y;
+            motion.plane = walking.leg.plane;
+        }
+        else {
+            const auto seconds = static_cast<float>(static_cast<int32_t>(clock - walking.point_time)) / 1000.f;
+            motion.x = walking.point.x + walking.velocity_x * seconds;
+            motion.y = walking.point.y + walking.velocity_y * seconds;
+            motion.plane = walking.point.plane;
+        }
+        if (motion.walking) {
+            motion.leg_x = walking.leg.x;
+            motion.leg_y = walking.leg.y;
+            motion.leg_plane = walking.leg.plane;
+            motion.target_x = walking.target.x;
+            motion.target_y = walking.target.y;
+            motion.target_plane = walking.target.plane;
+            motion.target_agent = walking.target_agent;
+        }
+        return motion;
+    }
+
     // The game connection's MsgConn (MsgConnConnectAccept's allocation): no socket in playback, the mode 2 once ready, the receive cipher (t03, t09).
     struct MsgConn {
         uint32_t socket;
@@ -334,7 +429,7 @@ namespace {
             return;
         }
         status = std::format(
-            "Saved {}: {} chapters, {} keyframes, {} messages, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, size / 1024, header.layout_errors,
+            "Saved {}: {} chapters, {} keyframes, {} messages, {} agents' motions, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, motions_written, size / 1024, header.layout_errors,
             header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : ""
         );
         Log::Info("Replay Recorder: %s", status.c_str());
@@ -643,7 +738,30 @@ namespace {
              world_context->level, world_context->morale, world_context->current_balth, world_context->total_earned_balth, world_context->current_skill_points, world_context->total_earned_skill_points}
         ));
 
-        apply(make(AgentConnect, {GW::Map::GetInstanceTime()}));
+        // The server world's clock: the positions below are its agents', which the stream's orders and 30s go on from.
+        const auto clock = ServerTime();
+        const auto agent_context = GW::GetAgentContext();
+        apply(make(AgentConnect, {clock}));
+        // A mercenary's look comes as the server sends it before the agent: notices 0, 14 and 15 (159 for slot 0, 160 for the others, none for an empty one).
+        const auto dress = [&](const uint32_t agent_id) {
+            if (agent_id >= world_context->agent_infos.size()) {
+                return;
+            }
+            const auto& look = reinterpret_cast<const AgentLook&>(world_context->agent_infos[agent_id]);
+            if (!look.appearance) {
+                return;
+            }
+            apply(make(CharNotifyDword, {LookAppearance, agent_id, look.appearance}));
+            apply(make(CharNotifyDword, {LookComposite, agent_id, look.composites[0]}));
+            apply(make(CharNotifyDword, {LookColour, agent_id, look.colours[0]}));
+            for (uint32_t slot = 1; slot < std::size(look.composites); slot++) {
+                if (look.composites[slot]) {
+                    apply(make(CharAgentAttrUpdateIntTarget, {LookComposite, agent_id, slot, look.composites[slot]}));
+                    apply(make(CharAgentAttrUpdateIntTarget, {LookColour, agent_id, slot, look.colours[slot]}));
+                }
+            }
+        };
+        std::set<uint32_t> livings;
         for (const auto agent : *agents) {
             if (!agent) {
                 continue;
@@ -671,14 +789,16 @@ namespace {
             for (size_t i = 0; i < std::size(values); i++) {
                 create.Set(i, values[i]);
             }
-            create.SetF(4, agent->pos.x, 0);
-            create.SetF(4, agent->pos.y, 1);
-            create.Set(5, agent->pos.zplane);
+            const auto walking = agent_context && agent->agent_id < agent_context->agent_movement.size() ? reinterpret_cast<const WalkingAgent*>(agent_context->agent_movement[agent->agent_id]) : nullptr;
+            const auto motion = walking ? MotionOf(*walking, clock) : ReplayFile::Motion{.x = agent->pos.x, .y = agent->pos.y, .plane = agent->pos.zplane, .max_speed = living ? default_speed : 0.f, .move_speed = 1.f};
+            create.SetF(4, motion.x, 0);
+            create.SetF(4, motion.y, 1);
+            create.Set(5, motion.plane);
             create.SetF(6, agent->rotation_cos, 0);
             create.SetF(6, agent->rotation_sin, 1);
             create.Set(7, 1);
-            create.SetF(8, living ? default_speed : 0.f);
-            create.SetF(9, 1.f);
+            create.SetF(8, motion.max_speed);
+            create.SetF(9, motion.move_speed);
             create.SetF(10, living ? living_radius : 0.f);
             create.Set(11, living ? TeamToken(living, world_context) : 0);
             create.SetF(18, infinity, 0);
@@ -696,19 +816,9 @@ namespace {
                     apply(update);
                 }
             }
-            if (living && agent->agent_id < world_context->agent_infos.size()) {
-                // A mercenary's look comes as the server sends it before the agent: notices 0, 14 and 15 (159 for slot 0, 160 for the others).
-                if (const auto& look = reinterpret_cast<const AgentLook&>(world_context->agent_infos[agent->agent_id]); look.appearance) {
-                    apply(make(CharNotifyDword, {LookAppearance, agent->agent_id, look.appearance}));
-                    apply(make(CharNotifyDword, {LookComposite, agent->agent_id, look.composites[0]}));
-                    apply(make(CharNotifyDword, {LookColour, agent->agent_id, look.colours[0]}));
-                    for (uint32_t slot = 1; slot < std::size(look.composites); slot++) {
-                        apply(make(CharAgentAttrUpdateIntTarget, {LookComposite, agent->agent_id, slot, look.composites[slot]}));
-                        apply(make(CharAgentAttrUpdateIntTarget, {LookColour, agent->agent_id, slot, look.colours[slot]}));
-                    }
-                }
-            }
             if (living) {
+                livings.insert(agent->agent_id);
+                dress(agent->agent_id);
                 if (static_cast<uint32_t>(living->primary) || static_cast<uint32_t>(living->secondary)) {
                     apply(make(CharAgentUpdateProfession, {agent->agent_id, static_cast<uint32_t>(living->primary), static_cast<uint32_t>(living->secondary)}));
                 }
@@ -726,6 +836,19 @@ namespace {
             apply(create);
             if (!living) {
                 continue;
+            }
+            // A walk in progress goes on from the keyframe by its order, as 41 and 42 start one (CAgent::UpdateMovement).
+            if (motion.walking) {
+                auto order = ReplayState::Blank(message_table, motion.target_agent ? AgentUpdateMoveTarget : AgentUpdateMovePath);
+                if (order.fields.size() > 3) {
+                    order.Set(0, agent->agent_id);
+                    order.SetF(1, motion.target_x, 0);
+                    order.SetF(1, motion.target_y, 1);
+                    order.Set(2, motion.target_plane);
+                    order.Set(3, motion.plane);
+                    order.Set(4, motion.target_agent);
+                    apply(order);
+                }
             }
             // The agent view keeps 53's interval and modifier at +0xEC and +0xF0, and asserts the interval before an attack's warmup.
             if (living->weapon_attack_speed != 0.f && living->attack_speed_modifier != 0.f) {
@@ -758,6 +881,12 @@ namespace {
                 apply_all(ItemDetails(worn[0]));
                 apply_all(ItemDetails(worn[1]));
                 apply(make(CharNpcUpdateWeapons, {agent->agent_id, worn[0], worn[1]}));
+            }
+        }
+        // The outpost's load sends the party's mercenary heroes' looks, which have no agent there.
+        for (uint32_t agent_id = 0; agent_id < world_context->agent_infos.size(); agent_id++) {
+            if (!livings.contains(agent_id)) {
+                dress(agent_id);
             }
         }
         for (uint32_t npc_id = 0; npc_id < world_context->npcs.size(); npc_id++) {
@@ -963,6 +1092,45 @@ namespace {
         );
     }
 
+    void WriteMotions()
+    {
+        const auto context = GW::GetAgentContext();
+        if (!context) {
+            return;
+        }
+        // The server world changes only by the stream's messages: an agent whose walk (or, standing, its point) changed since its last sample is sampled again, after the records that changed it.
+        const auto clock = ServerTime();
+        std::vector<ReplayFile::Motion> changed;
+        std::erase_if(sampled_walks, [&context](const auto& sampled) {
+            return sampled.first >= context->agent_movement.size() || !context->agent_movement[sampled.first];
+        });
+        for (const auto agent : context->agent_movement) {
+            if (!agent) {
+                continue;
+            }
+            const auto& walking = reinterpret_cast<const WalkingAgent&>(*agent);
+            SampledWalk sample = {MotionOf(walking, clock), walking.stop_time, walking.velocity_x, walking.velocity_y};
+            if (sample.motion.walking) {
+                sample.motion.x = sample.motion.y = 0.f;
+                sample.motion.plane = 0;
+            }
+            auto& last = sampled_walks[walking.agent_id];
+            if (last == sample) {
+                continue;
+            }
+            last = sample;
+            changed.push_back(MotionOf(walking, clock));
+        }
+        if (changed.empty()) {
+            return;
+        }
+        if (!writer.AppendMotions(ElapsedMs(recording_start), clock, changed)) {
+            FinishRecording();
+            return;
+        }
+        motions_written += changed.size();
+    }
+
     void WriteChapter(const uint32_t map_id, const bool explorable)
     {
         const auto map_info = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(map_id));
@@ -1023,6 +1191,8 @@ namespace {
         post_process = {};
         keyframe_count = 0;
         chapter_count = 0;
+        motions_written = 0;
+        sampled_walks.clear();
         recording_start = last_record_at = last_flush_at = Clock::now();
         WriteChapter(map_id, explorable);
         status = std::format("Recording {}", RecordingName());
@@ -1217,6 +1387,9 @@ namespace {
         else if (loaded && !load_keyframe_due && ElapsedMs(recording_start) >= next_keyframe_ms) {
             WriteKeyframe(ReplayFile::KeyframeKind::Periodic);
         }
+        if (writer.IsOpen() && loaded) {
+            WriteMotions();
+        }
         if (writer.IsOpen() && now - last_flush_at > flush_interval) {
             writer.Flush();
             last_flush_at = now;
@@ -1333,6 +1506,7 @@ namespace {
     bool stop_sent = false;
     MsgConn* replay_connection = nullptr;
     size_t next_post = 0;
+    std::vector<ReplayWire::Post> placement;
     double played_ms = 0;
     Clock::time_point stage_since;
     Clock::time_point last_update;
@@ -1390,6 +1564,7 @@ namespace {
         playback_status = why;
         plan = {};
         replay = {};
+        placement.clear();
         seek_request = no_seek;
         connection_open = false;
         replay_connection = nullptr;
@@ -1656,6 +1831,7 @@ namespace {
     {
         plan = std::move(made);
         next_post = 0;
+        placement.clear();
         played_ms = 0;
         playback_ended = false;
         followed_agent = plan.controlled_agent;
@@ -1681,9 +1857,9 @@ namespace {
         }
         LogPlayback(
             std::format(
-                "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
-                connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.posts.size(), plan.keyframe_records, plan.first_record,
-                plan.end_record, plan.duration_ms, plan.controlled_agent, changes
+                "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once, then {} placement messages; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
+                connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.placed, plan.posts.size(), plan.keyframe_records,
+                plan.first_record, plan.end_record, plan.duration_ms, plan.controlled_agent, changes
             )
         );
         LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, JoinedMap(), static_cast<uint32_t>(GW::Map::GetMapID())));
@@ -1721,7 +1897,15 @@ namespace {
         if (ReplayWire::SeeksInPlace(plan, static_cast<uint32_t>(played_ms), made)) {
             const auto from_ms = plan.start_ms + static_cast<uint32_t>(played_ms);
             played_ms = std::min(made.start_ms + made.seek_ms - plan.start_ms, plan.duration_ms);
-            LogPlayback(std::format("seek to {} ms: forward from {} ms in chapter {}, the stream from keyframe {} posted at once, no load", made.start_ms + made.seek_ms, from_ms, plan.chapter + 1, plan.keyframe + 1));
+            placement = ReplayWire::PlacementPosts(replay, plan, static_cast<uint32_t>(played_ms));
+            LogPlayback(
+                std::format(
+                    "seek to {} ms: forward from {} ms in chapter {}, the stream from keyframe {} posted at once, no load, then {} placement messages", made.start_ms + made.seek_ms, from_ms, plan.chapter + 1, plan.keyframe + 1,
+                    std::accumulate(placement.begin(), placement.end(), size_t{0}, [](const size_t sum, const ReplayWire::Post& post) {
+                        return sum + post.records;
+                    })
+                )
+            );
             return false;
         }
         const auto after = std::ranges::upper_bound(replay.chapters, time_ms, {}, &ReplayFile::Chapter::time_ms) - replay.chapters.begin();
@@ -1837,6 +2021,11 @@ namespace {
                     send_cipher.Apply(bytes.data(), bytes.size());
                     PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
                 }
+                // An in-place seek's placement goes after the stream to its time.
+                for (auto& post : std::exchange(placement, {})) {
+                    send_cipher.Apply(post.bytes.data(), post.bytes.size());
+                    PostNetEvent(net_event_data, replay_connection_id, post.bytes.data(), post.bytes.size());
+                }
                 if (next_post == plan.posts.size() && !playback_ended) {
                     if (auto next = plan.chapter + 1 < replay.chapters.size() ? ReplayWire::MakeSeekPlan(replay, replay.chapters[plan.chapter + 1].time_ms) : ReplayWire::Plan{}; next.error.empty() && next.chapter > plan.chapter) {
                         NoteSkipped(plan.chapter + 1, next.chapter);
@@ -1922,7 +2111,7 @@ namespace {
                 return;
             }
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            auto scan = ReplayObserve::ScanFolder(RecordingsFolder(), GW::MemoryMgr::GetGWVersion(), message_table_digest, taken_keys, now);
+            auto scan = ReplayObserve::ScanFolder(RecordingsFolder(), GW::MemoryMgr::GetGWVersion(), message_table_digest, taken_keys, now, writer.IsOpen() ? recording_path : std::filesystem::path());
             for (auto& row : scan.rows) {
                 if (auto error = ReplayObserve::CheckRow(message_table, row.message); !error.empty()) {
                     scan.left_out.push_back({row.path, std::move(error)});
@@ -1988,6 +2177,16 @@ namespace {
         return "Waiting for the Observe window";
     }
 } // namespace
+
+ReplayRecorderModule::~ReplayRecorderModule()
+{
+    // A game ending without its window's close never runs SignalTerminate (DllMain's Terminate only asks the stopped game loop): the file's end is written at the module's unload, without the log or the game.
+    if (writer.IsOpen()) {
+        header.duration_ms = ElapsedMs(recording_start);
+        header.flags |= ReplayFile::Complete;
+        writer.Close(header);
+    }
+}
 
 void ReplayRecorderModule::Initialize()
 {

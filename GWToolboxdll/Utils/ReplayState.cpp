@@ -20,6 +20,7 @@ namespace ReplayState {
             AgentDestroy = 33,
             AgentReporter = 34,
             AgentUpdateClass = 36,
+            AgentUpdateDirection = 37,
             AgentUpdateMaxSpeed = 39,
             AgentUpdateMoveAbort = 40,
             AgentUpdateMovePath = 41,
@@ -165,7 +166,23 @@ namespace ReplayState {
             CreateSpeed = 8,
             CreateMoveSpeed = 9,
             CreateTeam = 11,
+            CreateStopTime = 13,
+            CreatePointTime = 15,
+            CreateVelocity = 17,
+            CreateTarget = 18,
+            CreateTargetPlane = 19,
+            CreateTargetAgent = 20,
+            CreateSegment = 21,
+            CreateSegmentPlane = 22,
         };
+
+        enum MoveField : size_t {
+            MovePoint = 1,
+            MovePlane = 2,
+            MoveCurrentPlane = 3,
+            MoveTargetAgent = 4,
+        };
+        constexpr uint32_t living_def = 1;
 
         enum Notice : uint32_t {
             LookAppearance = 0,
@@ -974,6 +991,20 @@ namespace ReplayState {
                 created.erase(agent_id);
                 attack_intervals.erase(agent_id);
                 return "";
+            case AgentUpdateDirection:
+            case AgentUpdateMaxSpeed:
+            case AgentUpdateMoveAbort:
+            case AgentUpdateMovePath:
+            case AgentUpdateMoveTarget:
+            case AgentUpdateMoveType:
+            case AgentUpdatePoint: {
+                // Each IAgent::OnMsgSrvUpdate* asserts its agent in the server's world (n01).
+                constexpr std::pair<uint16_t, uint32_t> assert_lines[] = {
+                    {AgentUpdateDirection, 412}, {AgentUpdateMaxSpeed, 462}, {AgentUpdateMoveAbort, 486}, {AgentUpdateMovePath, 513}, {AgentUpdateMoveTarget, 535}, {AgentUpdateMoveType, 554}, {AgentUpdatePoint, 579},
+                };
+                const auto line = std::ranges::find(assert_lines, message.id, &std::pair<uint16_t, uint32_t>::first)->second;
+                return created.contains(agent_id) ? "" : std::format("agent {} has no 32 before its message {}: its handler asserts the agent (AgMsg.cpp:{})", agent_id, message.id, line);
+            }
             case CharAttackInterval:
                 if (!created.contains(agent_id)) {
                     return std::format("agent {} has no 32 before its attack interval: AvCharSetAttackInterval asserts its agent view (AvApi.cpp:750)", agent_id);
@@ -1246,6 +1277,32 @@ namespace ReplayState {
                     agent = {};
                 }
                 agent.create = message;
+                // An agent made mid-walk (CAgent's constructor with a stop time) is kept as the client walks it: where it is now, then its order, as a keyframe writes it.
+                if (const auto point_time = message.U(CreatePointTime); message.U(CreateStopTime) && std::isfinite(message.F(CreateTarget, 0))) {
+                    agent.move = Blank(*table, message.U(CreateTargetAgent) ? AgentUpdateMoveTarget : AgentUpdateMovePath);
+                    agent.move.Set(0, message.U(0));
+                    agent.move.Set(MovePoint, message.U(CreateTarget, 0), 0);
+                    agent.move.Set(MovePoint, message.U(CreateTarget, 1), 1);
+                    agent.move.Set(MovePlane, message.U(CreateTargetPlane));
+                    agent.move.Set(MoveCurrentPlane, message.U(CreatePlane));
+                    agent.move.Set(MoveTargetAgent, message.U(CreateTargetAgent));
+                    if (message.U(CreateSegment, 0) != message.U(CreateTarget, 0) || message.U(CreateSegment, 1) != message.U(CreateTarget, 1)) {
+                        agent.leg = Leg{message.F(CreateSegment, 0), message.F(CreateSegment, 1), message.U(CreateSegmentPlane)};
+                    }
+                    agent.pace = std::hypot(message.F(CreateVelocity, 0), message.F(CreateVelocity, 1));
+                    const auto infinity = std::numeric_limits<float>::infinity();
+                    for (const auto field : {CreateStopTime, CreatePointTime, CreateTargetPlane, CreateTargetAgent, CreateSegmentPlane}) {
+                        agent.create.Set(field, 0);
+                    }
+                    for (const size_t item : {0, 1}) {
+                        agent.create.SetF(CreateVelocity, 0.f, item);
+                        agent.create.SetF(CreateTarget, infinity, item);
+                        agent.create.SetF(CreateSegment, infinity, item);
+                    }
+                    if (clock > point_time) {
+                        Walk(agent, clock - point_time);
+                    }
+                }
                 return;
             }
             case AgentDestroy:
@@ -1358,15 +1415,27 @@ namespace ReplayState {
         switch (message.id) {
             case AgentUpdateMoveAbort:
                 agent.move = {};
+                agent.leg.reset();
                 return;
             case AgentUpdateMovePath:
             case AgentUpdateMoveTarget:
                 agent.move = message;
+                agent.leg.reset();
+                agent.pace = Pace(agent);
+                return;
+            case AgentUpdateMaxSpeed:
+                // CAgent::UpdateMaxSpeed starts the walk again from where the agent is, toward its order's point, at the new speed.
+                agent.slots[{message.id}] = message;
+                agent.leg.reset();
+                agent.pace = Pace(agent);
                 return;
             case AgentUpdatePoint:
+                // CAgent::UpdatePoint: the agent stands at the point, its walk stopped (StopMovement).
                 agent.create.Set(CreatePosition, message.U(1, 0), 0);
                 agent.create.Set(CreatePosition, message.U(1, 1), 1);
                 agent.create.Set(CreatePlane, message.U(2));
+                agent.move = {};
+                agent.leg.reset();
                 return;
             case AgentUpdateRotateAbort:
                 agent.slots.erase({AgentUpdateRotation});
@@ -1474,30 +1543,102 @@ namespace ReplayState {
             if (const auto regen = agent.slots.find({CharAgentAttrUpdateFloat, EnergyRegen}); regen != agent.slots.end()) {
                 agent.energy = Clamped(agent.energy + regen->second.F(2) * seconds);
             }
-            if (agent.move.id) {
-                const auto max_speed = agent.slots.find({AgentUpdateMaxSpeed});
-                const auto move_type = agent.slots.find({AgentUpdateMoveType});
-                const auto speed = max_speed != agent.slots.end() ? max_speed->second.F(1) : agent.create.F(CreateSpeed);
-                const auto modifier = move_type != agent.slots.end() ? move_type->second.F(1) : agent.create.F(CreateMoveSpeed);
-                const auto step = speed * modifier * seconds;
-                const auto x = agent.create.F(CreatePosition, 0);
-                const auto y = agent.create.F(CreatePosition, 1);
-                const auto dx = agent.move.F(1, 0) - x;
-                const auto dy = agent.move.F(1, 1) - y;
-                const auto distance = std::sqrt(dx * dx + dy * dy);
-                if (step < distance) {
-                    agent.create.SetF(CreatePosition, x + dx / distance * step, 0);
-                    agent.create.SetF(CreatePosition, y + dy / distance * step, 1);
-                }
-                else {
-                    agent.create.Set(CreatePosition, agent.move.U(1, 0), 0);
-                    agent.create.Set(CreatePosition, agent.move.U(1, 1), 1);
-                    agent.create.Set(CreatePlane, agent.move.U(2));
-                    agent.move = {};
-                }
-            }
+            Walk(agent, milliseconds);
             ++it;
         }
+    }
+
+    float World::Pace(const Agent& agent)
+    {
+        // BeginMovementSegment's velocity: the max speed (32's or 39's) times the move speed (32's or 43's), kept until the next leg.
+        const auto max_speed = agent.slots.find({AgentUpdateMaxSpeed});
+        const auto move_type = agent.slots.find({AgentUpdateMoveType});
+        return (max_speed != agent.slots.end() ? max_speed->second.F(1) : agent.create.F(CreateSpeed)) * (move_type != agent.slots.end() ? move_type->second.F(1) : agent.create.F(CreateMoveSpeed));
+    }
+
+    void World::Walk(Agent& agent, const uint32_t milliseconds)
+    {
+        // The client walks a leg in a straight line (CAgent's position at a time), then from a detour's end on to its order's point (OnTimeStopMovement).
+        auto left = agent.pace * static_cast<float>(milliseconds) / 1000.f;
+        while (agent.move.id && left > 0.f) {
+            const auto x = agent.create.F(CreatePosition, 0);
+            const auto y = agent.create.F(CreatePosition, 1);
+            const auto to_x = agent.leg ? agent.leg->x : agent.move.F(MovePoint, 0);
+            const auto to_y = agent.leg ? agent.leg->y : agent.move.F(MovePoint, 1);
+            const auto distance = std::hypot(to_x - x, to_y - y);
+            if (left < distance) {
+                agent.create.SetF(CreatePosition, x + (to_x - x) / distance * left, 0);
+                agent.create.SetF(CreatePosition, y + (to_y - y) / distance * left, 1);
+                return;
+            }
+            left -= distance;
+            agent.create.SetF(CreatePosition, to_x, 0);
+            agent.create.SetF(CreatePosition, to_y, 1);
+            agent.create.Set(CreatePlane, agent.leg ? agent.leg->plane : agent.move.U(MovePlane));
+            if (agent.leg) {
+                agent.leg.reset();
+            }
+            else {
+                agent.move = {};
+            }
+        }
+    }
+
+    void World::Apply(const ReplayFile::Motion& motion)
+    {
+        const auto found = agents.find(motion.agent);
+        if (found == agents.end() || !found->second.create.id) {
+            return;
+        }
+        auto& agent = found->second;
+        agent.create.SetF(CreatePosition, motion.x, 0);
+        agent.create.SetF(CreatePosition, motion.y, 1);
+        agent.create.Set(CreatePlane, motion.plane);
+        agent.create.SetF(CreateSpeed, motion.max_speed);
+        agent.create.SetF(CreateMoveSpeed, motion.move_speed);
+        agent.slots.erase({AgentUpdateMaxSpeed});
+        agent.slots.erase({AgentUpdateMoveType});
+        agent.move = {};
+        agent.leg.reset();
+        if (!motion.walking) {
+            return;
+        }
+        agent.move = Blank(*table, motion.target_agent ? AgentUpdateMoveTarget : AgentUpdateMovePath);
+        agent.move.Set(0, motion.agent);
+        agent.move.SetF(MovePoint, motion.target_x, 0);
+        agent.move.SetF(MovePoint, motion.target_y, 1);
+        agent.move.Set(MovePlane, motion.target_plane);
+        agent.move.Set(MoveCurrentPlane, motion.plane);
+        agent.move.Set(MoveTargetAgent, motion.target_agent);
+        if (motion.leg_x != motion.target_x || motion.leg_y != motion.target_y) {
+            agent.leg = Leg{motion.leg_x, motion.leg_y, motion.leg_plane};
+        }
+        agent.pace = motion.max_speed * motion.move_speed;
+    }
+
+    std::vector<Message> World::Placement() const
+    {
+        // s2c 44 stands an agent at its point in both of the client's worlds and drops its tracked walk; its order then starts the walk again from there.
+        std::vector<Message> out;
+        for (const auto& [agent_id, agent] : agents) {
+            if (!agent.create.id || agent.create.U(CreateDef) != living_def) {
+                continue;
+            }
+            auto point = Blank(*table, AgentUpdatePoint);
+            point.Set(0, agent_id);
+            point.Set(1, agent.create.U(CreatePosition, 0), 0);
+            point.Set(1, agent.create.U(CreatePosition, 1), 1);
+            point.Set(2, agent.create.U(CreatePlane));
+            out.push_back(std::move(point));
+            if (agent.move.id) {
+                out.push_back(agent.move);
+                out.back().Set(MoveCurrentPlane, agent.create.U(CreatePlane));
+                if (agent.move.id == AgentUpdateMoveTarget && !Alive(agent.move.U(MoveTargetAgent))) {
+                    out.back().Set(MoveTargetAgent, 0);
+                }
+            }
+        }
+        return out;
     }
 
     bool World::Alive(const uint32_t agent_id) const

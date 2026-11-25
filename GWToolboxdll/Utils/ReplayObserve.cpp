@@ -41,7 +41,7 @@ namespace ReplayObserve {
         return seconds >= 3600 ? std::format(L"{}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60) : std::format(L"{}:{:02}", seconds / 60, seconds % 60);
     }
 
-    Scan ScanFolder(const std::filesystem::path& folder, const uint32_t client_build, const uint64_t table_digest, const std::set<uint32_t>& taken_keys, const uint64_t now_unix_ms)
+    Scan ScanFolder(const std::filesystem::path& folder, const uint32_t client_build, const uint64_t table_digest, const std::set<uint32_t>& taken_keys, const uint64_t now_unix_ms, const std::filesystem::path& recording)
     {
         Scan scan;
         std::error_code error_code;
@@ -56,15 +56,20 @@ namespace ReplayObserve {
             }
             ReplayFile::Header header;
             std::string error;
-            auto reason = !ReplayFile::ReadHeader(entry.path(), header, error) ? error
-                          : header.client_build != client_build                ? std::format("recorded on client build {}, this client is build {}", header.client_build, client_build)
-                          : header.table_digest != table_digest                ? "its message table is not this client's"
-                          : !(header.flags & ReplayFile::Complete)             ? "unfinished: still being recorded, or the recording stopped before its end"
-                          : !header.record_count                               ? "no messages"
-                                                                               : std::string();
+            auto reason = !ReplayFile::ReadHeader(entry.path(), header, error)            ? error
+                          : header.client_build != client_build                           ? std::format("recorded on client build {}, this client is build {}", header.client_build, client_build)
+                          : header.table_digest != table_digest                           ? "its message table is not this client's"
+                          : entry.path() == recording                                     ? "being recorded"
+                          : (header.flags & ReplayFile::Complete) && !header.record_count ? "no messages"
+                                                                                          : std::string();
             ReplayFile::Contents index;
             if (reason.empty() && !ReplayFile::Read(entry.path(), index, error, false)) {
                 reason = error;
+            }
+            // A recording cut short (a power loss, a crash) has no end written: it plays to its last record.
+            if (reason.empty() && !(header.flags & ReplayFile::Complete)) {
+                reason = index.records.empty() ? "no messages" : "";
+                index.header.duration_ms = index.records.empty() ? 0 : index.records.back().time_ms;
             }
             if (!reason.empty()) {
                 scan.left_out.push_back({entry.path(), std::move(reason)});

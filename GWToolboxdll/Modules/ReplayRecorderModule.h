@@ -4,7 +4,7 @@
 
 class ReplayRecorderModule : public ToolboxModule {
     ReplayRecorderModule() = default;
-    ~ReplayRecorderModule() override = default;
+    ~ReplayRecorderModule() override;
 
 public:
     static ReplayRecorderModule& Instance()

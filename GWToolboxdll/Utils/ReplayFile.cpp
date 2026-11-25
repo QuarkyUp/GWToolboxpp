@@ -1,6 +1,7 @@
 #include <Utils/ReplayFile.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <cwchar>
 #include <format>
@@ -13,6 +14,9 @@ namespace ReplayFile {
         constexpr size_t record_prefix_size = 6;
         constexpr size_t chapter_entry_size = 14;
         constexpr size_t keyframe_entry_size = 7;
+        constexpr size_t motions_entry_size = 8;
+        constexpr size_t standing_motion_size = 24;
+        constexpr size_t walking_motion_size = 48;
 
         void Put(std::vector<uint8_t>& out, const uint64_t value, const size_t size)
         {
@@ -90,7 +94,7 @@ namespace ReplayFile {
             uint16_t stored_size = 0;
             VisitHeader(header_reader, out, version, stored_size);
             if (version != format_version || stored_size != header_size) {
-                error = std::format("format version {} with a header of {} bytes, expected {} and {}", version, stored_size, format_version, header_size);
+                error = std::format("format version {} with a header of {} bytes, expected {} and {}: made by an older toolbox, its recordings no longer play", version, stored_size, format_version, header_size);
                 return false;
             }
             return true;
@@ -381,6 +385,52 @@ namespace ReplayFile {
                 keyframe_messages = static_cast<uint32_t>(Get(body + 3, 4));
                 continue;
             }
+            if (!keyframe_messages && message_id == motions_entry_id && body_size >= motions_entry_size) {
+                if (!bodies) {
+                    continue;
+                }
+                auto& motions = out.motions.emplace_back(record_count, time_ms, static_cast<uint32_t>(Get(body + 2, 4)));
+                const auto count = static_cast<size_t>(Get(body + 6, 2));
+                auto at = motions_entry_size;
+                for (; motions.agents.size() < count && at + standing_motion_size <= body_size;) {
+                    const auto read = [&body, &at](const size_t size) {
+                        const auto value = Get(body + at, size);
+                        at += size;
+                        return value;
+                    };
+                    const auto real = [&read] {
+                        return std::bit_cast<float>(static_cast<uint32_t>(read(4)));
+                    };
+                    auto& motion = motions.agents.emplace_back();
+                    motion.agent = static_cast<uint32_t>(read(4));
+                    motion.x = real();
+                    motion.y = real();
+                    motion.plane = static_cast<uint32_t>(read(2));
+                    motion.max_speed = real();
+                    motion.move_speed = real();
+                    motion.facing = static_cast<uint32_t>(read(1));
+                    motion.walking = read(1) != 0;
+                    if (!motion.walking) {
+                        continue;
+                    }
+                    if (at + walking_motion_size - standing_motion_size > body_size) {
+                        motions.agents.pop_back();
+                        break;
+                    }
+                    motion.leg_x = real();
+                    motion.leg_y = real();
+                    motion.leg_plane = static_cast<uint32_t>(read(2));
+                    motion.target_x = real();
+                    motion.target_y = real();
+                    motion.target_plane = static_cast<uint32_t>(read(2));
+                    motion.target_agent = static_cast<uint32_t>(read(4));
+                }
+                if (motions.agents.size() != count || at != body_size) {
+                    error = std::format("the motions before record {} do not hold their {} agents", record_count, count);
+                    return false;
+                }
+                continue;
+            }
             if (message_id >= message_count) {
                 error = std::format("record {} has message id {}, beyond the table's {}", record_count, message_id, message_count);
                 return false;
@@ -584,6 +634,47 @@ namespace ReplayFile {
         return Append(time_ms, body.data(), body.size()) && std::ranges::all_of(records, [this, time_ms](const Record& record) {
                    return Append(time_ms, record.body.data(), record.body.size());
                });
+    }
+
+    bool Writer::AppendMotions(const uint32_t time_ms, const uint32_t clock, const std::vector<Motion>& agents)
+    {
+        const auto real = [](std::vector<uint8_t>& out, const float value) {
+            Put(out, std::bit_cast<uint32_t>(value), 4);
+        };
+        for (size_t first = 0; first < agents.size();) {
+            std::vector<uint8_t> body;
+            Put(body, motions_entry_id, 2);
+            Put(body, clock, 4);
+            size_t count = 0;
+            std::vector<uint8_t> packed;
+            for (; first + count < agents.size() && motions_entry_size + packed.size() + walking_motion_size <= max_body_size; count++) {
+                const auto& motion = agents[first + count];
+                Put(packed, motion.agent, 4);
+                real(packed, motion.x);
+                real(packed, motion.y);
+                Put(packed, motion.plane, 2);
+                real(packed, motion.max_speed);
+                real(packed, motion.move_speed);
+                Put(packed, motion.facing, 1);
+                Put(packed, motion.walking, 1);
+                if (motion.walking) {
+                    real(packed, motion.leg_x);
+                    real(packed, motion.leg_y);
+                    Put(packed, motion.leg_plane, 2);
+                    real(packed, motion.target_x);
+                    real(packed, motion.target_y);
+                    Put(packed, motion.target_plane, 2);
+                    Put(packed, motion.target_agent, 4);
+                }
+            }
+            Put(body, count, 2);
+            body.insert(body.end(), packed.begin(), packed.end());
+            if (!Append(time_ms, body.data(), body.size())) {
+                return false;
+            }
+            first += count;
+        }
+        return true;
     }
 
     bool Writer::Flush()
