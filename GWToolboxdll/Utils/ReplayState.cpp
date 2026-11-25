@@ -862,6 +862,10 @@ namespace ReplayState {
                 }
             }
         }
+        // A ground item's 32 names its item by its class: the stream sends the item's details first (z02).
+        if (const auto item = message.U(CreateClass); message.id == AgentCreate && message.U(CreateDef) == item_def && item && !brought.contains({IdKind::Item, item})) {
+            unbrought.emplace_back(IdField{AgentCreate, static_cast<uint8_t>(CreateClass), IdKind::Item}, item);
+        }
         return unbrought;
     }
 

@@ -53,8 +53,10 @@ namespace ReplayWire {
 
     struct Plan {
         uint32_t start_ms = 0;
-        uint32_t entry_ms = 0;
         uint32_t duration_ms = 0;
+        uint32_t seek_ms = 0;
+        size_t chapter = 0;
+        size_t keyframe = 0;
         size_t first_record = 0;
         size_t end_record = 0;
         size_t keyframe_records = 0;
@@ -68,5 +70,6 @@ namespace ReplayWire {
     constexpr uint32_t game_map_type = 1;
 
     Plan MakeKeyframePlan(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe);
+    Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms);
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 } // namespace ReplayWire

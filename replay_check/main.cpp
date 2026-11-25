@@ -677,10 +677,13 @@ namespace {
         return passed ? 0 : 1;
     }
 
-    std::vector<ReplayState::Message> Fed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan)
+    std::vector<ReplayState::Message> Fed(const ReplayFile::Contents& contents, const ReplayWire::Plan& plan, const uint32_t until_ms = UINT32_MAX)
     {
         std::vector<ReplayState::Message> fed;
         for (const auto& post : plan.posts) {
+            if (post.stage == ReplayWire::Stage::Stream && post.time_ms > until_ms) {
+                break;
+            }
             std::string error;
             for (const auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
                 ReplayState::Decode(contents.table, body, fed.emplace_back());
@@ -1484,6 +1487,160 @@ namespace {
         return passed;
     }
 
+    ReplayFile::Contents WithModelKeyframes(const ReplayFile::Contents& contents, const bool verbose)
+    {
+        constexpr uint32_t model_keyframe_interval_ms = 10000;
+        auto with = contents;
+        for (size_t chapter = 0; chapter < contents.chapters.size(); chapter++) {
+            const auto load = RealLoad(contents, chapter);
+            if (!contents.chapters[chapter].is_explorable || !load || std::ranges::any_of(contents.keyframes, [&](const ReplayFile::Keyframe& keyframe) {
+                    return contents.ChapterOf(keyframe.record_index) == chapter;
+                })) {
+                continue;
+            }
+            const auto last_ms = contents.records[contents.ChapterEnd(chapter) - 1].time_ms;
+            for (auto time_ms = contents.records[load->end - 1].time_ms; time_ms <= last_ms; time_ms += model_keyframe_interval_ms) {
+                with.keyframes.push_back(ModelKeyframe(contents, chapter, time_ms));
+            }
+            if (verbose) {
+                printf("chapter %zu holds no keyframe: the model's, after its load and every %u ms\n", chapter + 1, model_keyframe_interval_ms);
+            }
+        }
+        std::ranges::stable_sort(with.keyframes, {}, &ReplayFile::Keyframe::record_index);
+        const auto repeated = std::ranges::unique(with.keyframes, {}, &ReplayFile::Keyframe::record_index);
+        with.keyframes.erase(repeated.begin(), repeated.end());
+        return with;
+    }
+
+    struct SeekProof {
+        size_t seeks = 0;
+        size_t refused = 0;
+        size_t failed = 0;
+    };
+
+    SeekProof ProveSeek(const ReplayFile::Contents& contents, const bool verbose)
+    {
+        SeekProof proof;
+        const auto fail = [&proof, verbose](const std::string& what) {
+            if (verbose && proof.failed < 40) {
+                printf("  FAILED: %s\n", what.c_str());
+            }
+            proof.failed++;
+        };
+        for (size_t chapter = 0; chapter < contents.chapters.size(); chapter++) {
+            const auto& opened = contents.chapters[chapter];
+            const auto end = contents.ChapterEnd(chapter);
+            std::vector<size_t> keyframes;
+            for (size_t k = 0; k < contents.keyframes.size(); k++) {
+                if (contents.ChapterOf(contents.keyframes[k].record_index) == chapter) {
+                    keyframes.push_back(k);
+                }
+            }
+            if (!opened.is_explorable) {
+                const auto plan = ReplayWire::MakeSeekPlan(contents, opened.time_ms);
+                proof.seeks++;
+                if (verbose) {
+                    printf("chapter %zu (an outpost): a seek to its start %s\n", chapter + 1, plan.error.empty() ? std::format("plays chapter {} from its keyframe {}", plan.chapter + 1, plan.keyframe + 1).c_str() : plan.error.c_str());
+                }
+                if (plan.error.empty() && plan.chapter <= chapter) {
+                    fail(std::format("a seek into outpost chapter {} plays chapter {}", chapter + 1, plan.chapter + 1));
+                }
+                continue;
+            }
+            if (keyframes.empty() || end == opened.first_record) {
+                continue;
+            }
+            // The whole stream's state: the chapter from its load when the stream holds it, else from its first keyframe, then every record.
+            ReplayState::World whole(contents.table);
+            auto next_record = opened.first_record;
+            if (!RealLoad(contents, chapter)) {
+                for (const auto& record : contents.keyframes[keyframes.front()].records) {
+                    whole.Apply(record);
+                }
+                next_record = contents.keyframes[keyframes.front()].record_index;
+            }
+            std::map<size_t, ReplayFile::Keyframe> model_keyframes;
+            auto at_keyframe = whole;
+            auto keyframe_record = next_record;
+            for (const auto k : keyframes) {
+                const auto& keyframe = contents.keyframes[k];
+                for (; keyframe_record < keyframe.record_index; keyframe_record++) {
+                    at_keyframe.Apply(contents.records[keyframe_record]);
+                }
+                model_keyframes[k] = {keyframe.record_index, keyframe.time_ms, keyframe.kind, ReplayState::JoinRecords(contents.table, at_keyframe, keyframe.time_ms)};
+            }
+            // A time a chapter starts at is that chapter's, even when the map before it has a record at the same time.
+            const auto last_ms = chapter + 1 < contents.chapters.size() ? std::min(contents.records[end - 1].time_ms, contents.chapters[chapter + 1].time_ms - 1) : contents.records[end - 1].time_ms;
+            std::set<uint32_t> times = {opened.time_ms, last_ms};
+            for (size_t i = 0; i < keyframes.size(); i++) {
+                const auto from = contents.keyframes[keyframes[i]].time_ms;
+                const auto to = std::max(from, i + 1 < keyframes.size() ? contents.keyframes[keyframes[i + 1]].time_ms : last_ms);
+                times.insert({from, from + (to - from) / 3, from + (to - from) * 2 / 3, to > from ? to - 1 : to});
+            }
+            for (const auto time_ms : times) {
+                proof.seeks++;
+                const auto plan = ReplayWire::MakeSeekPlan(contents, time_ms);
+                if (!plan.error.empty()) {
+                    proof.refused++;
+                    if (verbose) {
+                        printf("chapter %zu, a seek to %u ms: refused, the toolbox says why: %s\n", chapter + 1, time_ms, plan.error.c_str());
+                    }
+                    continue;
+                }
+                const auto target_ms = plan.start_ms + plan.seek_ms;
+                const auto later = std::ranges::find_if(keyframes, [&](const size_t k) {
+                    return k > plan.keyframe && contents.keyframes[k].time_ms <= time_ms && ReplayWire::MakeKeyframePlan(contents, contents.keyframes[k]).error.empty();
+                });
+                if (plan.chapter != chapter || (target_ms != time_ms && time_ms >= plan.start_ms) || later != keyframes.end()) {
+                    fail(std::format("a seek to {} ms plays chapter {} from keyframe {} at {} ms to {} ms", time_ms, plan.chapter + 1, plan.keyframe + 1, plan.start_ms, target_ms));
+                    continue;
+                }
+                for (; next_record < end && contents.records[next_record].time_ms <= target_ms; next_record++) {
+                    whole.Apply(contents.records[next_record]);
+                }
+                const auto fed = Fed(contents, plan, plan.seek_ms);
+                const auto order = ReplayState::CheckOrder(contents.table, fed);
+                const auto needs = ReplayState::CheckClientNeeds(fed);
+                for (const auto& failure : order) {
+                    fail(std::format("a seek to {} ms, the order of real loads: {}", time_ms, ReplayState::Describe(failure)));
+                }
+                for (const auto& need : needs) {
+                    fail(std::format("a seek to {} ms, what the client needs: {}", time_ms, need));
+                }
+                const auto& model_keyframe = model_keyframes.at(plan.keyframe);
+                const auto model_plan = ReplayWire::MakeKeyframePlan(contents, model_keyframe);
+                ReplayState::World sought(contents.table);
+                for (const auto& message : Fed(contents, model_plan, plan.seek_ms)) {
+                    sought.Apply(message);
+                }
+                ReplayState::World from_file(contents.table);
+                for (const auto& message : fed) {
+                    from_file.Apply(message);
+                }
+                const auto expected = whole.Join();
+                const auto differences = Compare(expected, sought.Join());
+                const auto differing = std::ranges::count_if(differences | std::views::values, &Difference::Differs);
+                const auto file_differing = std::ranges::count_if(Compare(expected, from_file.Join()) | std::views::values, &Difference::Differs);
+                if (verbose) {
+                    printf(
+                        "chapter %zu, a seek to %u ms: keyframe %zu at %u ms, then %zu stream messages at once; order failures %zu, what the client needs %zu; its state against the whole stream's at %u ms: built on the model's keyframe there, %td message ids differ; on the file's keyframe, %td (the keyframe's own, --compare's subject)\n",
+                        chapter + 1, time_ms, plan.keyframe + 1, plan.start_ms, fed.size() - plan.keyframe_records, order.size(), needs.size(), target_ms, differing, file_differing
+                    );
+                }
+                if (differing) {
+                    if (verbose) {
+                        PrintComparison(differences, {});
+                    }
+                    fail(std::format("a seek to {} ms: its state built on the model's keyframe is not the whole stream's", time_ms));
+                }
+            }
+        }
+        if (verbose) {
+            printf("seek: %zu seeks, %zu refused (each with its reason), %zu failures: %s\n", proof.seeks, proof.refused, proof.failed, proof.failed || !proof.seeks ? "FAILED" : "passed");
+        }
+        return proof;
+    }
+
     void TestWorld(const std::filesystem::path& folder)
     {
         std::mt19937 random(20261124);
@@ -2137,6 +2294,26 @@ namespace {
             taken && brought_plan.error.empty() && std::ranges::count(brought_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckOrder(v2.table, Fed(v2, brought_plan)).empty(),
             std::format("a record showing an item the keyframe lacks gets the item's details from the stream before the keyframe (item {})", taken).c_str()
         );
+        const auto seeks = ProveSeek(v2, false);
+        Check(seeks.seeks > 0 && !seeks.failed, std::format("every seek plan of the v2 file ({} seeks) passes the order checks and its state is the whole stream's at its time", seeks.seeks).c_str());
+        const auto sought = ReplayWire::MakeSeekPlan(v2, v2.keyframes.back().time_ms + 1000);
+        auto sought_fed = Fed(v2, sought, sought.seek_ms);
+        ReplayState::World all(v2.table);
+        ReplayState::World one_short(v2.table);
+        for (size_t i = 0; i < sought_fed.size(); i++) {
+            all.Apply(sought_fed[i]);
+            if (i + 1 < sought_fed.size()) {
+                one_short.Apply(sought_fed[i]);
+            }
+        }
+        Check(
+            sought.error.empty() && sought_fed.size() > sought.keyframe_records && std::ranges::any_of(Compare(all.Join(), one_short.Join()) | std::views::values, &Difference::Differs),
+            "a seek's state without its last message differs from the whole stream's"
+        );
+        Check(
+            ReplayWire::MakeSeekPlan(v2, 0).keyframe == 0 && ReplayWire::MakeSeekPlan(v2, v2.chapters[1].time_ms - 1).keyframe + 1 == v2.keyframes.size() && !ReplayWire::MakeSeekPlan(v2, v2.chapters[1].time_ms).error.empty(),
+            "a seek to the start plays the first keyframe, to the explorable map's end its last, into an outpost with no explorable map after it nothing"
+        );
         auto other = v2;
         other.header.flags = 0;
         Check(CountNames(other.table, named.keyframes.front().records, other.header.flags).not_placeholders == 0, "with the names settings off, names are not checked");
@@ -2204,13 +2381,14 @@ int wmain(const int argc, const wchar_t* argv[])
         return Rows(argv[2], argc == 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 0);
     }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
-    const auto arguments = command == L"--compare" || command == L"--wire" || command == L"--order" ? 3 : command == L"--feed" ? 4 : 0;
+    const auto arguments = command == L"--compare" || command == L"--wire" || command == L"--order" || command == L"--seek" ? 3 : command == L"--feed" ? 4 : 0;
     if (!arguments || argc != arguments) {
         printf(
             "usage: replay_check --compare <recording.gwrec>\n"
             "       replay_check --feed <recording.gwrec> <ms>\n"
             "       replay_check --wire <recording.gwrec>\n"
             "       replay_check --order <recording.gwrec>\n"
+            "       replay_check --seek <recording.gwrec>\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );
@@ -2227,6 +2405,10 @@ int wmain(const int argc, const wchar_t* argv[])
     }
     if (command == L"--order") {
         return ProveOrder(contents) ? 0 : 1;
+    }
+    if (command == L"--seek") {
+        const auto proof = ProveSeek(WithModelKeyframes(contents, true), true);
+        return proof.failed || !proof.seeks ? 1 : 0;
     }
     const auto starts = PlayableStarts(contents);
     auto passed = !starts.plans.empty();

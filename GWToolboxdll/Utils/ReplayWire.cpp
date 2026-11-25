@@ -96,8 +96,8 @@ namespace ReplayWire {
     {
         Plan plan;
         const auto& records = contents.records;
-        const auto chapter = std::ranges::upper_bound(contents.chapters, keyframe.record_index, {}, &ReplayFile::Chapter::first_record) - contents.chapters.begin();
-        const auto end = contents.ChapterEnd(static_cast<size_t>(std::max<std::ptrdiff_t>(chapter - 1, 0)));
+        const auto chapter = contents.ChapterOf(keyframe.record_index);
+        const auto end = contents.ChapterEnd(chapter);
         std::vector<ReplayState::Message> messages(keyframe.records.size());
         for (size_t i = 0; i < messages.size(); i++) {
             if (!ReplayState::Decode(contents.table, keyframe.records[i].body, messages[i])) {
@@ -131,7 +131,7 @@ namespace ReplayWire {
         plan.end_record = end;
         plan.keyframe_records = messages.size();
         plan.start_ms = keyframe.time_ms;
-        plan.entry_ms = keyframe.time_ms;
+        plan.chapter = chapter;
         ReplayState::Order order;
         bool observer = false;
         for (size_t i = 0; i < messages.size(); i++) {
@@ -157,7 +157,7 @@ namespace ReplayWire {
             return plan;
         }
         std::map<uint32_t, std::vector<size_t>> earlier_details;
-        for (auto i = contents.chapters[static_cast<size_t>(std::max<std::ptrdiff_t>(chapter - 1, 0))].first_record; i < keyframe.record_index; i++) {
+        for (auto i = contents.chapters[chapter].first_record; i < keyframe.record_index; i++) {
             if (ReplayState::Message message; std::ranges::contains(item_detail_ids, records[i].MessageId()) && ReplayState::Decode(contents.table, records[i].body, message)) {
                 earlier_details[message.U(0)].push_back(i);
             }
@@ -232,6 +232,39 @@ namespace ReplayWire {
         flush();
         plan.duration_ms = last_ms - keyframe.time_ms;
         return plan;
+    }
+
+    Plan MakeSeekPlan(const ReplayFile::Contents& contents, uint32_t time_ms)
+    {
+        Plan refused;
+        refused.error = "the recording holds no explorable map with a keyframe the game can play";
+        const auto after = std::ranges::upper_bound(contents.chapters, time_ms, {}, &ReplayFile::Chapter::time_ms) - contents.chapters.begin();
+        for (auto chapter = static_cast<size_t>(std::max<std::ptrdiff_t>(after - 1, 0)); chapter < contents.chapters.size(); chapter++, time_ms = 0) {
+            if (!contents.chapters[chapter].is_explorable) {
+                continue;
+            }
+            std::vector<size_t> starts;
+            for (size_t k = 0; k < contents.keyframes.size(); k++) {
+                if (contents.ChapterOf(contents.keyframes[k].record_index) == chapter && (starts.empty() || contents.keyframes[k].time_ms <= time_ms)) {
+                    starts.push_back(k);
+                }
+            }
+            // The keyframe at or before the time, or an earlier one of the map when the game would refuse it.
+            for (const auto k : starts | std::views::reverse) {
+                auto plan = MakeKeyframePlan(contents, contents.keyframes[k]);
+                if (plan.error.empty() && plan.map_type != game_map_type) {
+                    plan.error = std::format("its map type is {}, not a game map's: the observer's party window asserts the observed map is one", plan.map_type);
+                }
+                if (!plan.error.empty()) {
+                    refused.error = std::format("keyframe {} at {} ms: {}", k + 1, contents.keyframes[k].time_ms, plan.error);
+                    continue;
+                }
+                plan.keyframe = k;
+                plan.seek_ms = std::max(time_ms, plan.start_ms) - plan.start_ms;
+                return plan;
+            }
+        }
+        return refused;
     }
 
     std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error)

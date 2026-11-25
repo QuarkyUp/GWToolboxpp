@@ -28,20 +28,29 @@ public:
         bool follow_selected_agent = true;
     };
 
+    struct TimelineChapter {
+        uint32_t start_ms = 0;
+        uint32_t end_ms = 0;
+        uint32_t map_id = 0;
+        bool explorable = false;
+    };
+
     struct PlaybackView {
         bool active = false;
         bool playing = false;
         bool ended = false;
         bool paused = false;
-        bool restarting = false;
         bool can_follow = false;
         int speed = 1;
-        uint32_t played_ms = 0;
+        uint32_t position_ms = 0;
         uint32_t length_ms = 0;
+        size_t chapter = 0;
+        std::vector<TimelineChapter> chapters;
+        std::vector<uint32_t> keyframes_ms;
         uint32_t recorder_agent = 0;
         uint32_t followed_agent = 0;
         std::string name;
-        std::string status;
+        std::string note;
     };
 
     [[nodiscard]] PlaybackView GetPlayback() const;
@@ -49,6 +58,7 @@ public:
     void SetPlaybackSpeed(int speed);
     void StopPlayback();
     void RestartPlayback();
+    void SeekPlayback(uint32_t time_ms);
     void FollowAgent(uint32_t agent_id);
     bool* FollowSelectedAgent();
 

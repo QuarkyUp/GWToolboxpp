@@ -90,6 +90,7 @@ namespace ReplayFile {
         bool truncated_tail = false;
 
         [[nodiscard]] size_t ChapterEnd(size_t chapter) const { return chapter + 1 < chapters.size() ? chapters[chapter + 1].first_record : records.size(); }
+        [[nodiscard]] size_t ChapterOf(size_t record_index) const;
     };
 
     uint64_t TableDigest(const MessageTable& table);

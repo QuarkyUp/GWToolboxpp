@@ -1137,7 +1137,6 @@ namespace {
     constexpr auto close_timeout = std::chrono::seconds(20);
     const std::vector<uint32_t> transfer_fields = {0x1a6, 0x1805, 0x404, 0x104, 0x204, 0x104, 0x404, 0x104};
     const std::vector<uint32_t> viewpoint_fields = {viewpoint_message_id, 0x10, 0x104};
-    constexpr auto restart_settle = std::chrono::seconds(3);
     constexpr auto transfer_wait = std::chrono::seconds(60);
 
     struct ViewpointMessage {
@@ -1206,16 +1205,18 @@ namespace {
     ReplayWire::Plan plan;
     ReplayWire::Rc4 send_cipher;
     std::filesystem::path playing_path;
-    ReplayObserve::Row playing_row;
+    ReplayFile::Contents replay;
+    constexpr uint32_t no_seek = UINT32_MAX;
+    std::atomic_uint32_t seek_request = no_seek;
+    std::string playback_note;
     std::atomic_bool playback_ended = false;
-    std::atomic_bool restart_pending = false;
+    bool paused_by_end = false;
     bool viewpoint_available = false;
     std::atomic_uint32_t followed_agent = 0;
     uint32_t last_target = 0;
     bool world_map_refusal_logged = false;
     bool mission_map_refusal_logged = false;
     bool join_wait_logged = false;
-    std::optional<Clock::time_point> outpost_settled_since;
     TransferMessage transfer;
     bool transfer_due = false;
     bool connection_open = false;
@@ -1278,6 +1279,8 @@ namespace {
         Log::FlushFile();
         playback_status = why;
         plan = {};
+        replay = {};
+        seek_request = no_seek;
         connection_open = false;
         replay_connection = nullptr;
         transfer_due = false;
@@ -1336,7 +1339,13 @@ namespace {
     {
         GW::Hook::EnterHook();
         Goodbye_Ret(reason);
-        if (connection_open) {
+        // A load while observing: the 422's join closes the current connection by this goodbye (GameJoin), and the connect hook makes the next one.
+        if (connection_open && playback == Playback::Transfer) {
+            connection_open = false;
+            PostNetEvent(net_event_closed, replay_connection_id, nullptr, 0);
+            LogPlayback("the game's join closed the previous load's connection");
+        }
+        else if (connection_open) {
             CloseReplayConnection(std::format("Left the replay of {}", TextUtils::WStringToString(playing_path.filename().wstring())));
         }
         GW::Hook::LeaveHook();
@@ -1359,9 +1368,9 @@ namespace {
         GW::Hook::EnterHook();
         MapLoaded_Ret();
         if (playback == Playback::Loading) {
-            LogPlayback("c2s 144 due: the replay's map loaded");
+            LogPlayback(std::format("c2s 144 due: the replay's map loaded; the stream to {} ms after the keyframe posted at once", plan.seek_ms));
             PostStage(ReplayWire::Stage::Entry);
-            played_ms = 0;
+            played_ms = std::min(plan.seek_ms, plan.duration_ms);
             last_update = Clock::now();
             EnterStage(Playback::Playing);
         }
@@ -1528,49 +1537,32 @@ namespace {
         );
     }
 
-    void StartPlayback(const ReplayObserve::Row& row)
+    std::string TimeText(const uint32_t time_ms)
     {
-        ReplayFile::Contents contents;
-        std::string error;
-        auto made = !ReplayFile::Read(row.path, contents, error)                                                             ? ReplayWire::Plan{.error = error}
-                    : !row.keyframe || *row.keyframe >= contents.keyframes.size() || row.chapter >= contents.chapters.size() ? ReplayWire::Plan{.error = "its keyframe is not in the file"}
-                                                                                                                             : ReplayWire::MakeKeyframePlan(contents, contents.keyframes[*row.keyframe]);
-        const auto name = std::format("{} (map {}, from {} ms)", TextUtils::WStringToString(row.path.filename().wstring()), row.header.map_id, made.start_ms);
-        if (made.error.empty() && made.map_type != ReplayWire::game_map_type) {
-            made.error = std::format("its map type is {}, not a game map's: the observer's party window asserts the observed map is one", made.map_type);
-        }
-        if (!made.error.empty()) {
-            playback_status = std::format("{} cannot be played: {}", name, made.error);
-            Log::Error("Replay Recorder: %s", playback_status.c_str());
-            Log::FlushFile();
-            GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
-            return;
-        }
+        return TextUtils::WStringToString(ReplayObserve::Duration(time_ms));
+    }
+
+    void LoadKeyframe(ReplayWire::Plan made)
+    {
         plan = std::move(made);
-        playing_path = row.path;
-        playing_row = row;
+        next_post = 0;
+        played_ms = 0;
         playback_ended = false;
         followed_agent = plan.controlled_agent;
         last_target = 0;
-        world_map_refusal_logged = false;
-        mission_map_refusal_logged = false;
         join_wait_logged = false;
-        next_post = 0;
-        played_ms = 0;
-        playback_paused = false;
         transfer = {};
         const uint8_t loopback[] = {address_family_ipv4, 0, closed_port >> 8, closed_port & 0xFF, 127, 0, 0, 1};
         memcpy(transfer.address, loopback, sizeof(loopback));
         // MissionClient::GameJoin keeps the 422's +0x1c at +0x194; it reaches only the connect data our hook never sends and the reconnect record.
         const auto char_context = GW::GetCharContext();
         transfer.game_type = char_context ? char_context->token1 : 0;
-        const auto joined_map = JoinedMap();
-        transfer.territory = contents.header.region;
-        transfer.map_id = contents.chapters[row.chapter].map_id;
-        transfer.map_type = contents.chapters[row.chapter].is_explorable;
+        const auto& chapter = replay.chapters[plan.chapter];
+        transfer.territory = replay.header.region;
+        transfer.map_id = chapter.map_id;
+        transfer.map_type = chapter.is_explorable;
         transfer.key = RandomBytes()();
         transfer_due = true;
-        playback_status = std::format("Playing {}", name);
         std::string changes;
         for (const auto& change : plan.changes) {
             changes += change.kind == ReplayWire::ChangeKind::LeftOut     ? std::format("; left out: {} records from record {} ({})", change.count, change.record, change.why)
@@ -1579,12 +1571,77 @@ namespace {
         }
         LogPlayback(
             std::format(
-                "{}: {} posts, {} keyframe messages, the recording from record {} ({} ms) to record {}, its stream timed from {} ms, {} ms long, controlled agent {}{}", playback_status, plan.posts.size(), plan.keyframe_records, plan.first_record,
-                plan.start_ms, plan.end_record, plan.entry_ms, plan.duration_ms, plan.controlled_agent, changes
+                "{}: chapter {} (map {}) from keyframe {} at {} ms, the stream to {} ms posted at once; {} posts, {} keyframe messages, the recording from record {} to record {}, {} ms long, controlled agent {}{}",
+                connection_open ? "a load while observing" : "the replay's first load", plan.chapter + 1, chapter.map_id, plan.keyframe + 1, plan.start_ms, plan.start_ms + plan.seek_ms, plan.posts.size(), plan.keyframe_records, plan.first_record,
+                plan.end_record, plan.duration_ms, plan.controlled_agent, changes
             )
         );
-        LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, joined_map, static_cast<uint32_t>(GW::Map::GetMapID())));
+        LogPlayback(std::format("transfer to map {}; the 422's +0x1c from the outpost's own join: {:#010x} (the join's map {}, the map now {})", transfer.map_id, transfer.game_type, JoinedMap(), static_cast<uint32_t>(GW::Map::GetMapID())));
         EnterStage(Playback::Transfer);
+    }
+
+    void NoteSkipped(const size_t first_chapter, const size_t end_chapter)
+    {
+        for (auto chapter = first_chapter; chapter < end_chapter && chapter < replay.chapters.size(); chapter++) {
+            const auto& skipped = replay.chapters[chapter];
+            const auto end_ms = chapter + 1 < replay.chapters.size() ? replay.chapters[chapter + 1].time_ms : skipped.time_ms;
+            playback_note = std::format(
+                "Skipped chapter {} (map {}, {}): {}", chapter + 1, skipped.map_id, TimeText(end_ms - skipped.time_ms),
+                skipped.is_explorable ? "none of its keyframes can be played, the reasons are in the toolbox's log" : "an outpost, which the game's observer mode does not play yet"
+            );
+            LogPlayback(playback_note);
+        }
+    }
+
+    bool Seek(const uint32_t time_ms)
+    {
+        auto made = ReplayWire::MakeSeekPlan(replay, time_ms);
+        if (!made.error.empty()) {
+            playback_note = std::format("Cannot go to {}: {}", TimeText(time_ms), made.error);
+            LogPlayback(playback_note);
+            return false;
+        }
+        playback_note.clear();
+        if (playback_ended && paused_by_end) {
+            playback_paused = false;
+        }
+        playback_ended = false;
+        paused_by_end = false;
+        // Forward within the keyframe played, its stream to the time is what a load of it would post: posted at once, with no load.
+        if (made.chapter == plan.chapter && made.keyframe == plan.keyframe && made.seek_ms >= played_ms) {
+            played_ms = std::min(made.seek_ms, plan.duration_ms);
+            LogPlayback(std::format("seek to {} ms: forward within keyframe {}, the stream posted at once", plan.start_ms + made.seek_ms, plan.keyframe + 1));
+            return false;
+        }
+        const auto after = std::ranges::upper_bound(replay.chapters, time_ms, {}, &ReplayFile::Chapter::time_ms) - replay.chapters.begin();
+        NoteSkipped(static_cast<size_t>(std::max<std::ptrdiff_t>(after - 1, 0)), made.chapter);
+        LoadKeyframe(std::move(made));
+        return true;
+    }
+
+    void StartPlayback(const ReplayObserve::Row& row)
+    {
+        std::string error;
+        replay = {};
+        auto made = ReplayFile::Read(row.path, replay, error) ? ReplayWire::MakeSeekPlan(replay, 0) : ReplayWire::Plan{.error = error};
+        const auto name = TextUtils::WStringToString(row.path.filename().wstring());
+        if (!made.error.empty()) {
+            replay = {};
+            playback_status = std::format("{} cannot be played: {}", name, made.error);
+            Log::Error("Replay Recorder: %s", playback_status.c_str());
+            Log::FlushFile();
+            GW::UI::SendUIMessage(GW::UI::UIMessage::kMessage_0x1000010d);
+            return;
+        }
+        playing_path = row.path;
+        world_map_refusal_logged = false;
+        mission_map_refusal_logged = false;
+        playback_note.clear();
+        playback_paused = false;
+        paused_by_end = false;
+        seek_request = no_seek;
+        playback_status = std::format("Playing {}", name);
+        LoadKeyframe(std::move(made));
     }
 
     void UpdatePlayback()
@@ -1605,7 +1662,7 @@ namespace {
                             LogPlayback(std::format("waiting for the game's own join to end before the transfer (mission flags {:#x})", flags));
                         }
                         if (waited > connect_timeout || stop) {
-                            FinishPlayback(std::format("The game was still joining a map (mission flags {:#x}): the replay was not started", flags));
+                            CloseReplayConnection(std::format("The game was still joining a map (mission flags {:#x}): the replay's load was not started", flags));
                         }
                         return;
                     }
@@ -1617,7 +1674,7 @@ namespace {
                     LogPlayback(std::format("the transfer (s2c 422) emulated: mission flags {:#x} before, {:#x} after, the join's map {}", flags, MissionFlags(), JoinedMap()));
                 }
                 else if (waited > (flags & (join_pending | transfer_kept) ? transfer_wait : connect_timeout)) {
-                    FinishPlayback(std::format("The game did not start the replay's connection (mission flags {:#x}, the join's map {}, a game connection {})", flags, JoinedMap(), *game_connection_global ? "open" : "none"));
+                    CloseReplayConnection(std::format("The game did not start the replay's connection (mission flags {:#x}, the join's map {}, a game connection {})", flags, JoinedMap(), *game_connection_global ? "open" : "none"));
                 }
                 return;
             }
@@ -1652,9 +1709,12 @@ namespace {
                 const auto elapsed = std::chrono::duration<double, std::milli>(now - last_update).count();
                 last_update = now;
                 if (stop) {
-                    Log::Info("Replay Recorder: %s", restart_pending ? "playback restarting: back to the outpost, then the same recording from its start" : "playback stopped: back to the outpost");
+                    Log::Info("Replay Recorder: playback stopped: back to the outpost");
                     Log::FlushFile();
                     StopObserving();
+                    return;
+                }
+                if (const auto time_ms = seek_request.exchange(no_seek); time_ms != no_seek && Seek(time_ms)) {
                     return;
                 }
                 if (!AgentAdvance_Func && !playback_paused) {
@@ -1666,10 +1726,16 @@ namespace {
                     PostNetEvent(net_event_data, replay_connection_id, bytes.data(), bytes.size());
                 }
                 if (next_post == plan.posts.size() && !playback_ended) {
+                    if (auto next = plan.chapter + 1 < replay.chapters.size() ? ReplayWire::MakeSeekPlan(replay, replay.chapters[plan.chapter + 1].time_ms) : ReplayWire::Plan{}; next.error.empty() && next.chapter > plan.chapter) {
+                        NoteSkipped(plan.chapter + 1, next.chapter);
+                        LoadKeyframe(std::move(next));
+                        return;
+                    }
                     playback_ended = true;
+                    paused_by_end = !playback_paused;
                     playback_paused = true;
                     played_ms = plan.duration_ms;
-                    Log::Info("Replay Recorder: the replay has ended: paused on its last moment until Stop or Restart");
+                    Log::Info("Replay Recorder: the replay has ended: paused on its last moment until a seek, Restart or Stop");
                     Log::FlushFile();
                 }
                 const auto target = GW::Agents::GetTargetId();
@@ -1822,21 +1888,29 @@ void ReplayRecorderModule::Initialize()
 ReplayRecorderModule::PlaybackView ReplayRecorderModule::GetPlayback() const
 {
     const auto stage = playback.load();
-    return {
-        .active = stage != Playback::Off || restart_pending,
+    PlaybackView view = {
+        .active = stage != Playback::Off,
         .playing = stage == Playback::Playing,
         .ended = playback_ended,
         .paused = playback_paused,
-        .restarting = restart_pending,
         .can_follow = viewpoint_available,
         .speed = playback_speed,
-        .played_ms = static_cast<uint32_t>(played_ms),
-        .length_ms = plan.duration_ms,
+        .position_ms = plan.start_ms + (stage == Playback::Playing ? static_cast<uint32_t>(played_ms) : plan.seek_ms),
+        .length_ms = std::max(replay.header.duration_ms, replay.records.empty() ? 0 : replay.records.back().time_ms),
+        .chapter = plan.chapter,
         .recorder_agent = plan.controlled_agent,
         .followed_agent = followed_agent,
         .name = TextUtils::WStringToString(playing_path.filename().wstring()),
-        .status = playback_status,
+        .note = playback_note,
     };
+    for (size_t chapter = 0; chapter < replay.chapters.size(); chapter++) {
+        const auto& opened = replay.chapters[chapter];
+        view.chapters.push_back({opened.time_ms, chapter + 1 < replay.chapters.size() ? replay.chapters[chapter + 1].time_ms : view.length_ms, opened.map_id, opened.is_explorable != 0});
+    }
+    for (const auto& keyframe : replay.keyframes) {
+        view.keyframes_ms.push_back(keyframe.time_ms);
+    }
+    return view;
 }
 
 void ReplayRecorderModule::SetPlaybackPaused(const bool paused)
@@ -1851,14 +1925,19 @@ void ReplayRecorderModule::SetPlaybackSpeed(const int speed)
 
 void ReplayRecorderModule::StopPlayback()
 {
-    restart_pending = false;
     playback_stop_requested = true;
 }
 
 void ReplayRecorderModule::RestartPlayback()
 {
-    restart_pending = true;
-    playback_stop_requested = true;
+    SeekPlayback(0);
+}
+
+void ReplayRecorderModule::SeekPlayback(const uint32_t time_ms)
+{
+    if (playback != Playback::Off) {
+        seek_request = time_ms;
+    }
 }
 
 void ReplayRecorderModule::FollowAgent(const uint32_t agent_id)
@@ -1876,7 +1955,6 @@ bool* ReplayRecorderModule::FollowSelectedAgent()
 void ReplayRecorderModule::SignalTerminate()
 {
     playback_stop_requested = true;
-    restart_pending = false;
     GW::StoC::RemoveCallbacks(&observe_hook_entry);
     DropListedRows();
     std::scoped_lock lock(recording_mutex);
@@ -1925,23 +2003,6 @@ void ReplayRecorderModule::Update(float)
     }
     UpdatePlayback();
     const auto play = settings.play_from_observe_window && settings.list_in_observe_window && ObserveGame_Func;
-    const auto settled = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Outpost && GW::Map::GetIsMapLoaded() && !GW::Map::GetIsObserving() && !(MissionFlags() & (join_pending | transfer_kept));
-    if (!settled) {
-        outpost_settled_since.reset();
-    }
-    else if (!outpost_settled_since) {
-        outpost_settled_since = Clock::now();
-    }
-    if (restart_pending && playback == Playback::Off) {
-        if (!play || !playback_armed) {
-            restart_pending = false;
-        }
-        else if (outpost_settled_since && Clock::now() - *outpost_settled_since > restart_settle) {
-            restart_pending = false;
-            LogPlayback("restart: back in an outpost whose join has ended");
-            StartPlayback(playing_row);
-        }
-    }
     if (play && !playback_armed && playback_status.empty()) {
         playback_status = ArmPlayback();
         LogPlayback(playback_status);
@@ -2017,14 +2078,14 @@ void ReplayRecorderModule::DrawSettingsInternal()
     ImGui::TextDisabled("PvP maps and observed matches are never recorded.");
     ImGui::Checkbox("List recordings in the Observe window", &settings.list_in_observe_window);
     ImGui::ShowHelp(
-        "Each recording made on this client build appears once in the Observe window (B, in an outpost) under \"Custom Event (0)\", with its date, maps and length; it plays from its first explorable map's first keyframe (outposts are not played yet). Choosing one is answered here; nothing is sent to the server."
+        "Each recording made on this client build appears once in the Observe window (B, in an outpost) under \"Custom Event (0)\", with its date, maps and length; it plays from its first explorable map's first keyframe and on across its maps (outposts are skipped: not played yet). Choosing one is answered here; nothing is sent to the server."
     );
     if (!observe_status.empty()) {
         ImGui::TextDisabled("%s", observe_status.c_str());
     }
     ImGui::Checkbox("Play recordings from the Observe window", &settings.play_from_observe_window);
     ImGui::ShowHelp(
-        "Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. The Replay window shows while it plays; its Stop, or stop observing (B, then Yes), brings you back to your outpost. Needs the list above."
+        "Observe on one of your recordings plays it in the game's observer mode, fed by the toolbox: nothing of the replay goes to the server. The Replay window shows while it plays: its bar goes anywhere in the recording, and its Stop, or stop observing (B, then Yes), brings you back to your outpost. Needs the list above."
     );
     if (!playback_status.empty()) {
         ImGui::TextDisabled("%s", playback_status.c_str());

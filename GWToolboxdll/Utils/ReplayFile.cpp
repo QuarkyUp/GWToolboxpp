@@ -286,6 +286,12 @@ namespace ReplayFile {
         return "?";
     }
 
+    size_t Contents::ChapterOf(const size_t record_index) const
+    {
+        const auto after = std::ranges::upper_bound(chapters, record_index, {}, &Chapter::first_record) - chapters.begin();
+        return after ? static_cast<size_t>(after - 1) : 0;
+    }
+
     bool Read(const std::filesystem::path& path, Contents& out, std::string& error, const bool bodies)
     {
         out = {};
