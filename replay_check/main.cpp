@@ -1,8 +1,8 @@
-#include <Utils/ReplayFile.h>
-#include <Utils/ReplayMessages.h>
-#include <Utils/ReplayObserve.h>
-#include <Utils/ReplayState.h>
-#include <Utils/ReplayWire.h>
+#include <Utils/Replay/ReplayFile.h>
+#include <Utils/Replay/ReplayMessages.h>
+#include <Utils/Replay/ReplayObserve.h>
+#include <Utils/Replay/ReplayState.h>
+#include <Utils/Replay/ReplayWire.h>
 
 #include <algorithm>
 #include <bit>

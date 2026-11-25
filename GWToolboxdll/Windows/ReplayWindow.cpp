@@ -9,7 +9,7 @@
 #include <Modules/ReplayRecorderModule.h>
 #include <Modules/Resources.h>
 #include <Utils/EncString.h>
-#include <Utils/ReplayObserve.h>
+#include <Utils/Replay/ReplayObserve.h>
 #include <Utils/TextUtils.h>
 #include <Windows/ReplayWindow.h>
 

@@ -1,14 +1,14 @@
 add_executable(replay_check EXCLUDE_FROM_ALL
     main.cpp
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayFile.cpp"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayFile.h"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayMessages.h"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayObserve.cpp"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayObserve.h"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayState.cpp"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayState.h"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayWire.cpp"
-    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/ReplayWire.h")
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayFile.cpp"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayFile.h"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayMessages.h"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayObserve.cpp"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayObserve.h"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayState.cpp"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayState.h"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayWire.cpp"
+    "${PROJECT_SOURCE_DIR}/GWToolboxdll/Utils/Replay/ReplayWire.h")
 
 target_include_directories(replay_check PRIVATE
     "${PROJECT_SOURCE_DIR}/GWToolboxdll"

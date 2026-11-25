@@ -1,7 +1,7 @@
 #pragma once
 
-#include <Utils/ReplayFile.h>
-#include <Utils/ReplayState.h>
+#include <Utils/Replay/ReplayFile.h>
+#include <Utils/Replay/ReplayState.h>
 
 #include <cstddef>
 #include <cstdint>

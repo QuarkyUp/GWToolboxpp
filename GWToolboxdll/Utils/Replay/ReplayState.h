@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Utils/ReplayFile.h>
+#include <Utils/Replay/ReplayFile.h>
 
 #include <array>
 #include <cstdint>

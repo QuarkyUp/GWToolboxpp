@@ -1,5 +1,5 @@
-#include <Utils/ReplayFile.h>
-#include <Utils/ReplayMessages.h>
+#include <Utils/Replay/ReplayFile.h>
+#include <Utils/Replay/ReplayMessages.h>
 
 #include <algorithm>
 #include <bit>

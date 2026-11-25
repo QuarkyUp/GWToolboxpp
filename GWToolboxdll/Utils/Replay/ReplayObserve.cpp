@@ -1,5 +1,5 @@
-#include <Utils/ReplayObserve.h>
-#include <Utils/ReplayState.h>
+#include <Utils/Replay/ReplayObserve.h>
+#include <Utils/Replay/ReplayState.h>
 
 #include <algorithm>
 #include <ctime>

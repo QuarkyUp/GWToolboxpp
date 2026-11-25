@@ -212,6 +212,15 @@ add_custom_target(build_wasm
     VERBATIM
     SOURCES ${WASM_SOURCES})
 
+# The replay library (Utils/Replay), shared with replay_check: self-contained, so built without the precompiled header.
+file(GLOB REPLAY_SOURCES CONFIGURE_DEPENDS
+    "Utils/Replay/*.h"
+    "Utils/Replay/*.cpp"
+    )
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${REPLAY_SOURCES})
+target_sources(GWToolboxdll PRIVATE ${REPLAY_SOURCES})
+set_source_files_properties(${REPLAY_SOURCES} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
 # Native Gw.dat reader/decoders (Utils/GwDat). Added explicitly rather than via the
 # Utils glob so the reverse-engineered ATEX/xentax sources can build with warnings
 # relaxed and without the precompiled header (they are self-contained).
