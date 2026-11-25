@@ -589,6 +589,7 @@ namespace ReplayRecorder {
             }
             emulating_packet = true;
             for (auto& message : messages) {
+                // Decoded now, so that the answer to Observe on this row can name its map.
                 Resources::GetMapName(static_cast<GW::Constants::MapID>(message.map_id));
                 GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
             }

@@ -451,6 +451,7 @@ namespace ReplayRecorder {
             if (callbacks_registered || message_table.empty()) {
                 return;
             }
+            // After the game's handler and the toolbox's own post callbacks (0x8000): a message is recorded as the game took it in the end.
             for (uint32_t message_id = 0; message_id < message_table.size(); message_id++) {
                 if (!GW::StoC::RegisterPacketCallback(&stoc_hook_entry, message_id, OnServerMessage, nullptr, 0x9000)) {
                     GW::StoC::RemoveCallbacks(&stoc_hook_entry);
