@@ -7,7 +7,6 @@
 #include <set>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace ReplayFile {
@@ -136,26 +135,6 @@ namespace ReplayFile {
     constexpr size_t guild_tag_length = 5;
 
     bool IsPlainText(std::wstring_view text);
-
-    class NameStripper {
-    public:
-        NameStripper(bool other_players, bool own_names, std::wstring own_name);
-
-        void Apply(uint16_t message_id, std::wstring& text, uint32_t capacity);
-        [[nodiscard]] TextFilter For(uint16_t message_id);
-
-    private:
-        std::wstring Label(uint16_t message_id, std::wstring_view name, uint32_t capacity);
-
-        bool other_players;
-        bool own_names;
-        std::set<std::wstring, std::less<>> recorder_names;
-        std::set<std::wstring, std::less<>> account_names;
-        std::unordered_map<std::wstring, std::wstring> players;
-        std::unordered_map<std::wstring, std::wstring> guilds;
-        std::unordered_map<std::wstring, std::wstring> tags;
-        std::unordered_map<std::wstring, std::wstring> mercenaries;
-    };
 
     bool Read(const std::filesystem::path& path, Contents& out, std::string& error, bool bodies = true);
     bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error);

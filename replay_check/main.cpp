@@ -2135,11 +2135,11 @@ namespace {
 
     void TestNameStripper()
     {
-        const auto stripped = [](ReplayFile::NameStripper& stripper, const uint16_t message_id, std::wstring text, const uint32_t capacity) {
+        const auto stripped = [](ReplayState::NameStripper& stripper, const uint16_t message_id, std::wstring text, const uint32_t capacity) {
             stripper.Apply(message_id, text, capacity);
             return text;
         };
-        ReplayFile::NameStripper both(true, true, L"Own Name");
+        ReplayState::NameStripper both(true, true, L"Own Name");
         Check(stripped(both, 89, L"Own Name", 32) == L"Recorder", "the recorder's name becomes the placeholder");
         Check(stripped(both, 89, L"Someone Else", 32) == L"Player 1", "another player's name becomes a numbered label");
         Check(stripped(both, 89, L"Someone Else", 32) == L"Player 1", "a name keeps its label");
@@ -2155,11 +2155,11 @@ namespace {
         const std::wstring encoded = {0x8102, 0x107, L'O', L'w', L'n', L' ', L'N', L'a', L'm', L'e', 0x1, 0x2};
         Check(stripped(both, 76, encoded, 128) == std::wstring{0x8102, 0x107, L'R', L'e', L'c', L'o', L'r', L'd', L'e', L'r', 0x1, 0x2}, "a name inside an encoded text is replaced");
         Check(stripped(both, 76, std::wstring{0x8102, 0x2}, 128) == std::wstring{0x8102, 0x2}, "an encoded text without a literal is kept");
-        ReplayFile::NameStripper others_only(true, false, L"Own Name");
+        ReplayState::NameStripper others_only(true, false, L"Own Name");
         Check(stripped(others_only, 89, L"Own Name", 32) == L"Own Name", "the recorder's name is kept when only other players' are stripped");
         Check(stripped(others_only, 48, L"Account", 32) == L"Player 1", "the account's name is still hidden when only other players' are stripped");
         Check(stripped(others_only, 288, L"Their Guild", 32) == L"Guild 1", "guild names are replaced with other players' names");
-        ReplayFile::NameStripper own_only(false, true, L"Own Name");
+        ReplayState::NameStripper own_only(false, true, L"Own Name");
         Check(stripped(own_only, 89, L"Someone Else", 32) == L"Someone Else", "other players' names are kept when only the recorder's are stripped");
         Check(stripped(own_only, 89, L"Own Name", 32) == L"Recorder", "the recorder's name is replaced alone");
         Check(stripped(own_only, 289, L"OG", 6) == L"G1", "guild tags are replaced with the recorder's names");

@@ -463,87 +463,11 @@ namespace ReplayFile {
         return true;
     }
 
-    namespace {
-        constexpr uint32_t tag_capacity = 6;
-        constexpr uint32_t guild_name_min_capacity = 32;
-        constexpr uint16_t guild_messages[] = {GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
-        constexpr uint16_t guild_tag_messages[] = {GAME_SMSG_CHAT_MESSAGE_GLOBAL, GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
-    } // namespace
-
     bool IsPlainText(const std::wstring_view text)
     {
         return !text.empty() && std::ranges::all_of(text, [](const wchar_t c) {
             return c >= 0x20 && c < 0x100;
         });
-    }
-
-    NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name) : other_players(other_players), own_names(own_names)
-    {
-        if (!own_name.empty()) {
-            recorder_names.insert(std::move(own_name));
-        }
-    }
-
-    std::wstring NameStripper::Label(const uint16_t message_id, const std::wstring_view name, const uint32_t capacity)
-    {
-        const auto numbered = [name](std::unordered_map<std::wstring, std::wstring>& labels, const std::wstring_view prefix) {
-            auto& label = labels[std::wstring(name)];
-            if (label.empty()) {
-                label = std::format(L"{}{}", prefix, labels.size());
-            }
-            return label;
-        };
-        if (std::ranges::contains(guild_tag_messages, message_id) && capacity == tag_capacity) {
-            return numbered(tags, L"G");
-        }
-        if (std::ranges::contains(guild_messages, message_id) && capacity >= guild_name_min_capacity) {
-            return numbered(guilds, L"Guild ");
-        }
-        if (message_id == CharAccountNameData || message_id == GAME_SMSG_HERO_ACCOUNT_NAME) {
-            account_names.emplace(name);
-        }
-        if (message_id == GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME) {
-            recorder_names.emplace(name);
-        }
-        if (account_names.contains(name)) {
-            return own_names ? own_name_placeholder : other_players ? numbered(players, L"Player ") : std::wstring(name);
-        }
-        if (message_id == GAME_SMSG_MERCENARY_INFO) {
-            return own_names ? numbered(mercenaries, L"Mercenary ") : other_players ? numbered(players, L"Player ") : std::wstring(name);
-        }
-        if (recorder_names.contains(name)) {
-            return own_names ? own_name_placeholder : std::wstring(name);
-        }
-        return other_players ? numbered(players, L"Player ") : std::wstring(name);
-    }
-
-    void NameStripper::Apply(const uint16_t message_id, std::wstring& text, const uint32_t capacity)
-    {
-        if (IsPlainText(text)) {
-            text = Label(message_id, text, capacity);
-            return;
-        }
-        std::wstring stripped;
-        size_t position = 0;
-        for (auto start = text.find(literal_start); start != std::wstring::npos; start = text.find(literal_start, position)) {
-            const auto end = text.find(literal_end, start + 1);
-            if (end == std::wstring::npos) {
-                break;
-            }
-            stripped.append(text, position, start + 1 - position);
-            const auto literal = std::wstring_view(text).substr(start + 1, end - start - 1);
-            stripped += IsPlainText(literal) ? Label(message_id, literal, 0) : std::wstring(literal);
-            position = end;
-        }
-        stripped.append(text, position);
-        text = std::move(stripped);
-    }
-
-    TextFilter NameStripper::For(const uint16_t message_id)
-    {
-        return [this, message_id](std::wstring& text, const uint32_t capacity) {
-            Apply(message_id, text, capacity);
-        };
     }
 
     bool ReadHeader(const std::filesystem::path& path, Header& out, std::string& error)

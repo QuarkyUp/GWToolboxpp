@@ -86,7 +86,7 @@ namespace {
     std::vector<uint8_t> pending_chat;
     uint32_t pending_chat_time_ms = 0;
     bool has_pending_chat = false;
-    std::optional<ReplayFile::NameStripper> name_stripper;
+    std::optional<ReplayState::NameStripper> name_stripper;
     std::optional<ReplayState::InventoryFilter> inventory_filter;
     std::string status = "Not recording";
     bool record_requested = false;

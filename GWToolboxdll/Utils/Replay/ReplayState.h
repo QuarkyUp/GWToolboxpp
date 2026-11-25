@@ -8,6 +8,8 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -169,6 +171,26 @@ namespace ReplayState {
         std::map<uint32_t, PlayerFlags> player_flags;
         std::map<uint32_t, std::map<uint16_t, Message>> items;
         Message reporter;
+    };
+
+    class NameStripper {
+    public:
+        NameStripper(bool other_players, bool own_names, std::wstring own_name);
+
+        void Apply(uint16_t message_id, std::wstring& text, uint32_t capacity);
+        [[nodiscard]] ReplayFile::TextFilter For(uint16_t message_id);
+
+    private:
+        std::wstring Label(uint16_t message_id, std::wstring_view name, uint32_t capacity);
+
+        bool other_players;
+        bool own_names;
+        std::set<std::wstring, std::less<>> recorder_names;
+        std::set<std::wstring, std::less<>> account_names;
+        std::unordered_map<std::wstring, std::wstring> players;
+        std::unordered_map<std::wstring, std::wstring> guilds;
+        std::unordered_map<std::wstring, std::wstring> tags;
+        std::unordered_map<std::wstring, std::wstring> mercenaries;
     };
 
     class InventoryFilter {
