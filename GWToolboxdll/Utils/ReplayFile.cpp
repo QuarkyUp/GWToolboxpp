@@ -1,4 +1,5 @@
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayMessages.h>
 
 #include <algorithm>
 #include <bit>
@@ -8,6 +9,8 @@
 
 namespace ReplayFile {
     namespace {
+        using namespace ReplayMessages;
+
         constexpr size_t max_decoded_size = 0x10000;
         constexpr uint32_t max_messages = 0x1000;
         constexpr uint32_t max_descriptors = 0x400;
@@ -463,12 +466,8 @@ namespace ReplayFile {
     namespace {
         constexpr uint32_t tag_capacity = 6;
         constexpr uint32_t guild_name_min_capacity = 32;
-        constexpr uint16_t account_name_message = 48;
-        constexpr uint16_t hero_account_name_message = 49;
-        constexpr uint16_t mercenary_message = 116;
-        constexpr uint16_t instance_player_name_message = 381;
-        constexpr uint16_t guild_messages[] = {282, 288, 289, 291, 376, 431};
-        constexpr uint16_t guild_tag_messages[] = {96, 282, 288, 289, 291, 376, 431};
+        constexpr uint16_t guild_messages[] = {GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
+        constexpr uint16_t guild_tag_messages[] = {GAME_SMSG_CHAT_MESSAGE_GLOBAL, GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
         constexpr std::wstring_view numbered_placeholders[] = {L"Player ", L"Mercenary ", L"Guild ", L"G"};
     } // namespace
 
@@ -510,16 +509,16 @@ namespace ReplayFile {
         if (std::ranges::contains(guild_messages, message_id) && capacity >= guild_name_min_capacity) {
             return numbered(guilds, L"Guild ");
         }
-        if (message_id == account_name_message || message_id == hero_account_name_message) {
+        if (message_id == CharAccountNameData || message_id == GAME_SMSG_HERO_ACCOUNT_NAME) {
             account_names.emplace(name);
         }
-        if (message_id == instance_player_name_message) {
+        if (message_id == GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME) {
             recorder_names.emplace(name);
         }
         if (account_names.contains(name)) {
             return own_names ? own_name_placeholder : other_players ? numbered(players, L"Player ") : std::wstring(name);
         }
-        if (message_id == mercenary_message) {
+        if (message_id == GAME_SMSG_MERCENARY_INFO) {
             return own_names ? numbered(mercenaries, L"Mercenary ") : other_players ? numbered(players, L"Player ") : std::wstring(name);
         }
         if (recorder_names.contains(name)) {

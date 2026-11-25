@@ -1,3 +1,4 @@
+#include <Utils/ReplayMessages.h>
 #include <Utils/ReplayWire.h>
 
 #include <Utils/ReplayState.h>
@@ -12,16 +13,11 @@
 
 namespace ReplayWire {
     namespace {
-        enum MessageId : uint16_t {
-            AgentConnect = 31,
-            AgentReporter = 34,
-            MissionInstanceLoadHead = 380,
-            MissionLoadMap = 406,
-            MissionInstanceInfo = 410,
-        };
+        using namespace ReplayMessages;
+
         constexpr size_t instance_info_map_type = 2;
         constexpr size_t instance_info_observer = 5;
-        constexpr uint16_t item_detail_ids[] = {309, 313, 314, 346, 350, 353, 354};
+        constexpr uint16_t item_detail_ids[] = {GAME_SMSG_ITEM_UPDATE_OWNER, GAME_SMSG_ITEM_UPDATE_QUANTITY, GAME_SMSG_ITEM_UPDATE_NAME, ItemProfession, ItemReportDetailLow, GAME_SMSG_ITEM_GENERAL_INFO, GAME_SMSG_ITEM_REUSE_ID};
 
         void Append(std::vector<Post>& posts, const Stage stage, const uint32_t time_ms, const std::vector<uint8_t>& body)
         {
@@ -35,7 +31,7 @@ namespace ReplayWire {
 
         bool IsLoad(const uint16_t id)
         {
-            return id == MissionInstanceLoadHead || id == MissionInstanceInfo || id == MissionLoadMap;
+            return id == GAME_SMSG_INSTANCE_LOAD_HEAD || id == GAME_SMSG_INSTANCE_LOAD_INFO || id == GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT;
         }
 
         bool SetObserver(const ReplayFile::MessageTable& table, ReplayState::Message& message, std::vector<uint8_t>& body, Plan& plan)
@@ -111,8 +107,8 @@ namespace ReplayWire {
                 return message.id == id;
             };
         };
-        const auto load = static_cast<size_t>(std::ranges::find_if(messages, is(MissionLoadMap)) - messages.begin());
-        const auto connect = static_cast<size_t>(std::find_if(messages.begin() + static_cast<std::ptrdiff_t>(load), messages.end(), is(AgentConnect)) - messages.begin());
+        const auto load = static_cast<size_t>(std::ranges::find_if(messages, is(GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT)) - messages.begin());
+        const auto connect = static_cast<size_t>(std::find_if(messages.begin() + static_cast<std::ptrdiff_t>(load), messages.end(), is(GAME_SMSG_AGENT_INSTANCE_TIMER)) - messages.begin());
         if (connect >= messages.size()) {
             plan.error = "the keyframe has no 406 followed by a 31";
             return plan;
@@ -138,7 +134,7 @@ namespace ReplayWire {
         for (size_t i = 0; i < messages.size(); i++) {
             auto& message = messages[i];
             auto body = keyframe.records[i].body;
-            if (message.id == MissionInstanceInfo && i < load) {
+            if (message.id == GAME_SMSG_INSTANCE_LOAD_INFO && i < load) {
                 observer = true;
                 if (SetObserver(contents.table, message, body, plan)) {
                     plan.changes.push_back({ChangeKind::ObserverByte, i, 1, "the keyframe's 410: the game enters observer mode and keeps the map it came from to go back to"});
@@ -147,7 +143,7 @@ namespace ReplayWire {
                     return plan;
                 }
             }
-            if (message.id == AgentReporter && !plan.controlled_agent) {
+            if (message.id == GAME_SMSG_AGENT_SET_PLAYER && !plan.controlled_agent) {
                 plan.controlled_agent = message.U(0);
             }
             order.Bring(contents.table, message);

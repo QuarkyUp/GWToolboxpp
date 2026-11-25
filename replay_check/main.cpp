@@ -1,4 +1,5 @@
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayMessages.h>
 #include <Utils/ReplayObserve.h>
 #include <Utils/ReplayState.h>
 #include <Utils/ReplayWire.h>
@@ -22,6 +23,8 @@
 #include <vector>
 
 namespace {
+    using namespace ReplayMessages;
+
     int failures = 0;
 
     void Check(const bool condition, const char* what)
@@ -756,7 +759,7 @@ namespace {
         ReplayState::World world(contents.table);
         auto i = contents.chapters[chapter].first_record;
         const auto end = contents.ChapterEnd(chapter);
-        for (; i < end && (contents.records[i].time_ms < time_ms || contents.records[i].MessageId() != 30); i++) {
+        for (; i < end && (contents.records[i].time_ms < time_ms || contents.records[i].MessageId() != GAME_SMSG_AGENT_MOVEMENT_TICK); i++) {
             world.Apply(contents.records[i]);
         }
         if (i == end && i > contents.chapters[chapter].first_record) {
@@ -800,7 +803,7 @@ namespace {
 
     std::vector<std::pair<size_t, std::string>> StreamNeeds(const ReplayFile::Contents& contents, const ReplayFile::Keyframe& keyframe)
     {
-        constexpr uint16_t load_ids[] = {380, 406, 410};
+        constexpr uint16_t load_ids[] = {GAME_SMSG_INSTANCE_LOAD_HEAD, GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, GAME_SMSG_INSTANCE_LOAD_INFO};
         std::vector<std::pair<size_t, std::string>> failures;
         ReplayState::Order order;
         ReplayState::ClientAgents agents;
@@ -843,7 +846,7 @@ namespace {
         for (const auto& message : Decoded(table, records)) {
             std::vector<ReplayState::Message> shown_before;
             std::vector<uint32_t> unknown_items;
-            constexpr uint16_t instance_load_head = 380;
+            constexpr uint16_t instance_load_head = GAME_SMSG_INSTANCE_LOAD_HEAD;
             if (message.id == instance_load_head) {
                 leaks.held_details += filter.Held();
             }
@@ -947,12 +950,12 @@ namespace {
         for (auto it = sent.begin(); it != sent.end();) {
             const auto agent_id = it->U(0);
             const auto standing = std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
-                return message.id == 32 && message.U(0) == agent_id;
+                return message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == agent_id;
             });
             const auto order = std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
-                return (message.id == 41 || message.id == 42) && message.U(0) == agent_id;
+                return (message.id == GAME_SMSG_AGENT_MOVE_TO_POINT || message.id == GAME_SMSG_AGENT_UPDATE_DESTINATION) && message.U(0) == agent_id;
             });
-            if (it->id != 32 || !it->U(13) || standing == built.end() || order == built.end() || standing->U(13) || order->U(1, 0) != it->U(18, 0) || order->U(1, 1) != it->U(18, 1)) {
+            if (it->id != GAME_SMSG_AGENT_SPAWNED || !it->U(13) || standing == built.end() || order == built.end() || standing->U(13) || order->U(1, 0) != it->U(18, 0) || order->U(1, 1) != it->U(18, 1)) {
                 ++it;
                 continue;
             }
@@ -973,7 +976,7 @@ namespace {
             }
             built.erase(order);
             built.erase(std::ranges::find_if(built, [agent_id](const ReplayState::Message& message) {
-                return message.id == 32 && message.U(0) == agent_id;
+                return message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == agent_id;
             }));
             it = sent.erase(it);
             checked++;
@@ -1125,7 +1128,7 @@ namespace {
         size_t not_placeholders = 0;
     };
 
-    constexpr uint16_t own_name_messages[] = {48, 49, 116, 381};
+    constexpr uint16_t own_name_messages[] = {CharAccountNameData, GAME_SMSG_HERO_ACCOUNT_NAME, GAME_SMSG_MERCENARY_INFO, GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME};
 
     NameCount CountNames(const ReplayFile::MessageTable& table, const std::vector<ReplayFile::Record>& records, const uint32_t flags)
     {
@@ -1209,7 +1212,7 @@ namespace {
             auto model = stream.Join();
             // CItemTable::AddDetailLow keeps an item's model file without bit 31, its fetch at once (c02): memory cannot give it back.
             for (auto& message : model) {
-                if (message.id == 353 || message.id == 354) {
+                if (message.id == GAME_SMSG_ITEM_GENERAL_INFO || message.id == GAME_SMSG_ITEM_REUSE_ID) {
                     message.Set(1, message.U(1) & 0x7FFFFFFF);
                 }
             }
@@ -1217,12 +1220,12 @@ namespace {
             const auto fold_attribute_updates = [](std::vector<ReplayState::Message>& messages) {
                 std::map<uint32_t, std::vector<ReplayState::Message>> updates;
                 for (const auto& message : messages) {
-                    if (message.id == 59) {
+                    if (message.id == GAME_SMSG_AGENT_UPDATE_ATTRIBUTE) {
                         updates[message.U(0)].push_back(message);
                     }
                 }
                 for (auto& message : messages) {
-                    if (message.id != 58 || message.fields.size() < 2 || !updates.contains(message.U(0))) {
+                    if (message.id != CharAttributes || message.fields.size() < 2 || !updates.contains(message.U(0))) {
                         continue;
                     }
                     auto& words = message.fields[1].numbers;
@@ -1427,7 +1430,7 @@ namespace {
             }
             for (const auto& body : bodies) {
                 ReplayState::Message message;
-                observer_info |= ReplayState::Decode(contents.table, body, message) && post.stage == ReplayWire::Stage::BeforeLoad && message.id == 410 && message.U(5) == 1;
+                observer_info |= ReplayState::Decode(contents.table, body, message) && post.stage == ReplayWire::Stage::BeforeLoad && message.id == GAME_SMSG_INSTANCE_LOAD_INFO && message.U(5) == 1;
             }
             stage = post.stage;
             time_ms = post.time_ms;
@@ -1566,13 +1569,13 @@ namespace {
         // A later keyframe's 32s hold the client's own places at its time: the placement there from an earlier keyframe against them.
         std::map<uint32_t, std::pair<float, float>> client;
         for (const auto& message : Decoded(contents.table, later.records)) {
-            if (message.id == 32 && message.U(2) == 1) {
+            if (message.id == GAME_SMSG_AGENT_SPAWNED && message.U(2) == 1) {
                 client[message.U(0)] = {message.F(4, 0), message.F(4, 1)};
             }
         }
         std::vector<float> errors;
         for (const auto& message : ReplayWire::Placement(contents, from, later.time_ms - from.start_ms)) {
-            if (const auto found = client.find(message.U(0)); message.id == 44 && found != client.end()) {
+            if (const auto found = client.find(message.U(0)); message.id == GAME_SMSG_AGENT_UPDATE_POSITION && found != client.end()) {
                 errors.push_back(std::hypot(message.F(1, 0) - found->second.first, message.F(1, 1) - found->second.second));
             }
         }
@@ -1596,7 +1599,7 @@ namespace {
     {
         std::map<uint32_t, std::pair<float, float>> placed;
         for (const auto& message : placement) {
-            if (message.id == 44) {
+            if (message.id == GAME_SMSG_AGENT_UPDATE_POSITION) {
                 placed[message.U(0)] = {message.F(1, 0), message.F(1, 1)};
             }
         }
@@ -1902,7 +1905,7 @@ namespace {
 
         ReplayState::World stateless(contents.table);
         for (const auto& record : contents.records) {
-            if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message) || message.id != 55 || message.U(0) != 10) {
+            if (ReplayState::Message message; !ReplayState::Decode(contents.table, record.body, message) || message.id != CharAttributeState || message.U(0) != 10) {
                 stateless.Apply(record);
             }
         }
@@ -1911,7 +1914,7 @@ namespace {
             stateless.ControlledAgent() == 0 && std::ranges::none_of(
                                                     fallback,
                                                     [](const ReplayState::Message& message) {
-                                                        return message.id == 34 || (message.id == 89 && message.U(1) == 10) || (message.id == 32 && message.U(0) == 10);
+                                                        return message.id == GAME_SMSG_AGENT_SET_PLAYER || (message.id == GAME_SMSG_AGENT_CREATE_PLAYER && message.U(1) == 10) || (message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == 10);
                                                     }
                                                 ),
             "a controlled character with no attribute state is left out of the join: no 34, nor its 89 and 32"
@@ -1927,7 +1930,7 @@ namespace {
             std::ranges::any_of(
                 allies.Join(),
                 [](const ReplayState::Message& message) {
-                    return message.id == 170 && message.U(0) == 88;
+                    return message.id == GAME_SMSG_AGENT_CREATE_NPC && message.U(0) == 88;
                 }
             ),
             "an agent's rows stay in the model across a 30 until its 33, as the client keeps them: a party ally's 170 is there for its 62"
@@ -2047,7 +2050,7 @@ namespace {
             std::vector<uint8_t> kept;
             post.records = 0;
             for (const auto& body : ReplayWire::Split(contents.table, post.bytes, split_error)) {
-                if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && message.id == 55 && message.U(0) == 10) {
+                if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && message.id == CharAttributeState && message.U(0) == 10) {
                     continue;
                 }
                 kept.insert(kept.end(), body.begin(), body.end());
@@ -2302,7 +2305,7 @@ namespace {
         Check(ProveCompare(v2) == 0, "the v2 recording compares: its loads and keyframes against the model, no bag content, its names placeholders");
         auto named = v2;
         for (auto& record : named.keyframes.front().records) {
-            if (ReplayState::Message message; ReplayState::Decode(named.table, record.body, message) && message.id == 381 && !message.fields.empty()) {
+            if (ReplayState::Message message; ReplayState::Decode(named.table, record.body, message) && message.id == GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME && !message.fields.empty()) {
                 message.fields[0].text = L"Real Name";
                 ReplayState::Encode(named.table, message, record.body);
             }
@@ -2310,7 +2313,7 @@ namespace {
         Check(CountNames(named.table, named.keyframes.front().records, named.header.flags).not_placeholders == 1, "a name that is not a placeholder in a keyframe is found, by count");
         auto no_map_file = v2.keyframes.front();
         for (auto& record : no_map_file.records) {
-            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == 406) {
+            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT) {
                 message.Set(0, 0);
                 ReplayState::Encode(v2.table, message, record.body);
             }
@@ -2322,7 +2325,7 @@ namespace {
         ReplayState::World snapshot(v2.table);
         size_t model_intervals = 0;
         for (const auto& message : Decoded(v2.table, mid_fight.records)) {
-            if (message.id == 53) {
+            if (message.id == CharAttackInterval) {
                 model_intervals++;
                 continue;
             }
@@ -2333,14 +2336,14 @@ namespace {
         from_writer.records = ReplayState::JoinRecords(v2.table, snapshot, mid_fight.time_ms);
         const auto written_messages = Decoded(v2.table, from_writer.records);
         const auto created_at = std::ranges::find_if(written_messages, [](const ReplayState::Message& message) {
-            return message.id == 32 && message.U(0) == fighter;
+            return message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == fighter;
         });
         const auto interval_at = std::ranges::find_if(written_messages, [](const ReplayState::Message& message) {
-            return message.id == 53;
+            return message.id == CharAttackInterval;
         });
         const auto attacks_after = std::ranges::count_if(v2.records.begin() + static_cast<std::ptrdiff_t>(mid_fight.record_index), v2.records.begin() + static_cast<std::ptrdiff_t>(v2.ChapterEnd(0)), [&](const ReplayFile::Record& record) {
             ReplayState::Message message;
-            return ReplayState::Decode(v2.table, record.body, message) && message.id == 160 && message.U(0) == 4 && message.U(1) == fighter;
+            return ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET && message.U(0) == 4 && message.U(1) == fighter;
         });
         Check(
             model_intervals == 1 && attacks_after > 0 && created_at < interval_at && interval_at != written_messages.end() && ReplayWire::MakeKeyframePlan(v2, from_writer).error.empty() && ReplayState::CheckClientNeeds(written_messages).empty() &&
@@ -2349,7 +2352,7 @@ namespace {
         );
         auto unset = mid_fight;
         std::erase_if(unset.records, [](const ReplayFile::Record& record) {
-            return record.MessageId() == 53;
+            return record.MessageId() == CharAttackInterval;
         });
         const auto unset_plan = ReplayWire::MakeKeyframePlan(v2, unset);
         const auto unset_needs = StreamNeeds(v2, unset);
@@ -2381,7 +2384,7 @@ namespace {
         };
         const auto report = ReplayState::ItemReport(v2.table, client_item);
         Check(
-            report.size() == 2 && report[0].U(5) == 486 && report[0].U(6) == 1 && report[0].U(12) == 2 && report[0].fields.size() == 15 && report[0].U(14) == 0x2500 && report[1].id == 314,
+            report.size() == 2 && report[0].U(5) == 486 && report[0].U(6) == 1 && report[0].U(12) == 2 && report[0].fields.size() == 15 && report[0].U(14) == 0x2500 && report[1].id == GAME_SMSG_ITEM_UPDATE_NAME,
             "the fixed writer gives an item's 353 as the wire's from the client's memory: its formula plus one, its mods without the item code's terminator, no 346 for profession 11 (any), its customizer as a 314"
         );
         auto no_formula = client_item;
@@ -2390,7 +2393,7 @@ namespace {
         no_formula.profession = 3;
         const auto bare = ReplayState::ItemReport(v2.table, no_formula);
         Check(
-            bare.size() == 3 && bare[0].U(5) == 0 && bare[0].U(12) == 0 && bare[0].fields.size() == 13 && bare[1].id == 346 && bare[1].U(1) == 3,
+            bare.size() == 3 && bare[0].U(5) == 0 && bare[0].U(12) == 0 && bare[0].fields.size() == 13 && bare[1].id == ItemProfession && bare[1].U(1) == 3,
             "the fixed writer gives formula 0 for the client's 0x5E5 (none), no mod for a lone terminator, and a 346 for a profession"
         );
 
@@ -2398,7 +2401,7 @@ namespace {
         size_t rewritten = 0;
         for (auto& record : from_memory.records) {
             ReplayState::Message message;
-            if (!ReplayState::Decode(v2.table, record.body, message) || message.id != 353) {
+            if (!ReplayState::Decode(v2.table, record.body, message) || message.id != GAME_SMSG_ITEM_GENERAL_INFO) {
                 continue;
             }
             ReplayState::ClientItem kept = {
@@ -2431,7 +2434,7 @@ namespace {
         );
         auto terminated = v2.keyframes.front();
         for (auto& record : terminated.records) {
-            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == 353) {
+            if (ReplayState::Message message; ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_ITEM_GENERAL_INFO) {
                 message.Set(12, message.U(12) + 1);
                 message.fields.push_back({{0xC0000000}, {}});
                 ReplayState::Encode(v2.table, message, record.body);
@@ -2473,19 +2476,19 @@ namespace {
         for (uint32_t item = 100; item < 105 && !taken; item++) {
             const auto names_it = [&](const ReplayFile::Record& record) {
                 ReplayState::Message message;
-                return ReplayState::Decode(v2.table, record.body, message) && message.id != 353 && std::ranges::any_of(ReplayState::IdFields(v2.table, message.id), [&](const ReplayState::IdField& field) {
+                return ReplayState::Decode(v2.table, record.body, message) && message.id != GAME_SMSG_ITEM_GENERAL_INFO && std::ranges::any_of(ReplayState::IdFields(v2.table, message.id), [&](const ReplayState::IdField& field) {
                            return field.kind == ReplayState::IdKind::Item && field.field < message.fields.size() && std::ranges::contains(message.fields[field.field].numbers, item);
                        });
             };
             const auto detailed_before = std::ranges::any_of(v2.records.begin(), v2.records.begin() + static_cast<std::ptrdiff_t>(without_item.record_index), [&](const ReplayFile::Record& record) {
                 ReplayState::Message message;
-                return ReplayState::Decode(v2.table, record.body, message) && message.id == 353 && message.U(0) == item;
+                return ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_ITEM_GENERAL_INFO && message.U(0) == item;
             });
             const auto shown_after = std::ranges::any_of(v2.records.begin() + static_cast<std::ptrdiff_t>(without_item.record_index), v2.records.begin() + static_cast<std::ptrdiff_t>(v2.ChapterEnd(0)), names_it);
             if (detailed_before && shown_after && std::ranges::none_of(without_item.records, names_it)) {
                 std::erase_if(without_item.records, [&](const ReplayFile::Record& record) {
                     ReplayState::Message message;
-                    return ReplayState::Decode(v2.table, record.body, message) && message.id == 353 && message.U(0) == item;
+                    return ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_ITEM_GENERAL_INFO && message.U(0) == item;
                 });
                 taken = item;
             }
@@ -2525,7 +2528,7 @@ namespace {
         };
         const auto gadget_stream = StreamNeeds(gadget, gadget.keyframes[1]);
         auto with_class = gadget;
-        auto class_define = ReplayState::Blank(with_class.table, 263);
+        auto class_define = ReplayState::Blank(with_class.table, GadgetClassDefine);
         for (const auto [field, value] : {std::pair<size_t, uint32_t>{0, gadget_class}, {1, 0x1234}, {3, 100}}) {
             class_define.Set(field, value);
         }
@@ -2543,7 +2546,7 @@ namespace {
         const auto mercenary =
             std::ranges::find_if(dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.chapters[0].first_record), dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.keyframes[0].record_index), [&](const ReplayFile::Record& record) {
                 ReplayState::Message message;
-                return ReplayState::Decode(dressed.table, record.body, message) && message.id == 32 && message.U(2) == 1 && (message.U(1) & 0xF0000000) == 0x20000000;
+                return ReplayState::Decode(dressed.table, record.body, message) && message.id == GAME_SMSG_AGENT_SPAWNED && message.U(2) == 1 && (message.U(1) & 0xF0000000) == 0x20000000;
             });
         Check(mercenary != dressed.records.begin() + static_cast<std::ptrdiff_t>(dressed.keyframes[0].record_index), "the v2 file's load creates an NPC agent before its first keyframe");
         ReplayState::Message mercenary_create;
@@ -2561,16 +2564,16 @@ namespace {
         }
         const auto dressed_join = dressed_world.Join();
         const auto create_at = std::ranges::find_if(dressed_join, [&](const ReplayState::Message& message) {
-            return message.id == 32 && message.U(0) == dressed_agent;
+            return message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == dressed_agent;
         });
         const auto looks_before = std::ranges::count_if(dressed_join.begin(), create_at, [&](const ReplayState::Message& message) {
-            return (message.id == 159 || message.id == 160) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
+            return (message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT || message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
         });
         auto undressed_join = dressed_join;
         std::erase_if(undressed_join, [&](const ReplayState::Message& message) {
-            return (message.id == 159 || message.id == 160) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
+            return (message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT || message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET) && message.U(1) == dressed_agent && std::ranges::contains(std::initializer_list<uint32_t>{0, 14, 15}, message.U(0));
         });
-        auto past_slots = ReplayState::Blank(dressed.table, 160);
+        auto past_slots = ReplayState::Blank(dressed.table, GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET);
         for (const auto [field, value] : {std::pair<size_t, uint32_t>{0, 14}, {1, dressed_agent}, {2, 5}, {3, 0x906e6}}) {
             past_slots.Set(field, value);
         }
@@ -2622,7 +2625,7 @@ namespace {
         ReplayFile::Motions sample{sample_record, plain.records[sample_record].time_ms, plain.records[sample_record].time_ms, {}};
         const auto model = ReplayWire::Placement(plain, plan, plain.records[sample_record - 1].time_ms - plan.start_ms);
         for (const auto& message : model) {
-            if (message.id != 44) {
+            if (message.id != GAME_SMSG_AGENT_UPDATE_POSITION) {
                 continue;
             }
             const auto x = message.F(1, 0) + off_x;
@@ -2658,7 +2661,7 @@ namespace {
         for (auto i = sample_record; i < plain.ChapterEnd(0) && expected_at.size() < 6; i++) {
             ReplayState::Message message;
             ReplayState::Decode(plain.table, plain.records[i].body, message);
-            if (message.id == 30) {
+            if (message.id == GAME_SMSG_AGENT_MOVEMENT_TICK) {
                 walked_ms += message.U(0);
             }
             else if (message.id >= 32 && message.id <= 46) {

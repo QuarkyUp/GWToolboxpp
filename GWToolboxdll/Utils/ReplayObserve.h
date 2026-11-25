@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Utils/ReplayFile.h>
+#include <Utils/ReplayMessages.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -11,8 +12,8 @@
 #include <vector>
 
 namespace ReplayObserve {
-    constexpr uint16_t row_message_id = 414;
-    constexpr uint16_t rows_committed_message_id = 415;
+    constexpr uint16_t row_message_id = ReplayMessages::MissionToClient414;
+    constexpr uint16_t rows_committed_message_id = ReplayMessages::MissionToClient415;
     constexpr uint32_t first_key = 0x52500000;
     constexpr uint32_t key_span = 0x10000;
     constexpr size_t max_rows = 100;
