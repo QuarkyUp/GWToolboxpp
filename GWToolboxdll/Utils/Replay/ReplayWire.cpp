@@ -9,6 +9,7 @@
 #include <numeric>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <utility>
 
 namespace ReplayWire {
@@ -32,6 +33,52 @@ namespace ReplayWire {
         bool IsLoad(const uint16_t id)
         {
             return id == GAME_SMSG_INSTANCE_LOAD_HEAD || id == GAME_SMSG_INSTANCE_LOAD_INFO || id == GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT;
+        }
+
+        // The recorder samples every walk the client changed, checked every frame (WriteMotions): a move no sample of its agent follows before the agent's next
+        // movement, while the sampler wrote others, left the client's walk as it was.
+        std::set<size_t> UnchangedMoves(const ReplayFile::Contents& contents, const size_t first, const size_t end)
+        {
+            struct Move {
+                size_t record = 0;
+                size_t samples = 0;
+            };
+            std::set<size_t> unchanged;
+            std::map<uint32_t, Move> moves;
+            size_t samples = 0;
+            const auto settle = [&](const Move& move) {
+                if (samples > move.samples) {
+                    unchanged.insert(move.record);
+                }
+            };
+            auto motions = std::ranges::upper_bound(contents.motions, first, {}, &ReplayFile::Motions::record_index);
+            for (auto i = first; i <= end && i <= contents.records.size(); i++) {
+                for (; motions != contents.motions.end() && motions->record_index <= i; ++motions) {
+                    samples++;
+                    for (const auto& motion : motions->agents) {
+                        moves.erase(motion.agent);
+                    }
+                }
+                if (i == end || i == contents.records.size()) {
+                    continue;
+                }
+                const auto id = contents.records[i].MessageId();
+                ReplayState::Message message;
+                if ((id != GAME_SMSG_AGENT_SPAWNED && id != GAME_SMSG_AGENT_DESPAWNED && (id < GAME_SMSG_AGENT_UPDATE_DIRECTION || id > GAME_SMSG_AGENT_UPDATE_POSITION)) || !ReplayState::Decode(contents.table, contents.records[i].body, message)) {
+                    continue;
+                }
+                if (const auto found = moves.find(message.U(0)); found != moves.end()) {
+                    settle(found->second);
+                    moves.erase(found);
+                }
+                if (message.id == GAME_SMSG_AGENT_MOVE_TO_POINT || message.id == GAME_SMSG_AGENT_UPDATE_DESTINATION) {
+                    moves[message.U(0)] = {i, samples};
+                }
+            }
+            for (const auto& move : moves | std::views::values) {
+                settle(move);
+            }
+            return unchanged;
         }
 
         bool SetObserver(const ReplayFile::MessageTable& table, ReplayState::Message& message, std::vector<uint8_t>& body, Plan& plan)
@@ -241,12 +288,15 @@ namespace ReplayWire {
                 }
             }
         };
+        const auto unchanged = UnchangedMoves(contents, keyframe.record_index, plan.end_record);
         for (const auto index : plan.stream_records) {
             if (contents.records[index].time_ms > time_ms) {
                 break;
             }
             sample(index);
-            world.Apply(contents.records[index]);
+            if (!unchanged.contains(index)) {
+                world.Apply(contents.records[index]);
+            }
         }
         sample(plan.end_record);
         return world.Placement();
