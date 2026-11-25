@@ -81,8 +81,6 @@ namespace ReplayState {
     };
 
     std::vector<IdField> IdFields(const ReplayFile::MessageTable& table, uint16_t message_id);
-    bool BringsIdsIn(const IdField& field);
-    bool OrderChecked(IdKind kind);
 
     struct Order {
         std::set<std::pair<IdKind, uint32_t>> brought;
@@ -208,6 +206,5 @@ namespace ReplayState {
     };
 
     bool IsBagContent(const Message& message);
-    std::vector<uint32_t> ShownItems(const Message& message);
 
 } // namespace ReplayState

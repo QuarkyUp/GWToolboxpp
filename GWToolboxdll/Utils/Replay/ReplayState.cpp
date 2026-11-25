@@ -651,6 +651,47 @@ namespace ReplayState {
             }
             return message;
         }
+        bool BringsIdsIn(const IdField& field)
+        {
+            return std::ranges::find(id_bringers, field) != std::ranges::end(id_bringers);
+        }
+        bool OrderChecked(const IdKind kind)
+        {
+            // Skill ids are the game's own data: what comes first in a load is a skill's use (228, then 227 to 230), not its making.
+            return kind != IdKind::Skill;
+        }
+        std::vector<uint32_t> ShownItems(const Message& message)
+        {
+            std::vector<uint32_t> shown;
+            const auto add = [&shown, &message](const size_t field) {
+                if (message.U(field)) {
+                    shown.push_back(message.U(field));
+                }
+            };
+            switch (message.id) {
+                case GAME_SMSG_AGENT_SPAWNED:
+                    if (message.U(CreateDef) == item_def) {
+                        add(CreateClass);
+                    }
+                    break;
+                case CharEquipment:
+                    for (size_t slot = 1; slot <= equipment_slots; slot++) {
+                        add(slot);
+                    }
+                    break;
+                case CharEquipUpdate:
+                    add(2);
+                    break;
+                case GAME_SMSG_NPC_UPDATE_WEAPONS:
+                    add(1);
+                    add(2);
+                    break;
+                default:
+                    break;
+            }
+            return shown;
+        }
+
     } // namespace
 
     uint32_t Message::U(const size_t field, const size_t item) const
@@ -822,17 +863,6 @@ namespace ReplayState {
             }
         }
         return fields;
-    }
-
-    bool BringsIdsIn(const IdField& field)
-    {
-        return std::ranges::find(id_bringers, field) != std::ranges::end(id_bringers);
-    }
-
-    bool OrderChecked(const IdKind kind)
-    {
-        // Skill ids are the game's own data: what comes first in a load is a skill's use (228, then 227 to 230), not its making.
-        return kind != IdKind::Skill;
     }
 
     std::vector<std::pair<IdField, uint32_t>> Order::Unbrought(const ReplayFile::MessageTable& table, const Message& message) const
@@ -1035,38 +1065,6 @@ namespace ReplayState {
     bool IsBagContent(const Message& message)
     {
         return Contains(bag_content_ids, message.id);
-    }
-
-    std::vector<uint32_t> ShownItems(const Message& message)
-    {
-        std::vector<uint32_t> shown;
-        const auto add = [&shown, &message](const size_t field) {
-            if (message.U(field)) {
-                shown.push_back(message.U(field));
-            }
-        };
-        switch (message.id) {
-            case GAME_SMSG_AGENT_SPAWNED:
-                if (message.U(CreateDef) == item_def) {
-                    add(CreateClass);
-                }
-                break;
-            case CharEquipment:
-                for (size_t slot = 1; slot <= equipment_slots; slot++) {
-                    add(slot);
-                }
-                break;
-            case CharEquipUpdate:
-                add(2);
-                break;
-            case GAME_SMSG_NPC_UPDATE_WEAPONS:
-                add(1);
-                add(2);
-                break;
-            default:
-                break;
-        }
-        return shown;
     }
 
     namespace {
