@@ -19,7 +19,6 @@ namespace ReplayWire {
         uint32_t j = 0;
         uint8_t s[256] = {};
 
-        void Init(const uint8_t* key, size_t size);
         void Apply(uint8_t* bytes, size_t size);
     };
     static_assert(sizeof(Rc4) == 0x108);
@@ -77,5 +76,4 @@ namespace ReplayWire {
     bool SeeksInPlace(const Plan& playing, uint32_t played_ms, const Plan& sought);
     std::vector<ReplayState::Message> Placement(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
     std::vector<Post> PlacementPosts(const ReplayFile::Contents& contents, const Plan& plan, uint32_t played_ms);
-    std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error);
 } // namespace ReplayWire

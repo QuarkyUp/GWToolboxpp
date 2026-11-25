@@ -48,20 +48,6 @@ namespace ReplayWire {
         }
     } // namespace
 
-    void Rc4::Init(const uint8_t* key, const size_t size)
-    {
-        for (uint32_t k = 0; k < 256; k++) {
-            s[k] = static_cast<uint8_t>(k);
-        }
-        uint8_t mixed = 0;
-        for (uint32_t k = 0; k < 256; k++) {
-            mixed = static_cast<uint8_t>(mixed + s[k] + key[k % size]);
-            std::swap(s[k], s[mixed]);
-        }
-        i = 0;
-        j = 0;
-    }
-
     void Rc4::Apply(uint8_t* bytes, const size_t size)
     {
         for (size_t k = 0; k < size; k++) {
@@ -320,20 +306,4 @@ namespace ReplayWire {
         return refused;
     }
 
-    std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error)
-    {
-        std::vector<std::vector<uint8_t>> bodies;
-        size_t offset = 0;
-        while (offset < stream.size()) {
-            ReplayState::Message message;
-            const auto used = ReplayState::DecodePrefix(table, stream.data() + offset, stream.size() - offset, message);
-            if (!used) {
-                error = std::format("the stream does not decode at byte {} (message {})", offset, message.id);
-                return bodies;
-            }
-            bodies.emplace_back(stream.begin() + static_cast<std::ptrdiff_t>(offset), stream.begin() + static_cast<std::ptrdiff_t>(offset + used));
-            offset += used;
-        }
-        return bodies;
-    }
 } // namespace ReplayWire

@@ -121,7 +121,6 @@ namespace ReplayState {
         constexpr uint32_t look_slots = 5;
         constexpr uint16_t quest_ids[] = {GAME_SMSG_QUEST_ADD, GAME_SMSG_QUEST_GENERAL_INFO, GAME_SMSG_QUEST_UPDATE_NAME, GAME_SMSG_QUEST_DESCRIPTION, GAME_SMSG_QUEST_ADD_MARKER, GAME_SMSG_QUEST_UPDATE_MARKER, CharQuestEarned};
         constexpr uint16_t item_ids[] = {GAME_SMSG_ITEM_GENERAL_INFO, GAME_SMSG_ITEM_REUSE_ID, ItemReportDetailLow, ItemProfession, GAME_SMSG_ITEM_UPDATE_NAME, GAME_SMSG_ITEM_UPDATE_OWNER};
-        constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, GAME_SMSG_AGENT_UPDATE_ATTRIBUTE, GAME_SMSG_PLAYER_UPDATE_PROFESSION};
         constexpr size_t skillbar_create_field = 3;
         constexpr size_t item_model_file_field = 1;
         constexpr size_t item_quantity_field = 10;
@@ -779,37 +778,6 @@ namespace ReplayState {
         return messages;
     }
 
-    const char* IdKindName(const IdKind kind)
-    {
-        switch (kind) {
-            case IdKind::Agent:
-                return "agent";
-            case IdKind::Item:
-                return "item";
-            case IdKind::Bag:
-                return "bag";
-            case IdKind::Inventory:
-                return "inventory";
-            case IdKind::Guild:
-                return "guild";
-            case IdKind::Party:
-                return "party";
-            case IdKind::Player:
-                return "player";
-            case IdKind::Quest:
-                return "quest";
-            case IdKind::Hero:
-                return "hero";
-            case IdKind::Npc:
-                return "npc";
-            case IdKind::Prop:
-                return "prop";
-            case IdKind::Skill:
-                return "skill";
-        }
-        return "?";
-    }
-
     std::vector<IdField> IdFields(const ReplayFile::MessageTable& table, const uint16_t message_id)
     {
         std::vector<IdField> fields;
@@ -866,11 +834,6 @@ namespace ReplayState {
         return kind != IdKind::Skill;
     }
 
-    std::string Describe(const OrderFailure& failure)
-    {
-        return std::format("record {} (message {}): its {} {} (field {}) comes before any message that brings it in", failure.record, failure.field.message, IdKindName(failure.field.kind), failure.id, failure.field.field);
-    }
-
     std::vector<std::pair<IdField, uint32_t>> Order::Unbrought(const ReplayFile::MessageTable& table, const Message& message) const
     {
         std::vector<std::pair<IdField, uint32_t>> unbrought;
@@ -910,19 +873,6 @@ namespace ReplayState {
                 }
             }
         }
-    }
-
-    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages)
-    {
-        std::vector<OrderFailure> failures;
-        Order order;
-        for (size_t i = 0; i < messages.size(); i++) {
-            for (const auto& [field, id] : order.Unbrought(table, messages[i])) {
-                failures.push_back({i, field, id});
-            }
-            order.Bring(table, messages[i]);
-        }
-        return failures;
     }
 
     std::string FieldAssert(const Message& message)
@@ -1031,72 +981,6 @@ namespace ReplayState {
             default:
                 return "";
         }
-    }
-
-    std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages)
-    {
-        std::vector<std::string> failures;
-        std::set<uint32_t> attribute_states;
-        std::set<uint32_t> hero_data;
-        std::set<uint32_t> active_heroes;
-        ClientAgents agents;
-        std::set<uint32_t> inventories;
-        std::set<uint32_t> team_rows;
-        std::optional<uint32_t> party_building;
-        bool account_name = false;
-        const auto fail = [&failures](const size_t index, const uint16_t id, const std::string_view what) {
-            failures.push_back(std::format("record {} (message {}): {}", index, id, what));
-        };
-        for (size_t i = 0; i < messages.size(); i++) {
-            const auto& message = messages[i];
-            const auto agent_id = message.U(0);
-            if (const auto broken = FieldAssert(message); !broken.empty()) {
-                fail(i, message.id, broken);
-            }
-            if (const auto broken = agents.Breaks(message); !broken.empty()) {
-                fail(i, message.id, broken);
-            }
-            if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
-                fail(i, message.id, "a second account name: the client asserts !context->acctNameData (ChCliApi.cpp:385)");
-            }
-            else if (message.id == GAME_SMSG_ITEM_STREAM_CREATE && !inventories.insert(agent_id).second) {
-                fail(i, message.id, std::format("inventory {} created again: the client asserts !inventory (ItCliApi.cpp:2010)", agent_id));
-            }
-            else if (message.id == MissionTeam && !team_rows.insert(agent_id).second) {
-                fail(i, message.id, std::format("team row {} created again: the client asserts !m_tableByPartyId[partyId] (MsnTeam.cpp:105)", agent_id));
-            }
-            else if (message.id == GAME_SMSG_PARTY_CREATE && std::exchange(party_building, agent_id)) {
-                fail(i, message.id, "a party begun while another is: the client asserts !m_partyBuilding (PyCliParty.cpp:1228)");
-            }
-            else if (message.id == GAME_SMSG_PARTY_MEMBER_STREAM_END && std::exchange(party_building, std::nullopt) != agent_id) {
-                fail(i, message.id, std::format("party {} ended with no 467 of its own open: the client asserts m_partyBuilding and its party id (PyCliParty.cpp:1237, 1238)", agent_id));
-            }
-            if (message.id == CharAttributeState && !attribute_states.insert(agent_id).second) {
-                fail(i, message.id, std::format("a second attribute state for agent {}: the client asserts !attribState", agent_id));
-            }
-            else if (Contains(attribute_state_users, message.id) && !attribute_states.contains(agent_id)) {
-                fail(i, message.id, std::format("agent {} has no attribute state (55) yet: the client asserts attribState", agent_id));
-            }
-            else if (message.id == CharHeroDataAdd || message.id == GAME_SMSG_MERCENARY_INFO) {
-                hero_data.insert(message.U(0));
-            }
-            else if (message.id == CharHeroActivate) {
-                if (!hero_data.contains(message.U(0))) {
-                    fail(i, message.id, std::format("hero {} activated before its data (115, or 116 for a mercenary): the client asserts charHeroData", message.U(0)));
-                }
-                active_heroes.insert(message.U(1));
-            }
-            else if (message.id == GAME_SMSG_AGENT_SET_PLAYER && agent_id) {
-                auto walked = active_heroes;
-                walked.insert(agent_id);
-                for (const auto walked_agent : walked) {
-                    if (!attribute_states.contains(walked_agent)) {
-                        fail(i, message.id, std::format("34 makes agent {} the controlled one, and agent {} has no attribute state (55): the skill list asserts attribState (ChCliAttrib.cpp:146)", agent_id, walked_agent));
-                    }
-                }
-            }
-        }
-        return failures;
     }
 
     std::vector<uint32_t> Identity(const Message& message)
@@ -2036,16 +1920,4 @@ namespace ReplayState {
         return out;
     }
 
-    std::vector<ReplayFile::Record> JoinRecords(const ReplayFile::MessageTable& table, const World& world, const uint32_t time_ms)
-    {
-        std::vector<ReplayFile::Record> records;
-        for (const auto& message : world.Join()) {
-            ReplayFile::Record record{time_ms, {}};
-            if (!Encode(table, message, record.body)) {
-                record.body = {static_cast<uint8_t>(message.id), static_cast<uint8_t>(message.id >> 8)};
-            }
-            records.push_back(std::move(record));
-        }
-        return records;
-    }
 } // namespace ReplayState

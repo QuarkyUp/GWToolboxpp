@@ -25,6 +25,182 @@
 namespace {
     using namespace ReplayMessages;
 
+    constexpr uint16_t attribute_state_users[] = {CharAttribPointsAvail, CharAttribPointsTotal, CharAttributes, GAME_SMSG_AGENT_UPDATE_ATTRIBUTE, GAME_SMSG_PLAYER_UPDATE_PROFESSION};
+    constexpr std::wstring_view numbered_placeholders[] = {L"Player ", L"Mercenary ", L"Guild ", L"G"};
+
+    struct OrderFailure {
+        size_t record = 0;
+        ReplayState::IdField field;
+        uint32_t id = 0;
+    };
+
+    const char* IdKindName(const ReplayState::IdKind kind)
+    {
+        switch (kind) {
+            case ReplayState::IdKind::Agent:
+                return "agent";
+            case ReplayState::IdKind::Item:
+                return "item";
+            case ReplayState::IdKind::Bag:
+                return "bag";
+            case ReplayState::IdKind::Inventory:
+                return "inventory";
+            case ReplayState::IdKind::Guild:
+                return "guild";
+            case ReplayState::IdKind::Party:
+                return "party";
+            case ReplayState::IdKind::Player:
+                return "player";
+            case ReplayState::IdKind::Quest:
+                return "quest";
+            case ReplayState::IdKind::Hero:
+                return "hero";
+            case ReplayState::IdKind::Npc:
+                return "npc";
+            case ReplayState::IdKind::Prop:
+                return "prop";
+            case ReplayState::IdKind::Skill:
+                return "skill";
+        }
+        return "?";
+    }
+
+    std::string Describe(const OrderFailure& failure)
+    {
+        return std::format("record {} (message {}): its {} {} (field {}) comes before any message that brings it in", failure.record, failure.field.message, IdKindName(failure.field.kind), failure.id, failure.field.field);
+    }
+
+    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<ReplayState::Message>& messages)
+    {
+        std::vector<OrderFailure> failures;
+        ReplayState::Order order;
+        for (size_t i = 0; i < messages.size(); i++) {
+            for (const auto& [field, id] : order.Unbrought(table, messages[i])) {
+                failures.push_back({i, field, id});
+            }
+            order.Bring(table, messages[i]);
+        }
+        return failures;
+    }
+
+    std::vector<std::string> CheckClientNeeds(const std::vector<ReplayState::Message>& messages)
+    {
+        std::vector<std::string> failures;
+        std::set<uint32_t> attribute_states;
+        std::set<uint32_t> hero_data;
+        std::set<uint32_t> active_heroes;
+        ReplayState::ClientAgents agents;
+        std::set<uint32_t> inventories;
+        std::set<uint32_t> team_rows;
+        std::optional<uint32_t> party_building;
+        bool account_name = false;
+        const auto fail = [&failures](const size_t index, const uint16_t id, const std::string_view what) {
+            failures.push_back(std::format("record {} (message {}): {}", index, id, what));
+        };
+        for (size_t i = 0; i < messages.size(); i++) {
+            const auto& message = messages[i];
+            const auto agent_id = message.U(0);
+            if (const auto broken = ReplayState::FieldAssert(message); !broken.empty()) {
+                fail(i, message.id, broken);
+            }
+            if (const auto broken = agents.Breaks(message); !broken.empty()) {
+                fail(i, message.id, broken);
+            }
+            if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
+                fail(i, message.id, "a second account name: the client asserts !context->acctNameData (ChCliApi.cpp:385)");
+            }
+            else if (message.id == GAME_SMSG_ITEM_STREAM_CREATE && !inventories.insert(agent_id).second) {
+                fail(i, message.id, std::format("inventory {} created again: the client asserts !inventory (ItCliApi.cpp:2010)", agent_id));
+            }
+            else if (message.id == MissionTeam && !team_rows.insert(agent_id).second) {
+                fail(i, message.id, std::format("team row {} created again: the client asserts !m_tableByPartyId[partyId] (MsnTeam.cpp:105)", agent_id));
+            }
+            else if (message.id == GAME_SMSG_PARTY_CREATE && std::exchange(party_building, agent_id)) {
+                fail(i, message.id, "a party begun while another is: the client asserts !m_partyBuilding (PyCliParty.cpp:1228)");
+            }
+            else if (message.id == GAME_SMSG_PARTY_MEMBER_STREAM_END && std::exchange(party_building, std::nullopt) != agent_id) {
+                fail(i, message.id, std::format("party {} ended with no 467 of its own open: the client asserts m_partyBuilding and its party id (PyCliParty.cpp:1237, 1238)", agent_id));
+            }
+            if (message.id == CharAttributeState && !attribute_states.insert(agent_id).second) {
+                fail(i, message.id, std::format("a second attribute state for agent {}: the client asserts !attribState", agent_id));
+            }
+            else if (std::ranges::contains(attribute_state_users, message.id) && !attribute_states.contains(agent_id)) {
+                fail(i, message.id, std::format("agent {} has no attribute state (55) yet: the client asserts attribState", agent_id));
+            }
+            else if (message.id == CharHeroDataAdd || message.id == GAME_SMSG_MERCENARY_INFO) {
+                hero_data.insert(message.U(0));
+            }
+            else if (message.id == CharHeroActivate) {
+                if (!hero_data.contains(message.U(0))) {
+                    fail(i, message.id, std::format("hero {} activated before its data (115, or 116 for a mercenary): the client asserts charHeroData", message.U(0)));
+                }
+                active_heroes.insert(message.U(1));
+            }
+            else if (message.id == GAME_SMSG_AGENT_SET_PLAYER && agent_id) {
+                auto walked = active_heroes;
+                walked.insert(agent_id);
+                for (const auto walked_agent : walked) {
+                    if (!attribute_states.contains(walked_agent)) {
+                        fail(i, message.id, std::format("34 makes agent {} the controlled one, and agent {} has no attribute state (55): the skill list asserts attribState (ChCliAttrib.cpp:146)", agent_id, walked_agent));
+                    }
+                }
+            }
+        }
+        return failures;
+    }
+
+    std::vector<ReplayFile::Record> JoinRecords(const ReplayFile::MessageTable& table, const ReplayState::World& world, const uint32_t time_ms)
+    {
+        std::vector<ReplayFile::Record> records;
+        for (const auto& message : world.Join()) {
+            ReplayFile::Record record{time_ms, {}};
+            if (!ReplayState::Encode(table, message, record.body)) {
+                record.body = {static_cast<uint8_t>(message.id), static_cast<uint8_t>(message.id >> 8)};
+            }
+            records.push_back(std::move(record));
+        }
+        return records;
+    }
+    std::vector<std::vector<uint8_t>> Split(const ReplayFile::MessageTable& table, const std::vector<uint8_t>& stream, std::string& error)
+    {
+        std::vector<std::vector<uint8_t>> bodies;
+        size_t offset = 0;
+        while (offset < stream.size()) {
+            ReplayState::Message message;
+            const auto used = ReplayState::DecodePrefix(table, stream.data() + offset, stream.size() - offset, message);
+            if (!used) {
+                error = std::format("the stream does not decode at byte {} (message {})", offset, message.id);
+                return bodies;
+            }
+            bodies.emplace_back(stream.begin() + static_cast<std::ptrdiff_t>(offset), stream.begin() + static_cast<std::ptrdiff_t>(offset + used));
+            offset += used;
+        }
+        return bodies;
+    }
+    bool IsPlaceholder(const std::wstring_view text)
+    {
+        return text == ReplayFile::own_name_placeholder || std::ranges::any_of(numbered_placeholders, [text](const std::wstring_view prefix) {
+                   return text.size() > prefix.size() && text.starts_with(prefix) && std::ranges::all_of(text.substr(prefix.size()), [](const wchar_t c) {
+                              return c >= L'0' && c <= L'9';
+                          });
+               });
+    }
+
+    void InitRc4(ReplayWire::Rc4& rc4, const uint8_t* key, const size_t size)
+    {
+        for (uint32_t k = 0; k < 256; k++) {
+            rc4.s[k] = static_cast<uint8_t>(k);
+        }
+        uint8_t mixed = 0;
+        for (uint32_t k = 0; k < 256; k++) {
+            mixed = static_cast<uint8_t>(mixed + rc4.s[k] + key[k % size]);
+            std::swap(rc4.s[k], rc4.s[mixed]);
+        }
+        rc4.i = 0;
+        rc4.j = 0;
+    }
+
+
     int failures = 0;
 
     void Check(const bool condition, const char* what)
@@ -688,7 +864,7 @@ namespace {
                 break;
             }
             std::string error;
-            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
+            for (const auto& body : Split(contents.table, post.bytes, error)) {
                 ReplayState::Decode(contents.table, body, fed.emplace_back());
             }
         }
@@ -702,7 +878,7 @@ namespace {
         });
     }
 
-    std::string OrderSummary(const std::vector<ReplayState::OrderFailure>& failures, const size_t join_messages)
+    std::string OrderSummary(const std::vector<OrderFailure>& failures, const size_t join_messages)
     {
         std::map<std::tuple<bool, uint16_t, ReplayState::IdKind>, size_t> counts;
         for (const auto& failure : failures) {
@@ -711,7 +887,7 @@ namespace {
         std::string summary;
         for (const auto& [key, count] : counts) {
             const auto& [streamed, message_id, kind] = key;
-            summary += std::format("{}{} {} {} x{}", summary.empty() ? "" : ", ", streamed ? "stream" : "join", message_id, ReplayState::IdKindName(kind), count);
+            summary += std::format("{}{} {} {} x{}", summary.empty() ? "" : ", ", streamed ? "stream" : "join", message_id, IdKindName(kind), count);
         }
         return summary.empty() ? "none" : summary;
     }
@@ -765,7 +941,7 @@ namespace {
         if (i == end && i > contents.chapters[chapter].first_record) {
             i--;
         }
-        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, ReplayState::JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms)};
+        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms)};
     }
 
     struct Starts {
@@ -1139,7 +1315,7 @@ namespace {
                 const std::wstring_view text = field.text;
                 if (ReplayFile::IsPlainText(text)) {
                     count.texts++;
-                    count.not_placeholders += checked && !ReplayFile::IsPlaceholder(text);
+                    count.not_placeholders += checked && !IsPlaceholder(text);
                     continue;
                 }
                 for (auto start = text.find(ReplayFile::literal_start); start != std::wstring_view::npos; start = text.find(ReplayFile::literal_start, start + 1)) {
@@ -1149,7 +1325,7 @@ namespace {
                     }
                     if (const auto literal = text.substr(start + 1, end - start - 1); ReplayFile::IsPlainText(literal)) {
                         count.literals++;
-                        count.not_placeholders += checked && !ReplayFile::IsPlaceholder(literal);
+                        count.not_placeholders += checked && !IsPlaceholder(literal);
                     }
                     start = end;
                 }
@@ -1260,7 +1436,7 @@ namespace {
                     broken[std::format("keyframe {}: message {} does not decode against the file's table", k + 1, record.MessageId())]++;
                 }
             }
-            for (const auto& failure : ReplayState::CheckClientNeeds(Decoded(contents.table, records))) {
+            for (const auto& failure : CheckClientNeeds(Decoded(contents.table, records))) {
                 broken[std::format("keyframe {}: {}", k + 1, failure.substr(failure.find('(')))]++;
             }
             std::map<std::string, std::pair<size_t, size_t>> unset;
@@ -1333,7 +1509,7 @@ namespace {
             byte = static_cast<uint8_t>(random());
         }
         ReplayWire::Rc4 sender;
-        sender.Init(key, sizeof(key));
+        InitRc4(sender, key, sizeof(key));
         auto receiver = sender;
         std::vector<uint8_t> plain;
         std::vector<uint8_t> received;
@@ -1362,7 +1538,7 @@ namespace {
             return proof;
         }
         std::string error;
-        const auto bodies = ReplayWire::Split(contents.table, received, error);
+        const auto bodies = Split(contents.table, received, error);
         if (!error.empty() || bodies.size() != proof.records) {
             proof.error = error.empty() ? std::format("{} messages cut from the stream, {} posted", bodies.size(), proof.records) : error;
             return proof;
@@ -1424,7 +1600,7 @@ namespace {
                 fail(std::format("post {} holds {} records in {} bytes", i, post.records, post.bytes.size()));
             }
             std::string error;
-            const auto bodies = ReplayWire::Split(contents.table, post.bytes, error);
+            const auto bodies = Split(contents.table, post.bytes, error);
             if (!error.empty() || bodies.size() != post.records) {
                 fail(std::format("post {} does not cut into its {} messages ({})", i, post.records, error));
             }
@@ -1458,12 +1634,12 @@ namespace {
             fail("no 410 with its observer byte set before 406");
         }
         const auto fed = Fed(contents, plan);
-        for (const auto& need : ReplayState::CheckClientNeeds(fed)) {
+        for (const auto& need : CheckClientNeeds(fed)) {
             fail(std::format("what the client needs: {}", need));
         }
-        const auto order = ReplayState::CheckOrder(contents.table, fed);
+        const auto order = CheckOrder(contents.table, fed);
         for (const auto& failure : order) {
-            fail(std::format("the order of real loads: {}", ReplayState::Describe(failure)));
+            fail(std::format("the order of real loads: {}", Describe(failure)));
         }
         if (verbose) {
             printf(
@@ -1499,8 +1675,8 @@ namespace {
                 continue;
             }
             const auto fed = Fed(contents, plan);
-            const auto order = ReplayState::CheckOrder(contents.table, fed);
-            const auto needs = ReplayState::CheckClientNeeds(fed);
+            const auto order = CheckOrder(contents.table, fed);
+            const auto needs = CheckClientNeeds(fed);
             printf(
                 "%s: %zu messages fed; order failures %zu (%s); what the client needs, failures %zu; stream records left out naming an id the start does not hold %zu\n", starts.names[s].c_str(), fed.size(), order.size(),
                 OrderSummary(order, JoinMessages(plan)).c_str(), needs.size(), LeftOutRecords(plan)
@@ -1525,8 +1701,8 @@ namespace {
                     continue;
                 }
                 const auto fed = Fed(contents, plan);
-                const auto order = ReplayState::CheckOrder(contents.table, fed);
-                const auto needs = ReplayState::CheckClientNeeds(fed);
+                const auto order = CheckOrder(contents.table, fed);
+                const auto needs = CheckClientNeeds(fed);
                 printf(
                     "chapter %zu, a keyframe built by the model at %s (its 30 at %u ms): %zu keyframe messages, %zu bytes, the model fed and joined in %lld us, %zu streamed; order failures %zu (%s); what the client needs, failures %zu; stream records left out naming an id the keyframe does not hold %zu\n",
                     chapter + 1, JoinTime(join_ms).c_str(), plan.start_ms, plan.keyframe_records, bytes, static_cast<long long>(built_us), fed.size() - plan.keyframe_records, order.size(), OrderSummary(order, JoinMessages(plan)).c_str(), needs.size(),
@@ -1698,7 +1874,7 @@ namespace {
                 for (; keyframe_record < keyframe.record_index; keyframe_record++) {
                     at_keyframe.Apply(contents.records[keyframe_record]);
                 }
-                model_keyframes[k] = {keyframe.record_index, keyframe.time_ms, keyframe.kind, ReplayState::JoinRecords(contents.table, at_keyframe, keyframe.time_ms)};
+                model_keyframes[k] = {keyframe.record_index, keyframe.time_ms, keyframe.kind, JoinRecords(contents.table, at_keyframe, keyframe.time_ms)};
             }
             // A time a chapter starts at is that chapter's, even when the map before it has a record at the same time.
             const auto last_ms = chapter + 1 < contents.chapters.size() ? std::min(contents.records[end - 1].time_ms, contents.chapters[chapter + 1].time_ms - 1) : contents.records[end - 1].time_ms;
@@ -1730,10 +1906,10 @@ namespace {
                     whole.Apply(contents.records[next_record]);
                 }
                 const auto fed = Fed(contents, plan, plan.seek_ms);
-                const auto order = ReplayState::CheckOrder(contents.table, fed);
-                const auto needs = ReplayState::CheckClientNeeds(fed);
+                const auto order = CheckOrder(contents.table, fed);
+                const auto needs = CheckClientNeeds(fed);
                 for (const auto& failure : order) {
-                    fail(std::format("a seek to {} ms, the order of real loads: {}", time_ms, ReplayState::Describe(failure)));
+                    fail(std::format("a seek to {} ms, the order of real loads: {}", time_ms, Describe(failure)));
                 }
                 for (const auto& need : needs) {
                     fail(std::format("a seek to {} ms, what the client needs: {}", time_ms, need));
@@ -1780,10 +1956,10 @@ namespace {
                     in_place++;
                     const auto played_ms = std::min(target_ms - from.start_ms, from.duration_ms);
                     const auto from_fed = Fed(contents, from, played_ms);
-                    for (const auto& failure : ReplayState::CheckOrder(contents.table, from_fed)) {
-                        fail(std::format("a seek to {} ms in place from keyframe {}, the order of real loads: {}", time_ms, k + 1, ReplayState::Describe(failure)));
+                    for (const auto& failure : CheckOrder(contents.table, from_fed)) {
+                        fail(std::format("a seek to {} ms in place from keyframe {}, the order of real loads: {}", time_ms, k + 1, Describe(failure)));
                     }
-                    for (const auto& need : ReplayState::CheckClientNeeds(from_fed)) {
+                    for (const auto& need : CheckClientNeeds(from_fed)) {
                         fail(std::format("a seek to {} ms in place from keyframe {}, what the client needs: {}", time_ms, k + 1, need));
                     }
                     const auto posted = std::accumulate(from.posts.begin(), from.posts.end(), std::pair<size_t, size_t>{}, [&](std::pair<size_t, size_t> sum, const ReplayWire::Post& post) {
@@ -1875,15 +2051,15 @@ namespace {
         };
         Check(!has(318) && !has(319) && !has(327) && !has(93) && !has(12) && !has(30), "a join holds no bag content, transient message or clock advance");
         Check(has(324) && has(328) && has(114) && has(115), "a join holds the inventories' creation, the active weapon set and the heroes");
-        Check(CountLeaks(contents.table, ReplayState::JoinRecords(contents.table, world, 0)).Total() == 0, "a join passes the no-inventory rule");
+        Check(CountLeaks(contents.table, JoinRecords(contents.table, world, 0)).Total() == 0, "a join passes the no-inventory rule");
         const auto attribute_state = std::ranges::find(join, uint16_t{55}, &ReplayState::Message::id);
         const auto connect = std::ranges::find(join, uint16_t{31}, &ReplayState::Message::id);
         Check(
             attribute_state != join.end() && attribute_state < connect && attribute_state->U(0) == 10 && attribute_state->U(2) == 35 && has(58) && has(59) && has(183) && has(182) && has(218),
             "a join gives the controlled character its attribute state (57 folded in), attributes, professions and skillbar before 31"
         );
-        Check(ReplayState::CheckClientNeeds(join).empty(), "a join holds what the client needs before 34");
-        Check(ReplayState::CheckOrder(contents.table, join).empty(), "a join holds the order of real loads");
+        Check(CheckClientNeeds(join).empty(), "a join holds what the client needs before 34");
+        Check(CheckOrder(contents.table, join).empty(), "a join holds the order of real loads");
         const auto info = std::ranges::find(join, uint16_t{410}, &ReplayState::Message::id);
         Check(info != join.end() && info->U(5) == 0, "a join's 410 is a player's, its observer byte left to the plan");
         const auto reporter = std::ranges::find(join, uint16_t{34}, &ReplayState::Message::id);
@@ -1919,7 +2095,7 @@ namespace {
                                                 ),
             "a controlled character with no attribute state is left out of the join: no 34, nor its 89 and 32"
         );
-        Check(ReplayState::CheckClientNeeds(fallback).empty() && ReplayState::CheckOrder(contents.table, fallback).empty(), "the join without the controlled character holds what the client needs and the order of real loads");
+        Check(CheckClientNeeds(fallback).empty() && CheckOrder(contents.table, fallback).empty(), "the join without the controlled character holds what the client needs and the order of real loads");
 
         ReplayState::World allies(contents.table);
         allies.Apply(ReplayState::Message{155, {{{88}, {}}, {{}, L"01"}}});
@@ -1942,7 +2118,7 @@ namespace {
         std::vector<std::pair<ReplayWire::Stage, uint32_t>> places;
         for (const auto& post : from.posts) {
             std::string error;
-            for (auto& body : ReplayWire::Split(contents.table, post.bytes, error)) {
+            for (auto& body : Split(contents.table, post.bytes, error)) {
                 bodies.push_back(std::move(body));
                 places.emplace_back(post.stage, post.time_ms);
             }
@@ -1993,7 +2169,7 @@ namespace {
     {
         ReplayWire::Rc4 known;
         const uint8_t key[] = {'K', 'e', 'y'};
-        known.Init(key, sizeof(key));
+        InitRc4(known, key, sizeof(key));
         uint8_t text[] = {'P', 'l', 'a', 'i', 'n', 't', 'e', 'x', 't'};
         known.Apply(text, sizeof(text));
         const uint8_t expected[] = {0xBB, 0xF3, 0x16, 0xE8, 0xD9, 0x40, 0xAF, 0x0A, 0xD3};
@@ -2020,11 +2196,11 @@ namespace {
                 std::rotate(bodies.begin(), guild, guild + 1);
             }
         });
-        const auto guild_failures = ReplayState::CheckOrder(contents.table, Fed(contents, guild_first));
+        const auto guild_failures = CheckOrder(contents.table, Fed(contents, guild_first));
         Check(
             std::ranges::any_of(
                 guild_failures,
-                [](const ReplayState::OrderFailure& failure) {
+                [](const OrderFailure& failure) {
                     return failure.field.message == 280 && failure.field.kind == ReplayState::IdKind::Guild;
                 }
             ) && !ProveFeed(contents, guild_first, UINT32_MAX, false),
@@ -2033,7 +2209,7 @@ namespace {
 
         for (const auto join_ms : {10000u, 30000u, 60000u, UINT32_MAX}) {
             const auto keyframe_plan = ReplayWire::MakeKeyframePlan(contents, ModelKeyframe(contents, 0, join_ms));
-            const auto failures = ReplayState::CheckOrder(contents.table, Fed(contents, keyframe_plan));
+            const auto failures = CheckOrder(contents.table, Fed(contents, keyframe_plan));
             Check(
                 keyframe_plan.error.empty() && failures.empty() && ProveFeed(contents, keyframe_plan, UINT32_MAX, false) && ProveWire(contents, keyframe_plan, 20261126).error.empty(),
                 std::format("a keyframe built by the model at {} plays: its stages in order, what the client needs, the order of real loads and the wire ({})", JoinTime(join_ms), OrderSummary(failures, JoinMessages(keyframe_plan))).c_str()
@@ -2049,7 +2225,7 @@ namespace {
             std::string split_error;
             std::vector<uint8_t> kept;
             post.records = 0;
-            for (const auto& body : ReplayWire::Split(contents.table, post.bytes, split_error)) {
+            for (const auto& body : Split(contents.table, post.bytes, split_error)) {
                 if (ReplayState::Message message; ReplayState::Decode(contents.table, body, message) && message.id == CharAttributeState && message.U(0) == 10) {
                     continue;
                 }
@@ -2061,7 +2237,7 @@ namespace {
         Check(!ProveFeed(contents, without_state, UINT32_MAX, false), "a plan whose 34 names an agent without its attribute state fails the feed check");
 
         ReplayWire::Rc4 sender;
-        sender.Init(key, sizeof(key));
+        InitRc4(sender, key, sizeof(key));
         auto receiver = sender;
         auto bytes = plan.posts.front().bytes;
         sender.Apply(bytes.data(), bytes.size());
@@ -2333,7 +2509,7 @@ namespace {
         }
         snapshot.Apply(ReplayState::Message{53, {N(fighter), N(std::bit_cast<uint32_t>(1.33f)), N(std::bit_cast<uint32_t>(1.f))}});
         auto from_writer = mid_fight;
-        from_writer.records = ReplayState::JoinRecords(v2.table, snapshot, mid_fight.time_ms);
+        from_writer.records = JoinRecords(v2.table, snapshot, mid_fight.time_ms);
         const auto written_messages = Decoded(v2.table, from_writer.records);
         const auto created_at = std::ranges::find_if(written_messages, [](const ReplayState::Message& message) {
             return message.id == GAME_SMSG_AGENT_SPAWNED && message.U(0) == fighter;
@@ -2346,7 +2522,7 @@ namespace {
             return ReplayState::Decode(v2.table, record.body, message) && message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET && message.U(0) == 4 && message.U(1) == fighter;
         });
         Check(
-            model_intervals == 1 && attacks_after > 0 && created_at < interval_at && interval_at != written_messages.end() && ReplayWire::MakeKeyframePlan(v2, from_writer).error.empty() && ReplayState::CheckClientNeeds(written_messages).empty() &&
+            model_intervals == 1 && attacks_after > 0 && created_at < interval_at && interval_at != written_messages.end() && ReplayWire::MakeKeyframePlan(v2, from_writer).error.empty() && CheckClientNeeds(written_messages).empty() &&
                 StreamNeeds(v2, from_writer).empty(),
             std::format("a keyframe taken in a fight, the attacker's 53 written after its 32 as the fixed writer does, plays its stream's {} attacks with no assert broken", attacks_after).c_str()
         );
@@ -2429,7 +2605,7 @@ namespace {
             rewritten += !written.empty() && ReplayState::Encode(v2.table, written.front(), record.body);
         }
         Check(
-            rewritten > 0 && ReplayWire::MakeKeyframePlan(v2, from_memory).error.empty() && ReplayState::CheckClientNeeds(Decoded(v2.table, from_memory.records)).empty(),
+            rewritten > 0 && ReplayWire::MakeKeyframePlan(v2, from_memory).error.empty() && CheckClientNeeds(Decoded(v2.table, from_memory.records)).empty(),
             std::format("a keyframe whose {} items the fixed writer made from the client's memory plays and breaks none of the game's asserts", rewritten).c_str()
         );
         auto terminated = v2.keyframes.front();
@@ -2441,7 +2617,7 @@ namespace {
             }
         }
         const auto terminated_plan = ReplayWire::MakeKeyframePlan(v2, terminated);
-        const auto terminated_needs = ReplayState::CheckClientNeeds(Decoded(v2.table, terminated.records));
+        const auto terminated_needs = CheckClientNeeds(Decoded(v2.table, terminated.records));
         Check(
             terminated_plan.error.contains("(id 353)") && terminated_plan.error.contains("f12") && !terminated_needs.empty() &&
                 std::ranges::all_of(
@@ -2495,7 +2671,7 @@ namespace {
         }
         const auto brought_plan = ReplayWire::MakeKeyframePlan(v2, without_item);
         Check(
-            taken && brought_plan.error.empty() && std::ranges::count(brought_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && ReplayState::CheckOrder(v2.table, Fed(v2, brought_plan)).empty(),
+            taken && brought_plan.error.empty() && std::ranges::count(brought_plan.changes, ReplayWire::ChangeKind::BroughtIn, &ReplayWire::Change::kind) > 0 && CheckOrder(v2.table, Fed(v2, brought_plan)).empty(),
             std::format("a record showing an item the keyframe lacks gets the item's details from the stream before the keyframe (item {})", taken).c_str()
         );
         const auto insert = [](ReplayFile::Contents& contents, const size_t at, const uint16_t id, const std::vector<uint32_t>& values) {
@@ -2538,7 +2714,7 @@ namespace {
         with_class_records.insert(with_class_records.end() - 1, {with_class.keyframes[1].time_ms, class_body});
         const auto with_class_plan = ReplayWire::MakeKeyframePlan(with_class, with_class.keyframes[1]);
         Check(
-            names_gadget(gadget_plan.error) && std::ranges::any_of(gadget_stream | std::views::values, names_gadget) && with_class_plan.error.empty() && ReplayState::CheckClientNeeds(Fed(with_class, with_class_plan)).empty() &&
+            names_gadget(gadget_plan.error) && std::ranges::any_of(gadget_stream | std::views::values, names_gadget) && with_class_plan.error.empty() && CheckClientNeeds(Fed(with_class, with_class_plan)).empty() &&
                 StreamNeeds(with_class, with_class.keyframes[1]).empty(),
             "a gadget made again after a keyframe that lacks its class (every keyframe before this session's writer) is refused, by record, agent and class; with the class written in the keyframe, as the client's table gives it, it plays"
         );
@@ -2723,7 +2899,7 @@ namespace {
         Check(in_place_apart == 0 && again == Placed(ReplayWire::Placement(read, plan, expected_at.back().first - plan.start_ms)), "the same time from an earlier keyframe (in place) gives the same placement, and the same seek twice the same");
         Check(estimate_apart == agents, std::format("without samples the placement is the orders' estimate, not the client's: {} of {} agents off", estimate_apart, agents).c_str());
         const auto sought = ReplayWire::MakeSeekPlan(read, expected_at.back().first);
-        Check(sought.error.empty() && sought.placed > 0 && ReplayState::CheckClientNeeds(Fed(read, sought, sought.seek_ms)).empty(), "a seek's plan posts its placement after the stream to its time, every agent it names in the client");
+        Check(sought.error.empty() && sought.placed > 0 && CheckClientNeeds(Fed(read, sought, sought.seek_ms)).empty(), "a seek's plan posts its placement after the stream to its time, every agent it names in the client");
         printf("the placement's digest at the self-test's seek times: %016llx (the same every run)\n", static_cast<unsigned long long>(digest));
     }
 

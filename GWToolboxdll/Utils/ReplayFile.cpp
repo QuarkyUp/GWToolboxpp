@@ -468,7 +468,6 @@ namespace ReplayFile {
         constexpr uint32_t guild_name_min_capacity = 32;
         constexpr uint16_t guild_messages[] = {GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
         constexpr uint16_t guild_tag_messages[] = {GAME_SMSG_CHAT_MESSAGE_GLOBAL, GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
-        constexpr std::wstring_view numbered_placeholders[] = {L"Player ", L"Mercenary ", L"Guild ", L"G"};
     } // namespace
 
     bool IsPlainText(const std::wstring_view text)
@@ -476,15 +475,6 @@ namespace ReplayFile {
         return !text.empty() && std::ranges::all_of(text, [](const wchar_t c) {
             return c >= 0x20 && c < 0x100;
         });
-    }
-
-    bool IsPlaceholder(const std::wstring_view text)
-    {
-        return text == own_name_placeholder || std::ranges::any_of(numbered_placeholders, [text](const std::wstring_view prefix) {
-                   return text.size() > prefix.size() && text.starts_with(prefix) && std::ranges::all_of(text.substr(prefix.size()), [](const wchar_t c) {
-                              return c >= L'0' && c <= L'9';
-                          });
-               });
     }
 
     NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name) : other_players(other_players), own_names(own_names)

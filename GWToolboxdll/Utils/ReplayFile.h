@@ -136,7 +136,6 @@ namespace ReplayFile {
     constexpr size_t guild_tag_length = 5;
 
     bool IsPlainText(std::wstring_view text);
-    bool IsPlaceholder(std::wstring_view text);
 
     class NameStripper {
     public:

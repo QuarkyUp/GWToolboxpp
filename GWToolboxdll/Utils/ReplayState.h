@@ -67,10 +67,8 @@ namespace ReplayState {
         std::set<uint32_t> gadget_classes;
     };
 
-    std::vector<std::string> CheckClientNeeds(const std::vector<Message>& messages);
 
     enum class IdKind : uint8_t { Agent, Item, Bag, Inventory, Guild, Party, Player, Quest, Hero, Npc, Prop, Skill };
-    const char* IdKindName(IdKind kind);
 
     struct IdField {
         uint16_t message = 0;
@@ -84,12 +82,6 @@ namespace ReplayState {
     bool BringsIdsIn(const IdField& field);
     bool OrderChecked(IdKind kind);
 
-    struct OrderFailure {
-        size_t record = 0;
-        IdField field;
-        uint32_t id = 0;
-    };
-
     struct Order {
         std::set<std::pair<IdKind, uint32_t>> brought;
 
@@ -97,8 +89,6 @@ namespace ReplayState {
         void Bring(const ReplayFile::MessageTable& table, const Message& message);
     };
 
-    std::vector<OrderFailure> CheckOrder(const ReplayFile::MessageTable& table, const std::vector<Message>& messages);
-    std::string Describe(const OrderFailure& failure);
 
     std::vector<uint32_t> Identity(const Message& message);
 
@@ -198,5 +188,4 @@ namespace ReplayState {
     bool IsBagContent(const Message& message);
     std::vector<uint32_t> ShownItems(const Message& message);
 
-    std::vector<ReplayFile::Record> JoinRecords(const ReplayFile::MessageTable& table, const World& world, uint32_t time_ms);
 } // namespace ReplayState
