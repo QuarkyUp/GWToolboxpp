@@ -1,0 +1,750 @@
+#include "stdafx.h"
+
+#include <GWCA/Context/AgentContext.h>
+#include <GWCA/Context/CharContext.h>
+#include <GWCA/Context/GadgetContext.h>
+#include <GWCA/Context/GameContext.h>
+#include <GWCA/Context/GuildContext.h>
+#include <GWCA/Context/WorldContext.h>
+#include <GWCA/GameEntities/Agent.h>
+#include <GWCA/GameEntities/Guild.h>
+#include <GWCA/GameEntities/Hero.h>
+#include <GWCA/GameEntities/Item.h>
+#include <GWCA/GameEntities/Map.h>
+#include <GWCA/GameEntities/NPC.h>
+#include <GWCA/GameEntities/Party.h>
+#include <GWCA/GameEntities/Player.h>
+#include <GWCA/GameEntities/Quest.h>
+#include <GWCA/GameEntities/Skill.h>
+#include <GWCA/GameEntities/Title.h>
+#include <GWCA/Managers/AgentMgr.h>
+#include <GWCA/Managers/EffectMgr.h>
+#include <GWCA/Managers/ItemMgr.h>
+#include <GWCA/Managers/MapMgr.h>
+#include <GWCA/Managers/PartyMgr.h>
+#include <GWCA/Managers/SkillbarMgr.h>
+#include <Modules/ReplayRecorderInternal.h>
+#include <Modules/ReplayRecorderModule.h>
+#include <Utils/Replay/ReplayFile.h>
+#include <Utils/Replay/ReplayMessages.h>
+#include <Utils/Replay/ReplayState.h>
+#include <Windows/Pathfinding/PathfindingWindow.h>
+#include "stdafx.h"
+
+namespace ReplayRecorder {
+    namespace {
+        // GWCA's AgentInfo: what the char client's notices 0, 14 and 15 write (CharCliOnNotifyDword) and the agent view dresses an agent with (CCharAgent::SetCompositeModel).
+        struct AgentLook {
+            uint32_t appearance;
+            uint32_t composites[5];
+            uint32_t colours[5];
+            uint32_t h002C[2];
+            wchar_t* name_enc;
+        };
+        static_assert(sizeof(AgentLook) == sizeof(GW::AgentInfo));
+
+        // GWCA's GadgetInfo: a gadget class as 263's handler keeps it (0x0083d790, m11); a gadget's agent draws its model file (File.cpp:367 when 0).
+        struct GadgetClass {
+            uint32_t model_file;
+            uint32_t flags;
+            uint32_t scale;
+            wchar_t* name_enc;
+        };
+        static_assert(sizeof(GadgetClass) == sizeof(GW::GadgetInfo));
+
+        struct TeamRow {
+            uint32_t team;
+            uint32_t party;
+            uint32_t value;
+            uint32_t colour;
+            uint32_t territory;
+            wchar_t name[20];
+        };
+
+        struct TeamTable {
+            uint32_t count;
+            const TeamRow* const* by_party;
+            uint32_t capacity;
+            uint32_t by_party_count;
+        };
+
+        // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54, 430's handler its rows in MissionCommon::CTeamPartyTable (g01, g02).
+        struct MissionContext {
+            uint8_t h0000[0x54];
+            uint32_t instance_head[4];
+            uint8_t h0064[0x334];
+            TeamTable teams;
+        };
+        static_assert(offsetof(MissionContext, instance_head) == 0x54 && offsetof(MissionContext, teams) == 0x398);
+
+        // GWCA's WorldContext h053C: 91's value (0x0080e7c0), whose bit 1 stops the char client's agent notices (CharCliOnNotifyDword).
+        struct WorldValue91 {
+            uint8_t h0000[0x53C];
+            uint32_t value_91;
+        };
+
+        // GWCA's HeroInfo as CHeroMgr::OnHeroDataAdd fills it from 115 and 116 (g02).
+        struct HeroData {
+            uint32_t hero;
+            uint32_t agent;
+            uint32_t level;
+            uint32_t primary;
+            uint32_t secondary;
+            uint32_t hero_file;
+            uint32_t model_file;
+            uint32_t first_value;
+            uint32_t skill_count;
+            uint32_t skills[8];
+            uint32_t flags;
+            uint32_t appearance;
+            uint32_t armour[5];
+            uint32_t dyes[5];
+            wchar_t name[20];
+        };
+        static_assert(sizeof(HeroData) == sizeof(GW::HeroInfo) && offsetof(HeroData, appearance) == 0x48);
+
+        // A guild entry past GWCA's Guild: 289's sixth field (k09).
+        struct GuildEntry {
+            uint8_t h0000[0xAC];
+            uint32_t general_value;
+        };
+        static_assert(sizeof(GW::Guild) == offsetof(GuildEntry, general_value));
+
+        // GWCA's AgentContext: the server world's clock, which s2c 31 sets and 30 advances, before the shown world's (instance_timer) that follows it (n03, n05).
+        struct AgentClocks {
+            uint8_t h0000[0x148];
+            uint32_t server_time;
+            uint8_t h014C[0x60];
+            uint32_t shown_time;
+        };
+        static_assert(offsetof(AgentClocks, shown_time) == GWCA_OFFSETOF(GW::AgentContext, instance_timer));
+
+        uint32_t TeamToken(const GW::AgentLiving* living, const GW::WorldContext* world)
+        {
+            // The tokens every load at hand gives: the players' team ('play', the world's own), foes ('mon1'), the rest ('nonc').
+            constexpr uint32_t foes = 0x6D6F6E31;
+            constexpr uint32_t others = 0x6E6F6E63;
+            return living->allegiance == GW::Constants::Allegiance::Ally_NonAttackable || living->IsPlayer() ? world->playerTeamToken : living->allegiance == GW::Constants::Allegiance::Enemy ? foes : others;
+        }
+    } // namespace
+
+    uint32_t ServerTime()
+    {
+        const auto context = GW::GetAgentContext();
+        return context ? reinterpret_cast<const AgentClocks&>(*context).server_time : GW::Map::GetInstanceTime();
+    }
+
+    ReplayFile::Motion MotionOf(const WalkingAgent& walking, const uint32_t clock)
+    {
+        constexpr uint32_t facing_mask = 0xF;
+        ReplayFile::Motion motion = {
+            .agent = walking.agent_id,
+            .max_speed = walking.max_speed,
+            .move_speed = walking.move_speed,
+            .facing = walking.facing & facing_mask,
+            .walking = walking.stop_time != 0,
+        };
+        // CAgent's position at a time: its point moved by its velocity since the point's time, its leg's end once the leg's stop time is past.
+        if (motion.walking && static_cast<int32_t>(clock - walking.stop_time) >= 0) {
+            motion.x = walking.leg.x;
+            motion.y = walking.leg.y;
+            motion.plane = walking.leg.plane;
+        }
+        else {
+            const auto seconds = static_cast<float>(static_cast<int32_t>(clock - walking.point_time)) / 1000.f;
+            motion.x = walking.point.x + walking.velocity_x * seconds;
+            motion.y = walking.point.y + walking.velocity_y * seconds;
+            motion.plane = walking.point.plane;
+        }
+        if (motion.walking) {
+            motion.leg_x = walking.leg.x;
+            motion.leg_y = walking.leg.y;
+            motion.leg_plane = walking.leg.plane;
+            motion.target_x = walking.target.x;
+            motion.target_y = walking.target.y;
+            motion.target_plane = walking.target.plane;
+            motion.target_agent = walking.target_agent;
+        }
+        return motion;
+    }
+
+    std::vector<Message> ItemDetails(const uint32_t item_id)
+    {
+        const auto item = GW::Items::GetItemById(item_id);
+        if (!item) {
+            return {};
+        }
+        // CItemTable::AddDetailLow keeps 353's value as a dword at +0x24 (GWCA's value and h0026) and its multiplier at +0x4a.
+        ReplayState::ClientItem client_item = {
+            .item_id = item->item_id,
+            .model_file = item->model_file_id,
+            .type = static_cast<uint32_t>(item->type),
+            .dye_tint = item->dye.dye_tint,
+            .dye_colours = static_cast<uint32_t>(item->dye.dye1) | static_cast<uint32_t>(item->dye.dye2) << 4 | static_cast<uint32_t>(item->dye.dye3) << 8 | static_cast<uint32_t>(item->dye.dye4) << 12,
+            .formula = item->item_formula,
+            .multiplier = item->is_material_salvageable,
+            .interaction = item->interaction,
+            .value = item->value | static_cast<uint32_t>(item->h0026) << 16,
+            .model_id = item->model_id,
+            .quantity = item->quantity,
+            .name = item->name_enc ? item->name_enc : L"",
+            .profession = item->profession,
+            .customizer = item->customized ? item->customized : L"",
+        };
+        if (item->mod_struct) {
+            std::ranges::transform(std::span(item->mod_struct, item->mod_struct_size), std::back_inserter(client_item.code), &GW::ItemModifier::mod);
+        }
+        return ReplayState::ItemReport(message_table, client_item);
+    }
+
+    ReplayState::World Snapshot()
+    {
+        ReplayState::World world(message_table);
+        const auto apply = [&world](const Message& message) {
+            if (!message.fields.empty() || message_table[message.id].size() <= 1) {
+                world.Apply(message);
+            }
+        };
+        const auto apply_all = [&apply](const std::vector<Message>& messages) {
+            std::ranges::for_each(messages, apply);
+        };
+        const auto make = [](const uint16_t id, std::initializer_list<uint32_t> values) {
+            auto message = ReplayState::Blank(message_table, id);
+            size_t field = 0;
+            for (const auto value : values) {
+                message.Set(field++, value);
+            }
+            return message;
+        };
+        const auto char_context = GW::GetCharContext();
+        const auto world_context = GW::GetWorldContext();
+        const auto controlled = GW::Agents::GetControlledCharacter();
+        const auto agents = GW::Agents::GetAgentArray();
+        if (!char_context || !world_context || !controlled || !agents) {
+            return world;
+        }
+        const auto map_id = GW::Map::GetMapID();
+
+        const auto& mission = reinterpret_cast<const MissionContext&>(*char_context);
+        // 380's handler keeps its fields 0 to 3 at the mission context's +0x5c, +0x60, +0x54 and +0x58.
+        apply(make(GAME_SMSG_INSTANCE_LOAD_HEAD, {mission.instance_head[2] & 0xFF, mission.instance_head[3] & 0xFF, mission.instance_head[0] & 0xFF, mission.instance_head[1] & 0xFF}));
+        apply(ReplayState::Blank(message_table, MissionConfigEnd));
+        auto player_name = ReplayState::Blank(message_table, GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME);
+        if (!player_name.fields.empty()) {
+            player_name.fields[0].text = char_context->player_name;
+        }
+        apply(player_name);
+        constexpr uint32_t instance_flag_0x20 = 0x20;
+        apply(make(
+            GAME_SMSG_INSTANCE_LOAD_INFO, {char_context->player_number, static_cast<uint32_t>(char_context->current_map_id), static_cast<uint32_t>(char_context->current_map_type), char_context->district_number,
+                                           static_cast<uint32_t>(char_context->language), 0, (char_context->player_flags & instance_flag_0x20) != 0}
+        ));
+        for (const auto& quest : world_context->quest_log) {
+            constexpr uint32_t log_state_client_bit = 1;
+            auto general = make(GAME_SMSG_QUEST_GENERAL_INFO, {static_cast<uint32_t>(quest.quest_id), quest.log_state & ~log_state_client_bit});
+            if (general.fields.size() > 5) {
+                general.fields[2].text = quest.location ? quest.location : L"";
+                general.fields[3].text = quest.name ? quest.name : L"";
+                general.fields[4].text = quest.npc ? quest.npc : L"";
+                general.Set(5, static_cast<uint32_t>(quest.map_from));
+            }
+            apply(general);
+            if (!std::isfinite(quest.marker.x) || !std::isfinite(quest.marker.y)) {
+                continue;
+            }
+            auto marker = make(GAME_SMSG_QUEST_ADD_MARKER, {static_cast<uint32_t>(quest.quest_id)});
+            if (marker.fields.size() > 3) {
+                marker.SetF(1, quest.marker.x, 0);
+                marker.SetF(1, quest.marker.y, 1);
+                marker.Set(2, quest.marker.zplane);
+                marker.Set(3, static_cast<uint32_t>(quest.map_to));
+            }
+            apply(marker);
+        }
+        apply(make(GAME_SMSG_PLAYER_ATTR_MAX_KURZICK, {world_context->max_kurzick}));
+        apply(make(GAME_SMSG_PLAYER_ATTR_MAX_LUXON, {world_context->max_luxon}));
+        apply(make(GAME_SMSG_PLAYER_ATTR_MAX_BALTHAZAR, {world_context->max_balth}));
+        apply(make(GAME_SMSG_PLAYER_ATTR_MAX_IMPERIAL, {world_context->max_imperial}));
+        apply(make(CharContextValue112, {world_context->is_hard_mode_unlocked}));
+        if (world_context->accountInfo) {
+            const auto& account = *world_context->accountInfo;
+            auto name = make(CharAccountNameData, {});
+            if (name.fields.size() > 6) {
+                name.fields[0].text = account.account_name ? account.account_name : L"";
+                const uint32_t values[] = {account.wins, account.losses, account.rating, account.qualifier_points, account.rank, account.tournament_reward_points};
+                for (size_t i = 0; i < std::size(values); i++) {
+                    name.Set(i + 1, values[i]);
+                }
+            }
+            apply(name);
+        }
+        apply(make(CharToClient153, {static_cast<uint32_t>(map_id), 0}));
+        constexpr uint32_t manifest_size = 898;
+        for (const auto phase : {0u, 1u}) {
+            apply(make(MissionManifestPhase, {phase}));
+        }
+        apply(make(MissionManifestComplete, {2, manifest_size, 0}));
+        for (const auto phase : {0u, 1u}) {
+            apply(make(MissionManifestPhase, {phase}));
+        }
+        apply(make(MissionManifestComplete, {0, static_cast<uint32_t>(map_id), 0}));
+        // 406's handler (0x0084d640) hands its map file to the map's load, which asserts it non-zero (File.cpp:367); AreaInfo::file_id is 0 for most PvE maps.
+        auto load_map = make(GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, {chapter_map_file ? chapter_map_file : PathfindingWindow::GetMapFileId(map_id)});
+        if (load_map.fields.size() > 5 && load_map.fields[5].numbers.size() == sizeof(uint64_t)) {
+            constexpr uint32_t facing_steps = 255;
+            constexpr auto turn = 2 * std::numbers::pi_v<float>;
+            load_map.SetF(1, controlled->pos.x, 0);
+            load_map.SetF(1, controlled->pos.y, 1);
+            load_map.Set(2, controlled->pos.zplane);
+            load_map.Set(3, static_cast<uint32_t>(std::lround(std::fmod(controlled->rotation_angle + turn, turn) * facing_steps / turn)) % facing_steps);
+            // The server's clock as a FILETIME: its handler keeps it as an offset from the client's (+0x378).
+            constexpr uint64_t unix_epoch_as_filetime = 116444736000000000;
+            const auto server_time = unix_epoch_as_filetime + std::chrono::duration_cast<std::chrono::duration<uint64_t, std::ratio<1, 10000000>>>(std::chrono::system_clock::now().time_since_epoch()).count();
+            for (size_t i = 0; i < sizeof(uint64_t); i++) {
+                load_map.Set(5, static_cast<uint8_t>(server_time >> (8 * i)), i);
+            }
+        }
+        apply(load_map);
+        apply(make(GAME_SMSG_INSTANCE_LOADED, {world_context->playerTeamToken}));
+        const auto& teams = mission.teams;
+        for (uint32_t party = 0; teams.by_party && party < teams.by_party_count; party++) {
+            const auto row = teams.by_party[party];
+            if (!row) {
+                continue;
+            }
+            auto team = make(MissionTeam, {row->party, row->team, row->value, row->colour, row->territory});
+            if (team.fields.size() > 5) {
+                team.fields[5].text.assign(row->name, wcsnlen(row->name, std::size(row->name)));
+                apply(team);
+            }
+        }
+        const auto explorable = GW::Map::GetInstanceType() == GW::Constants::InstanceType::Explorable;
+        // Of the loads at hand only the explorable ones in hard mode send 91.
+        if (const auto value_91 = reinterpret_cast<const WorldValue91&>(*world_context).value_91; explorable && value_91) {
+            apply(make(CharToClient91, {value_91}));
+        }
+        apply(make(GAME_SMSG_POST_PROCESS, {post_process.level, post_process.tint}));
+        apply(make(MissionToClient404, {0}));
+
+        const auto is_character = [world_context](const uint32_t agent_id) {
+            return std::ranges::any_of(world_context->party_profession_states, [agent_id](const GW::ProfessionState& state) {
+                return state.agent_id == agent_id;
+            });
+        };
+        for (const auto& state : world_context->party_profession_states) {
+            const auto living = GW::Agents::GetAgentByID(state.agent_id) ? GW::Agents::GetAgentByID(state.agent_id)->GetAsAgentLiving() : nullptr;
+            apply(make(CharAttributeState, {state.agent_id, 0, 0}));
+            apply(make(GAME_SMSG_PLAYER_UPDATE_PROFESSION, {state.agent_id, static_cast<uint32_t>(state.primary), static_cast<uint32_t>(state.secondary), 0}));
+            if (state.unlocked_professions) {
+                apply(make(GAME_SMSG_PLAYER_UNLOCKED_PROFESSION, {state.agent_id, state.unlocked_professions}));
+            }
+            if (const auto skillbar = GW::SkillbarMgr::GetSkillbar(state.agent_id); skillbar && message_table[GAME_SMSG_SKILLBAR_UPDATE].size() > 3) {
+                auto skills = make(GAME_SMSG_SKILLBAR_UPDATE, {state.agent_id});
+                for (const auto& skill : skillbar->skills) {
+                    skills.fields[1].numbers.push_back(static_cast<uint32_t>(skill.skill_id));
+                    skills.fields[2].numbers.push_back(0);
+                }
+                skills.Set(3, 1);
+                apply(skills);
+            }
+            if (living) {
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {MaxEnergy, state.agent_id, living->max_energy}));
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {MaxHealth, state.agent_id, living->max_hp}));
+            }
+            const auto attributes = std::ranges::find(world_context->attributes, state.agent_id, &GW::PartyAttribute::agent_id);
+            if (attributes != world_context->attributes.end() && message_table[CharAttributes].size() > 2) {
+                std::vector<const GW::Attribute*> raised;
+                // Past the attributes' own slots (ids 0 to 44) the array holds entries no 58 at hand sends.
+                for (size_t index = 0; index < std::size(attributes->attribute); index++) {
+                    if (const auto& attribute = attributes->attribute[index]; attribute.level && static_cast<size_t>(attribute.id) == index) {
+                        raised.push_back(&attribute);
+                    }
+                }
+                auto words = make(CharAttributes, {state.agent_id});
+                auto& numbers = words.fields[1].numbers;
+                for (const auto attribute : raised) {
+                    numbers.push_back(static_cast<uint32_t>(attribute->id));
+                }
+                for (const auto attribute : raised) {
+                    numbers.push_back(attribute->level_base);
+                }
+                for (const auto attribute : raised) {
+                    numbers.push_back(attribute->level);
+                }
+                apply(words);
+            }
+        }
+        for (const auto& info : world_context->hero_info) {
+            const auto& hero = reinterpret_cast<const HeroData&>(info);
+            const auto flag = hero.flags & 1;
+            if (info.hero_id >= GW::Constants::HeroID::Merc1 && info.hero_id <= GW::Constants::HeroID::Merc8) {
+                auto mercenary = make(GAME_SMSG_MERCENARY_INFO, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file, hero.first_value, flag, hero.appearance});
+                constexpr size_t armor_pieces = std::extent_v<decltype(HeroData::armour)>;
+                if (mercenary.fields.size() > 9 + 2 * armor_pieces) {
+                    for (size_t piece = 0; piece < armor_pieces; piece++) {
+                        mercenary.Set(9 + piece, hero.armour[piece]);
+                        mercenary.Set(9 + armor_pieces + piece, hero.dyes[piece]);
+                    }
+                    // OnHeroDataAdd copies the name only with an appearance: an empty slot's is stale memory, its 116 an empty name.
+                    if (hero.appearance) {
+                        mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
+                    }
+                }
+                apply(mercenary);
+                continue;
+            }
+            auto data = make(CharHeroDataAdd, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file});
+            if (data.fields.size() > 8) {
+                data.fields[6].numbers.assign(hero.skills, hero.skills + std::min<size_t>(hero.skill_count, std::size(hero.skills)));
+                data.Set(7, hero.first_value);
+                data.Set(8, flag);
+            }
+            apply(data);
+        }
+        if (const auto inventory = GW::Items::GetInventory()) {
+            apply(make(GAME_SMSG_ITEM_STREAM_CREATE, {inventory->inventory_id(), 0}));
+            apply(make(GAME_SMSG_ITEM_SET_ACTIVE_WEAPON_SET, {inventory->inventory_id(), inventory->active_weapon_set}));
+        }
+        for (const auto& flag : world_context->hero_flags) {
+            apply(make(GAME_SMSG_ITEM_STREAM_CREATE, {flag.inventory_id, 1}));
+            apply(make(CharHeroActivate, {flag.hero_id, flag.agent_id, flag.inventory_id, static_cast<uint32_t>(flag.hero_behavior)}));
+            apply(make(GAME_SMSG_HERO_SKILL_STATUS_BITMAP, {flag.agent_id, 0}));
+        }
+        if (world_context->unlocked_character_skills.size()) {
+            auto unlocked = ReplayState::Blank(message_table, GAME_SMSG_SKILLS_UNLOCKED);
+            if (!unlocked.fields.empty()) {
+                unlocked.fields[0].numbers.assign(world_context->unlocked_character_skills.begin(), world_context->unlocked_character_skills.end());
+            }
+            apply(unlocked);
+        }
+        apply(make(
+            GAME_SMSG_PLAYER_ATTR_SET,
+            {world_context->experience, world_context->current_kurzick, world_context->total_earned_kurzick, world_context->current_luxon, world_context->total_earned_luxon, world_context->current_imperial, world_context->total_earned_imperial, 0, 0,
+             world_context->level, world_context->morale, world_context->current_balth, world_context->total_earned_balth, world_context->current_skill_points, world_context->total_earned_skill_points}
+        ));
+
+        // The server world's clock: the positions below are its agents', which the stream's orders and 30s go on from.
+        const auto clock = ServerTime();
+        const auto agent_context = GW::GetAgentContext();
+        apply(make(GAME_SMSG_AGENT_INSTANCE_TIMER, {clock}));
+        // A mercenary's look comes as the server sends it before the agent: notices 0, 14 and 15 (159 for slot 0, 160 for the others, none for an empty one).
+        const auto dress = [&](const uint32_t agent_id) {
+            if (agent_id >= world_context->agent_infos.size()) {
+                return;
+            }
+            const auto& look = reinterpret_cast<const AgentLook&>(world_context->agent_infos[agent_id]);
+            if (!look.appearance) {
+                return;
+            }
+            apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {LookAppearance, agent_id, look.appearance}));
+            apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {LookComposite, agent_id, look.composites[0]}));
+            apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {LookColour, agent_id, look.colours[0]}));
+            for (uint32_t slot = 1; slot < std::size(look.composites); slot++) {
+                if (look.composites[slot]) {
+                    apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, {LookComposite, agent_id, slot, look.composites[slot]}));
+                    apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, {LookColour, agent_id, slot, look.colours[slot]}));
+                }
+            }
+        };
+        std::set<uint32_t> livings;
+        for (const auto agent : *agents) {
+            if (!agent) {
+                continue;
+            }
+            auto create = ReplayState::Blank(message_table, GAME_SMSG_AGENT_SPAWNED);
+            if (create.fields.size() < 23) {
+                break;
+            }
+            const auto living = agent->GetAsAgentLiving();
+            const auto item = agent->GetAsAgentItem();
+            if (!living && !item) {
+                continue;
+            }
+            constexpr uint32_t npc_class = 0x20000000;
+            constexpr uint32_t player_class = 0x30000000;
+            constexpr uint32_t living_def = 1;
+            constexpr uint32_t item_def = 4;
+            constexpr uint32_t npc_flags = 9;
+            constexpr uint32_t player_flags = 5;
+            constexpr float living_radius = 12.f;
+            constexpr float default_speed = 288.f;
+            const auto infinity = std::numeric_limits<float>::infinity();
+            const auto agent_class = living ? (living->IsPlayer() ? player_class | living->login_number : npc_class | living->player_number) : item->item_id;
+            const uint32_t values[] = {agent->agent_id, agent_class, living ? living_def : item_def, living ? (living->IsPlayer() ? player_flags : npc_flags) : 0};
+            for (size_t i = 0; i < std::size(values); i++) {
+                create.Set(i, values[i]);
+            }
+            const auto walking = agent_context && agent->agent_id < agent_context->agent_movement.size() ? reinterpret_cast<const WalkingAgent*>(agent_context->agent_movement[agent->agent_id]) : nullptr;
+            const auto motion = walking ? MotionOf(*walking, clock) : ReplayFile::Motion{.x = agent->pos.x, .y = agent->pos.y, .plane = agent->pos.zplane, .max_speed = living ? default_speed : 0.f, .move_speed = 1.f};
+            create.SetF(4, motion.x, 0);
+            create.SetF(4, motion.y, 1);
+            create.Set(5, motion.plane);
+            create.SetF(6, agent->rotation_cos, 0);
+            create.SetF(6, agent->rotation_sin, 1);
+            create.Set(7, 1);
+            create.SetF(8, motion.max_speed);
+            create.SetF(9, motion.move_speed);
+            create.SetF(10, living ? living_radius : 0.f);
+            create.Set(11, living ? TeamToken(living, world_context) : 0);
+            create.SetF(18, infinity, 0);
+            create.SetF(18, infinity, 1);
+            create.SetF(21, infinity, 0);
+            create.SetF(21, infinity, 1);
+            if (living && !living->IsPlayer() && living->player_number < world_context->npcs.size()) {
+                const auto name = GW::Agents::GetAgentEncName(agent);
+                const auto npc_name = world_context->npcs[living->player_number].name_enc;
+                if (name && !(npc_name && wcscmp(name, npc_name) == 0)) {
+                    auto update = make(GAME_SMSG_AGENT_UPDATE_NPC_NAME, {agent->agent_id});
+                    if (update.fields.size() > 1) {
+                        update.fields[1].text = name;
+                    }
+                    apply(update);
+                }
+            }
+            if (living) {
+                livings.insert(agent->agent_id);
+                dress(agent->agent_id);
+                if (static_cast<uint32_t>(living->primary) || static_cast<uint32_t>(living->secondary)) {
+                    apply(make(GAME_SMSG_AGENT_UPDATE_PROFESSION, {agent->agent_id, static_cast<uint32_t>(living->primary), static_cast<uint32_t>(living->secondary)}));
+                }
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_INT, {Level, agent->agent_id, living->level}));
+                apply(make(GAME_SMSG_AGENT_INITIAL_EFFECTS, {agent->agent_id, living->effects}));
+            }
+            if (item) {
+                apply_all(ItemDetails(item->item_id));
+                if (item->owner) {
+                    // All 13 309s at hand carry 600.0.
+                    constexpr float assignment_seconds = 600.f;
+                    apply(make(GAME_SMSG_ITEM_UPDATE_OWNER, {item->item_id, item->owner, std::bit_cast<uint32_t>(assignment_seconds)}));
+                }
+            }
+            apply(create);
+            if (!living) {
+                continue;
+            }
+            // A walk in progress goes on from the keyframe by its order, as 41 and 42 start one (CAgent::UpdateMovement).
+            if (motion.walking) {
+                auto order = ReplayState::Blank(message_table, motion.target_agent ? GAME_SMSG_AGENT_UPDATE_DESTINATION : GAME_SMSG_AGENT_MOVE_TO_POINT);
+                if (order.fields.size() > 3) {
+                    order.Set(0, agent->agent_id);
+                    order.SetF(1, motion.target_x, 0);
+                    order.SetF(1, motion.target_y, 1);
+                    order.Set(2, motion.target_plane);
+                    order.Set(3, motion.plane);
+                    order.Set(4, motion.target_agent);
+                    apply(order);
+                }
+            }
+            // The agent view keeps 53's interval and modifier at +0xEC and +0xF0, and asserts the interval before an attack's warmup.
+            if (living->weapon_attack_speed != 0.f && living->attack_speed_modifier != 0.f) {
+                apply(make(CharAttackInterval, {agent->agent_id, std::bit_cast<uint32_t>(living->weapon_attack_speed), std::bit_cast<uint32_t>(living->attack_speed_modifier)}));
+            }
+            apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {Health, agent->agent_id, std::bit_cast<uint32_t>(living->hp)}));
+            if (living->hp_pips) {
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {HealthRegen, agent->agent_id, std::bit_cast<uint32_t>(living->hp_pips)}));
+            }
+            if (is_character(agent->agent_id)) {
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {Energy, agent->agent_id, std::bit_cast<uint32_t>(living->energy)}));
+                apply(make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {EnergyRegen, agent->agent_id, std::bit_cast<uint32_t>(living->energy_regen)}));
+            }
+            uint32_t definition = 0;
+            const CharacterData* character = nullptr;
+            constexpr uint32_t character_definition = 1;
+            if (!AgentNotifyParams_Func || !AgentNotifyParams_Func(agent->agent_id, &definition, &character) || definition != character_definition || !character) {
+                continue;
+            }
+            const auto& worn = character->worn;
+            if (living->IsPlayer()) {
+                auto equipment = make(CharEquipment, {agent->agent_id});
+                for (size_t slot = 0; slot + 1 < equipment.fields.size(); slot++) {
+                    apply_all(ItemDetails(worn[slot]));
+                    equipment.Set(slot + 1, worn[slot]);
+                }
+                apply(equipment);
+            }
+            else {
+                apply_all(ItemDetails(worn[0]));
+                apply_all(ItemDetails(worn[1]));
+                apply(make(GAME_SMSG_NPC_UPDATE_WEAPONS, {agent->agent_id, worn[0], worn[1]}));
+            }
+        }
+        // The outpost's load sends the party's mercenary heroes' looks, which have no agent there.
+        for (uint32_t agent_id = 0; agent_id < world_context->agent_infos.size(); agent_id++) {
+            if (!livings.contains(agent_id)) {
+                dress(agent_id);
+            }
+        }
+        for (uint32_t npc_id = 0; npc_id < world_context->npcs.size(); npc_id++) {
+            const auto& npc = world_context->npcs[npc_id];
+            if (!npc.model_file_id) {
+                continue;
+            }
+            auto properties = make(GAME_SMSG_NPC_UPDATE_PROPERTIES, {npc_id, npc.model_file_id, npc.skin_file_id, std::bit_cast<uint32_t>(npc.visual_adjustment), npc.appearance, npc.npc_flags, static_cast<uint32_t>(npc.primary), npc.default_level});
+            if (properties.fields.size() > 8) {
+                properties.fields[8].text = npc.name_enc ? npc.name_enc : L"";
+            }
+            apply(properties);
+            auto model = make(GAME_SMSG_NPC_UPDATE_MODEL, {npc_id});
+            if (model.fields.size() > 1 && npc.model_files) {
+                model.fields[1].numbers.assign(npc.model_files, npc.model_files + npc.files_count);
+            }
+            apply(model);
+        }
+        // The table keeps every class defined since the game started: a gadget the stream makes later finds its class in the keyframe.
+        if (const auto game_context = GW::GetGameContext(); game_context && game_context->gadget) {
+            const auto& classes = game_context->gadget->GadgetInfo;
+            for (uint32_t index = 0; index < classes.size(); index++) {
+                const auto& gadget_class = reinterpret_cast<const GadgetClass&>(classes[index]);
+                if (!gadget_class.model_file) {
+                    continue;
+                }
+                auto define = make(GadgetClassDefine, {index, gadget_class.model_file, gadget_class.flags, gadget_class.scale & 0xFF});
+                if (define.fields.size() > 4) {
+                    define.fields[4].text = gadget_class.name_enc ? gadget_class.name_enc : L"";
+                }
+                apply(define);
+            }
+        }
+        for (const auto& player : world_context->players) {
+            if (!player.agent_id) {
+                continue;
+            }
+            // Every load at hand fills 89's sixth field with 0xCCCCCCCC, the server's unset bytes.
+            constexpr uint32_t unset_bytes = 0xCCCCCCCC;
+            auto row = make(GAME_SMSG_AGENT_CREATE_PLAYER, {player.player_number, player.agent_id, player.appearance_bitmap, static_cast<uint32_t>(player.secondary), 0, unset_bytes});
+            if (row.fields.size() > 6) {
+                row.fields[6].text = player.name ? player.name : L"";
+            }
+            apply(row);
+            apply(make(GAME_SMSG_UPDATE_AGENT_PARTYSIZE, {player.player_number, player.party_size}));
+            apply(make(CharPlayerLink, {player.player_number, player.party_leader_player_number}));
+            apply(make(GAME_SMSG_TITLE_RANK_DISPLAY, {player.player_number, player.active_title_tier}));
+        }
+        constexpr size_t morale_rows_at_most = 64;
+        constexpr uint32_t lowest_morale = 40;
+        constexpr uint32_t highest_morale = 110;
+        size_t morale_rows = 0;
+        for (const auto& morale : world_context->morale_table) {
+            if (++morale_rows > morale_rows_at_most) {
+                break;
+            }
+            if (is_character(morale.agent_id) && morale.morale >= lowest_morale && morale.morale <= highest_morale) {
+                apply(make(CharAgentMorale, {morale.agent_id, morale.morale}));
+            }
+        }
+        // The server sends a title only with a tier, and the tiers its titles are at and reach next.
+        std::set<uint32_t> title_tiers;
+        for (uint32_t index = 0; index < world_context->titles.size(); index++) {
+            const auto& title = world_context->titles[index];
+            if (!title.next_title_tier_index) {
+                continue;
+            }
+            title_tiers.insert({title.current_title_tier_index, title.next_title_tier_index});
+            auto track = make(
+                GAME_SMSG_TITLE_TRACK_INFO,
+                {index, title.props, title.current_points, title.current_title_tier_index, title.points_needed_current_rank, title.h0010, title.next_title_tier_index, title.points_needed_next_rank, title.max_title_rank, title.max_title_tier_index}
+            );
+            if (track.fields.size() > 11) {
+                track.fields[10].text = title.points_desc ? title.points_desc : L"";
+                track.fields[11].text = title.h0028 ? title.h0028 : L"";
+            }
+            apply(track);
+        }
+        for (const auto index : title_tiers) {
+            if (index >= world_context->title_tiers.size()) {
+                continue;
+            }
+            const auto& tier = world_context->title_tiers[index];
+            auto rank = make(GAME_SMSG_TITLE_RANK_DATA, {index, tier.props, tier.tier_number});
+            if (rank.fields.size() > 3 && tier.tier_name_enc) {
+                rank.fields[3].text = tier.tier_name_enc;
+            }
+            apply(rank);
+        }
+        if (const auto guild_context = GW::GetGuildContext()) {
+            const auto set_key = [](Message& message, const GW::GHKey& key) {
+                for (size_t i = 0; i < sizeof(key); i++) {
+                    message.Set(1, reinterpret_cast<const uint8_t*>(&key)[i], i);
+                }
+            };
+            for (const auto guild : guild_context->guilds) {
+                if (!guild) {
+                    continue;
+                }
+                const auto own = guild->index == guild_context->player_guild_index;
+                auto info = ReplayState::Blank(message_table, own ? GAME_SMSG_GUILD_GENERAL_INFO : GAME_SMSG_GUILD_ALLIANCE_INFO);
+                if (info.fields.size() < (own ? 19u : 15u)) {
+                    continue;
+                }
+                // The last field of both is 0 in all 318 at hand.
+                const auto& cape = guild->cape;
+                std::vector<uint32_t> values = {guild->features};
+                if (own) {
+                    values.push_back(reinterpret_cast<const GuildEntry*>(guild)->general_value);
+                }
+                values.insert(values.end(), {cape.cape_bg_color, cape.cape_detail_color, cape.cape_emblem_color, cape.cape_shape, cape.cape_detail, cape.cape_emblem, cape.cape_trim, guild->faction, guild->faction_point});
+                if (own) {
+                    values.insert(values.end(), {guild->qualifier_point, guild->rating, guild->rank});
+                }
+                values.push_back(0);
+                info.Set(0, guild->index);
+                set_key(info, guild->key);
+                info.fields[2].text.assign(guild->name, wcsnlen(guild->name, std::size(guild->name)));
+                info.fields[3].text.assign(guild->tag, wcsnlen(guild->tag, ReplayFile::guild_tag_length));
+                for (size_t i = 0; i < values.size(); i++) {
+                    info.Set(4 + i, values[i]);
+                }
+                apply(info);
+            }
+            if (guild_context->player_guild_index) {
+                auto assign = make(GAME_SMSG_GUILD_PLAYER_ROLE, {guild_context->player_guild_index});
+                if (assign.fields.size() > 2) {
+                    set_key(assign, guild_context->player_gh_key);
+                    assign.Set(2, guild_context->player_guild_rank);
+                    apply(assign);
+                }
+            }
+        }
+        if (const auto party_effects = GW::Effects::GetPartyEffectsArray()) {
+            for (const auto& effects : *party_effects) {
+                for (const auto& effect : effects.effects) {
+                    // An effect with no duration came as an upkeep (65): no 66 in any recording at hand has a duration of 0.
+                    if (effect.duration) {
+                        apply(make(GAME_SMSG_EFFECT_APPLIED, {effects.agent_id, static_cast<uint32_t>(effect.skill_id), effect.attribute_level, effect.effect_id, std::bit_cast<uint32_t>(effect.GetTimeRemaining() / 1000.f)}));
+                    }
+                    else if (!effect.agent_id) {
+                        apply(make(GAME_SMSG_EFFECT_UPKEEP_APPLIED, {effects.agent_id, 0, static_cast<uint32_t>(effect.skill_id), effect.attribute_level, effect.effect_id}));
+                    }
+                }
+                for (const auto& buff : effects.buffs) {
+                    // GWCA lists an upkeep under its caster; 63 and 65 name its target first.
+                    const auto target = buff.target_agent_id ? buff.target_agent_id : effects.agent_id;
+                    for (const auto id : std::initializer_list<uint16_t>{GAME_SMSG_EFFECT_UPKEEP_ADDED, GAME_SMSG_EFFECT_UPKEEP_APPLIED}) {
+                        apply(make(id, {target, effects.agent_id, static_cast<uint32_t>(buff.skill_id), buff.h0004, buff.buff_id}));
+                    }
+                }
+            }
+        }
+        apply(make(GAME_SMSG_AGENT_SET_PLAYER, {controlled->agent_id, 3}));
+        if (const auto party = GW::PartyMgr::GetPartyInfo()) {
+            apply(make(GAME_SMSG_PARTY_CREATE, {party->party_id}));
+            for (const auto& member : party->players) {
+                apply(make(GAME_SMSG_PARTY_PLAYER_ADD, {party->party_id, member.login_number, 1}));
+            }
+            for (const auto& hero : party->heroes) {
+                apply(make(GAME_SMSG_PARTY_HERO_ADD, {party->party_id, hero.owner_player_id, hero.agent_id, static_cast<uint32_t>(hero.hero_id), hero.level}));
+            }
+            apply(make(GAME_SMSG_PARTY_MEMBER_STREAM_END, {party->party_id}));
+            apply(make(PartyAssign, {party->party_id, party->players.size() ? party->players[0].login_number : 0}));
+            apply(make(GAME_SMSG_PARTY_SET_DIFFICULTY, {GW::PartyMgr::GetIsPartyInHardMode()}));
+        }
+        constexpr uint32_t access_rights_mask = 0xD;
+        apply(make(MissionAccessRights, {char_context->player_flags & access_rights_mask}));
+        apply(make(PartyToClient446, {0}));
+        if (explorable) {
+            apply(ReplayState::Blank(message_table, GAME_SMSG_MISSION_STREAM_START));
+        }
+        apply(ReplayState::Blank(message_table, GAME_SMSG_INSTANCE_LOAD_FINISH));
+        return world;
+    }
+} // namespace ReplayRecorder
