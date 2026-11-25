@@ -68,40 +68,27 @@ namespace ReplayRecorder {
             uint32_t by_party_count;
         };
 
-        // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54, 430's handler its rows in MissionCommon::CTeamPartyTable (g01, g02).
+        // GWCA's CharContext is the mission context: 380's handler keeps its bytes at +0x54 (GWCA's h0054), 430's handler its rows in MissionCommon::CTeamPartyTable (g01, g02).
         struct MissionContext {
-            uint8_t h0000[0x54];
-            uint32_t instance_head[4];
-            uint8_t h0064[0x334];
+            uint8_t h0000[0x398];
             TeamTable teams;
         };
-        static_assert(offsetof(MissionContext, instance_head) == 0x54 && offsetof(MissionContext, teams) == 0x398);
+        static_assert(offsetof(MissionContext, teams) == 0x398 && GWCA_OFFSETOF(GW::CharContext, h0054) == 0x54);
+        static_assert(GWCA_OFFSETOF(GW::WorldContext, h053C) == 0x53C);
 
-        // GWCA's WorldContext h053C: 91's value (0x0080e7c0), whose bit 1 stops the char client's agent notices (CharCliOnNotifyDword).
-        struct WorldValue91 {
-            uint8_t h0000[0x53C];
-            uint32_t value_91;
-        };
-
-        // GWCA's HeroInfo as CHeroMgr::OnHeroDataAdd fills it from 115 and 116 (g02).
+        // The fields of GWCA's HeroInfo it leaves unnamed, as CHeroMgr::OnHeroDataAdd fills them from 115 and 116 (g02).
         struct HeroData {
-            uint32_t hero;
-            uint32_t agent;
-            uint32_t level;
-            uint32_t primary;
-            uint32_t secondary;
-            uint32_t hero_file;
-            uint32_t model_file;
+            uint8_t h0000[0x1C];
             uint32_t first_value;
             uint32_t skill_count;
             uint32_t skills[8];
             uint32_t flags;
-            uint32_t appearance;
+            uint32_t h0048;
             uint32_t armour[5];
             uint32_t dyes[5];
-            wchar_t name[20];
+            wchar_t h0074[20];
         };
-        static_assert(sizeof(HeroData) == sizeof(GW::HeroInfo) && offsetof(HeroData, appearance) == 0x48);
+        static_assert(sizeof(HeroData) == sizeof(GW::HeroInfo) && offsetof(HeroData, armour) == GWCA_OFFSETOF(GW::HeroInfo, chestpiece_dye_tint) && offsetof(HeroData, dyes) == GWCA_OFFSETOF(GW::HeroInfo, chestpiece_dye));
 
         // A guild entry past GWCA's Guild: 289's sixth field (k09).
         struct GuildEntry {
@@ -163,7 +150,7 @@ namespace ReplayRecorder {
 
             const auto& mission = reinterpret_cast<const MissionContext&>(*char_context);
             // 380's handler keeps its fields 0 to 3 at the mission context's +0x5c, +0x60, +0x54 and +0x58.
-            Apply(world, Make(GAME_SMSG_INSTANCE_LOAD_HEAD, {mission.instance_head[2] & 0xFF, mission.instance_head[3] & 0xFF, mission.instance_head[0] & 0xFF, mission.instance_head[1] & 0xFF}));
+            Apply(world, Make(GAME_SMSG_INSTANCE_LOAD_HEAD, {char_context->h0054[2] & 0xFF, char_context->h0054[3] & 0xFF, char_context->h0054[0] & 0xFF, char_context->h0054[1] & 0xFF}));
             Apply(world, ReplayState::Blank(message_table, MissionConfigEnd));
             auto player_name = ReplayState::Blank(message_table, GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME);
             if (!player_name.fields.empty()) {
@@ -257,7 +244,7 @@ namespace ReplayRecorder {
                 }
             }
             // Of the loads at hand only the explorable ones in hard mode send 91.
-            if (const auto value_91 = reinterpret_cast<const WorldValue91&>(*world_context).value_91; explorable && value_91) {
+            if (const auto value_91 = world_context->h053C[0]; explorable && value_91) {
                 Apply(world, Make(CharToClient91, {value_91}));
             }
             Apply(world, Make(GAME_SMSG_POST_PROCESS, {post_process.level, post_process.tint}));
@@ -313,7 +300,10 @@ namespace ReplayRecorder {
                 const auto& hero = reinterpret_cast<const HeroData&>(info);
                 const auto flag = hero.flags & 1;
                 if (info.hero_id >= GW::Constants::HeroID::Merc1 && info.hero_id <= GW::Constants::HeroID::Merc8) {
-                    auto mercenary = Make(GAME_SMSG_MERCENARY_INFO, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file, hero.first_value, flag, hero.appearance});
+                    auto mercenary = Make(
+                        GAME_SMSG_MERCENARY_INFO,
+                        {static_cast<uint32_t>(info.hero_id), info.level, static_cast<uint32_t>(info.primary), static_cast<uint32_t>(info.secondary), info.hero_file_id, info.model_file_id, hero.first_value, flag, info.appearance_bitmap}
+                    );
                     constexpr size_t armor_pieces = std::extent_v<decltype(HeroData::armour)>;
                     if (mercenary.fields.size() > 9 + 2 * armor_pieces) {
                         for (size_t piece = 0; piece < armor_pieces; piece++) {
@@ -321,14 +311,14 @@ namespace ReplayRecorder {
                             mercenary.Set(9 + armor_pieces + piece, hero.dyes[piece]);
                         }
                         // OnHeroDataAdd copies the name only with an appearance: an empty slot's is stale memory, its 116 an empty name.
-                        if (hero.appearance) {
-                            mercenary.fields[9 + 2 * armor_pieces].text.assign(hero.name, wcsnlen(hero.name, std::size(hero.name)));
+                        if (info.appearance_bitmap) {
+                            mercenary.fields[9 + 2 * armor_pieces].text.assign(info.name, wcsnlen(info.name, std::size(info.name)));
                         }
                     }
                     Apply(world, mercenary);
                     continue;
                 }
-                auto data = Make(CharHeroDataAdd, {hero.hero, hero.level, hero.primary, hero.secondary, hero.hero_file, hero.model_file});
+                auto data = Make(CharHeroDataAdd, {static_cast<uint32_t>(info.hero_id), info.level, static_cast<uint32_t>(info.primary), static_cast<uint32_t>(info.secondary), info.hero_file_id, info.model_file_id});
                 if (data.fields.size() > 8) {
                     data.fields[6].numbers.assign(hero.skills, hero.skills + std::min<size_t>(hero.skill_count, std::size(hero.skills)));
                     data.Set(7, hero.first_value);
