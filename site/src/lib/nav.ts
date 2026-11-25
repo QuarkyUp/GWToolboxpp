@@ -78,7 +78,6 @@ export const navGroups: NavGroup[] = [
       { slug: 'integrations', label: 'Integrations' },
       { slug: 'input_modules', label: 'Input' },
       { slug: 'qol_fixes', label: 'Quality of Life Fixes' },
-      { slug: 'replay_recorder', label: 'Replay Recorder' },
       { slug: 'plugins', label: 'Plugins' },
     ],
   },
