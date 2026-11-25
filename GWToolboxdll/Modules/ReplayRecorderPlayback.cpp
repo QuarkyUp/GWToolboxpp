@@ -401,9 +401,9 @@ namespace ReplayRecorder {
         void FollowViewpoint(const uint32_t agent_id)
         {
             ViewpointMessage message{.agent = agent_id};
-            emulating_rows = true;
+            emulating_packet = true;
             GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
-            emulating_rows = false;
+            emulating_packet = false;
             followed_agent = agent_id;
             LogPlayback(std::format("the view follows agent {} (s2c 172 emulated, as an observer's server sends it)", agent_id));
         }
@@ -553,7 +553,7 @@ namespace ReplayRecorder {
 
         void OnObserveRow(GW::HookStatus*, PacketBase* packet, void*)
         {
-            if (emulating_rows) {
+            if (emulating_packet) {
                 return;
             }
             std::scoped_lock lock(recording_mutex);
@@ -562,7 +562,7 @@ namespace ReplayRecorder {
 
         void OnObserveRowsCommitted(GW::HookStatus*, PacketBase*, void*)
         {
-            if (emulating_rows) {
+            if (emulating_packet) {
                 return;
             }
             std::vector<ReplayObserve::RowMessage> messages;
@@ -591,12 +591,12 @@ namespace ReplayRecorder {
                 }
                 observe_status = std::format("{} recordings listed in the Observe window, {} left out (the reasons are in the toolbox's log)", messages.size(), scan.left_out.size());
             }
-            emulating_rows = true;
+            emulating_packet = true;
             for (auto& message : messages) {
                 Resources::GetMapName(static_cast<GW::Constants::MapID>(message.map_id));
                 GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&message));
             }
-            emulating_rows = false;
+            emulating_packet = false;
         }
 
         struct PlaybackHook {
@@ -740,9 +740,9 @@ namespace ReplayRecorder {
                     }
                     transfer_due = false;
                     stage_since = now;
-                    emulating_rows = true;
+                    emulating_packet = true;
                     GW::StoC::EmulatePacket(reinterpret_cast<PacketBase*>(&transfer));
-                    emulating_rows = false;
+                    emulating_packet = false;
                     LogPlayback(std::format("the transfer (s2c 422) emulated: mission flags {:#x} before, {:#x} after, the join's map {}", flags, MissionFlags(), JoinedMap()));
                 }
                 else if (waited > (flags & (join_pending | transfer_kept) ? transfer_wait : connect_timeout)) {
@@ -851,9 +851,9 @@ namespace ReplayRecorder {
         }
         // An empty list committed clears the client's table: without the hook, Observe on a row of ours would send its key to the server.
         PacketBase commit{ReplayObserve::rows_committed_message_id};
-        emulating_rows = true;
+        emulating_packet = true;
         GW::StoC::EmulatePacket(&commit);
-        emulating_rows = false;
+        emulating_packet = false;
     }
 
     std::string StartListing()

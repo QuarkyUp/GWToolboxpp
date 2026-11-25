@@ -351,7 +351,7 @@ namespace ReplayRecorder {
 
         void OnServerMessage(GW::HookStatus*, PacketBase* packet, void*)
         {
-            if (emulating_rows || playing_replay) {
+            if (emulating_packet || playing_replay) {
                 return;
             }
             std::scoped_lock lock(recording_mutex);

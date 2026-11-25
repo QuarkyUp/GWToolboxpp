@@ -88,7 +88,7 @@ namespace ReplayRecorder {
 
     inline bool observe_applied = false;
 
-    inline std::atomic_bool emulating_rows = false;
+    inline std::atomic_bool emulating_packet = false;
 
     inline std::atomic_bool playing_replay = false;
 
