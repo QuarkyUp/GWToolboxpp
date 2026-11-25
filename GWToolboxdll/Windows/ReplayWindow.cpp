@@ -17,6 +17,7 @@ namespace {
     GuiUtils::EncString followed_name;
     uint32_t named_agent = 0;
     std::optional<uint32_t> dragged_ms;
+    bool replay_shown = false;
 
     std::string ChapterName(const ReplayRecorderModule::TimelineChapter& chapter)
     {
@@ -90,11 +91,14 @@ void ReplayWindow::Draw(IDirect3DDevice9*)
 {
     auto& recorder = ReplayRecorderModule::Instance();
     const auto playback = recorder.GetPlayback();
-    if (!playback.active) {
+    // Each replay opens its controls; closed, they stay closed until the next replay.
+    visible |= playback.active && !replay_shown;
+    replay_shown = playback.active;
+    if (!visible || !playback.active) {
         return;
     }
     ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin(Name(), nullptr, GetWinFlags())) {
+    if (!ImGui::Begin(Name(), GetVisiblePtr(), GetWinFlags())) {
         ImGui::End();
         return;
     }
