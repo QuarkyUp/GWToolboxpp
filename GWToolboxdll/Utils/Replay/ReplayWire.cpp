@@ -346,24 +346,8 @@ namespace ReplayWire {
             hold(contents.records[index].body);
         }
         std::vector<ReplayState::Message> rewind;
-        for (const auto agent : held.Created()) {
-            auto& destroy = rewind.emplace_back(ReplayState::Blank(contents.table, GAME_SMSG_AGENT_DESPAWNED));
-            destroy.Set(0, agent);
-        }
-        const auto& keyframe = contents.keyframes[sought.keyframe];
-        std::vector<ReplayState::Message> messages(keyframe.records.size());
-        for (size_t i = 0; i < messages.size(); i++) {
-            ReplayState::Decode(contents.table, keyframe.records[i].body, messages[i]);
-        }
-        const auto connect = std::find_if(std::ranges::find(messages, GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, &ReplayState::Message::id), messages.end(), [](const ReplayState::Message& kept) {
-            return kept.id == GAME_SMSG_AGENT_INSTANCE_TIMER;
-        });
-        if (connect == messages.end()) {
-            return {};
-        }
-        // The client's own way into a time with the map kept: every agent gone by its 33, the clock set by 31 (its notify queue empty), the keyframe fed again.
-        rewind.push_back(*connect);
         // What the 33s leave in the char and party clients goes by the server's own removals, as a load's teardown frees it: a re-fed 66 for a held buff is ignored.
+        // Posted while their agents are up: GmCam's buff remove calls the camera's controller, which the followed agent's 33 frees.
         const auto remove = [&](const uint16_t id, const uint32_t first, const std::optional<uint32_t> second = std::nullopt) {
             auto& removal = rewind.emplace_back(ReplayState::Blank(contents.table, id));
             removal.Set(0, first);
@@ -383,8 +367,31 @@ namespace ReplayWire {
         if (party_locked) {
             remove(GAME_SMSG_PARTY_LOCK, 0);
         }
+        for (const auto agent : held.Created()) {
+            auto& destroy = rewind.emplace_back(ReplayState::Blank(contents.table, GAME_SMSG_AGENT_DESPAWNED));
+            destroy.Set(0, agent);
+        }
+        const auto& keyframe = contents.keyframes[sought.keyframe];
+        std::vector<ReplayState::Message> messages(keyframe.records.size());
+        for (size_t i = 0; i < messages.size(); i++) {
+            ReplayState::Decode(contents.table, keyframe.records[i].body, messages[i]);
+        }
+        const auto connect = std::find_if(std::ranges::find(messages, GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT, &ReplayState::Message::id), messages.end(), [](const ReplayState::Message& kept) {
+            return kept.id == GAME_SMSG_AGENT_INSTANCE_TIMER;
+        });
+        if (connect == messages.end()) {
+            return {};
+        }
+        // The client's own way into a time with the map kept: every agent gone by its 33, the clock set by 31 (its notify queue empty), the keyframe fed again.
+        rewind.push_back(*connect);
+        std::vector<ReplayState::Message> buffs;
         for (auto kept = messages.begin(); kept != messages.end(); ++kept) {
             if (kept == connect || std::ranges::contains(rewind_left_out, kept->id)) {
+                continue;
+            }
+            // GmCam adds the controlled agent's buffs through the camera's controller, which only a 34 makes again after the followed agent's 33.
+            if (kept->id == GAME_SMSG_EFFECT_APPLIED || kept->id == GAME_SMSG_EFFECT_UPKEEP_APPLIED) {
+                buffs.push_back(*kept);
                 continue;
             }
             rewind.push_back(*kept);
@@ -400,8 +407,11 @@ namespace ReplayWire {
             // Bit 1 asks for a game view and asserts while one is up (IUi::OnAgentInitReporting, UiGame.cpp:497); bit 0 sets the controlled agent and the camera on it.
             if (kept->id == GAME_SMSG_AGENT_SET_PLAYER) {
                 rewind.back().Set(1, kept->U(1) & ~reporter_game_view);
+                rewind.insert(rewind.end(), buffs.begin(), buffs.end());
+                buffs.clear();
             }
         }
+        rewind.insert(rewind.end(), buffs.begin(), buffs.end());
         return rewind;
     }
 

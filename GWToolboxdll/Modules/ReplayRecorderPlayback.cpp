@@ -537,7 +537,7 @@ namespace ReplayRecorder {
                 );
                 return false;
             }
-            // Back in the chapter played: every agent removed by its 33, the clock set by 31, the keyframe fed again; the map and the game view kept (replay_check --seek).
+            // Back in the chapter played: the removals, every agent removed by its 33, the clock set by 31, the keyframe fed again; the map and the game view kept (replay_check --seek).
             if (ReplayWire::RewindsInPlace(plan, static_cast<uint32_t>(played_ms), made)) {
                 const auto from_ms = plan.start_ms + static_cast<uint32_t>(played_ms);
                 const auto rewind = ReplayWire::RewindPosts(replay, plan, static_cast<uint32_t>(played_ms), made);
@@ -550,17 +550,17 @@ namespace ReplayRecorder {
                 followed_agent = plan.controlled_agent;
                 last_target = 0;
                 LogLine(
-                    Log::Log,
-                    std::format(
-                        "seek to {} ms: a rewind in place from {} ms in chapter {}, no load: {} messages (the 33s, 31, keyframe {} fed again), then the stream to the time and {} placement messages", plan.start_ms + plan.seek_ms, from_ms, plan.chapter + 1,
-                        std::accumulate(
-                            rewind.begin(), rewind.end(), size_t{0},
-                            [](const size_t sum, const ReplayWire::Post& post) {
-                                return sum + post.records;
-                            }
-                        ),
-                        plan.keyframe + 1, plan.placed
-                    )
+                    Log::Log, std::format(
+                                  "seek to {} ms: a rewind in place from {} ms in chapter {}, no load: {} messages (the removals, the 33s, 31, keyframe {} fed again, its buffs after its 34), then the stream to the time and {} placement messages",
+                                  plan.start_ms + plan.seek_ms, from_ms, plan.chapter + 1,
+                                  std::accumulate(
+                                      rewind.begin(), rewind.end(), size_t{0},
+                                      [](const size_t sum, const ReplayWire::Post& post) {
+                                          return sum + post.records;
+                                      }
+                                  ),
+                                  plan.keyframe + 1, plan.placed
+                              )
                 );
                 return false;
             }

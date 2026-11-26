@@ -97,6 +97,8 @@ namespace {
         std::set<uint32_t> inventories;
         std::set<uint32_t> team_rows;
         std::optional<uint32_t> party_building;
+        std::optional<uint32_t> controlled;
+        bool camera_lost = false;
         bool account_name = false;
         const auto fail = [&failures](const size_t index, const uint16_t id, const std::string_view what) {
             failures.push_back(std::format("record {} (message {}): {}", index, id, what));
@@ -109,6 +111,14 @@ namespace {
             }
             if (const auto broken = agents.Breaks(message); !broken.empty()) {
                 fail(i, message.id, broken);
+            }
+            // The 33 of the agent the camera follows (34's) frees GmCam's controller, which only the next 34 makes again (AvApi's 0x10000008, then 0x10000022).
+            camera_lost |= message.id == GAME_SMSG_AGENT_DESPAWNED && agent_id == controlled;
+            if ((message.id == GAME_SMSG_EFFECT_REMOVED || message.id == GAME_SMSG_EFFECT_UPKEEP_REMOVED) && !agents.Created().contains(agent_id)) {
+                fail(i, message.id, std::format("a removal for agent {}, which the client does not hold: its UI message reaches listeners of an agent gone (0x10000057 crashed GmCam)", agent_id));
+            }
+            else if (camera_lost && agent_id == controlled && (message.id == GAME_SMSG_EFFECT_APPLIED || message.id == GAME_SMSG_EFFECT_UPKEEP_APPLIED || message.id == GAME_SMSG_EFFECT_REMOVED)) {
+                fail(i, message.id, std::format("a buff of controlled agent {} after its 33 and before a 34: GmCam's buff add (0x10000055) and remove (0x10000057) call its freed controller", agent_id));
             }
             if (message.id == CharAccountNameData && std::exchange(account_name, true)) {
                 fail(i, message.id, "a second account name: the client asserts !context->acctNameData (ChCliApi.cpp:385)");
@@ -141,6 +151,8 @@ namespace {
                 active_heroes.insert(message.U(1));
             }
             else if (message.id == GAME_SMSG_AGENT_SET_PLAYER && agent_id) {
+                controlled = agent_id;
+                camera_lost = false;
                 auto walked = active_heroes;
                 walked.insert(agent_id);
                 for (const auto walked_agent : walked) {
@@ -1802,7 +1814,7 @@ namespace {
         std::vector<float> orders_errors;
     };
 
-    SeekProof ProveSeek(const ReplayFile::Contents& contents, const bool verbose)
+    SeekProof ProveSeek(const ReplayFile::Contents& contents, const bool verbose, const std::set<uint32_t>& asked_ms = {})
     {
         SeekProof proof;
         const auto fail = [&proof, verbose](const std::string& what) {
@@ -1890,6 +1902,11 @@ namespace {
                 const auto from = contents.keyframes[keyframes[i]].time_ms;
                 const auto to = std::max(from, i + 1 < keyframes.size() ? contents.keyframes[keyframes[i + 1]].time_ms : last_ms);
                 times.insert({from, from + (to - from) / 3, from + (to - from) * 2 / 3, to > from ? to - 1 : to});
+            }
+            for (const auto time_ms : asked_ms) {
+                if (time_ms >= opened.time_ms && time_ms <= last_ms) {
+                    times.insert(time_ms);
+                }
             }
             for (const auto time_ms : times) {
                 proof.seeks++;
@@ -2038,15 +2055,19 @@ namespace {
                             continue;
                         }
                         rewinds++;
+                        const auto failed_before = proof.failed;
                         const auto what = std::format("a rewind to {} ms from keyframe {} played to {} ms", time_ms, k + 1, from.start_ms + played_ms);
                         const auto rewind = ReplayWire::Rewind(contents, from, played_ms, sought);
                         const auto connect = std::ranges::find(rewind, GAME_SMSG_AGENT_INSTANCE_TIMER, &ReplayState::Message::id);
                         std::set<uint32_t> destroyed;
+                        constexpr uint16_t removals[] = {GAME_SMSG_QUEST_REMOVE, GAME_SMSG_EFFECT_REMOVED, GAME_SMSG_EFFECT_UPKEEP_REMOVED, GAME_SMSG_PARTY_LOCK};
                         for (auto message = rewind.begin(); message != connect; ++message) {
-                            if (message->id != GAME_SMSG_AGENT_DESPAWNED) {
-                                fail(std::format("{}: message {} comes before its 31, where only 33s go", what, message->id));
+                            if (message->id == GAME_SMSG_AGENT_DESPAWNED) {
+                                destroyed.insert(message->U(0));
                             }
-                            destroyed.insert(message->U(0));
+                            else if (!std::ranges::contains(removals, message->id) || !destroyed.empty()) {
+                                fail(std::format("{}: message {} comes before its 31, where only the removals then the 33s go", what, message->id));
+                            }
                         }
                         if (connect == rewind.end()) {
                             fail(std::format("{}: no 31", what));
@@ -2123,6 +2144,9 @@ namespace {
                                 PrintComparison(differences, {});
                             }
                             fail(std::format("{}: its state is not the one the same keyframe loaded gives", what));
+                        }
+                        if (verbose && asked_ms.contains(time_ms) && asked_ms.contains(later_ms)) {
+                            printf("%s (asked): %zu messages, %zu failures: %s\n", what.c_str(), rewind.size(), proof.failed - failed_before, proof.failed == failed_before ? "passed" : "FAILED");
                         }
                     }
                 }
@@ -3103,13 +3127,13 @@ int wmain(const int argc, const wchar_t* argv[])
     }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
     const auto arguments = command == L"--compare" || command == L"--wire" || command == L"--order" || command == L"--seek" ? 3 : command == L"--feed" ? 4 : 0;
-    if (!arguments || argc != arguments) {
+    if (!arguments || (command == L"--seek" ? argc < arguments : argc != arguments)) {
         printf(
             "usage: replay_check --compare <recording.gwrec>\n"
             "       replay_check --feed <recording.gwrec> <ms>\n"
             "       replay_check --wire <recording.gwrec>\n"
             "       replay_check --order <recording.gwrec>\n"
-            "       replay_check --seek <recording.gwrec>\n"
+            "       replay_check --seek <recording.gwrec> [ms...]\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );
@@ -3128,7 +3152,11 @@ int wmain(const int argc, const wchar_t* argv[])
         return ProveOrder(contents) ? 0 : 1;
     }
     if (command == L"--seek") {
-        const auto proof = ProveSeek(WithModelKeyframes(contents, true), true);
+        std::set<uint32_t> asked_ms;
+        for (auto a = arguments; a < argc; a++) {
+            asked_ms.insert(static_cast<uint32_t>(_wtoi(argv[a])));
+        }
+        const auto proof = ProveSeek(WithModelKeyframes(contents, true), true, asked_ms);
         return proof.failed || !proof.seeks ? 1 : 0;
     }
     const auto starts = PlayableStarts(contents);
