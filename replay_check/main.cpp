@@ -766,6 +766,12 @@ namespace {
                         if (agent != recorder && agent != 12) {
                             write(33, {N(agent)});
                             std::erase(others, agent);
+                            // An agent's buffs go with its 33: the server removes none of them after it.
+                            for (auto* held : {&effects, &upkeeps}) {
+                                std::erase_if(*held, [agent](const std::pair<uint32_t, uint32_t>& buff) {
+                                    return buff.first == agent;
+                                });
+                            }
                             spawn(random() % 2 ? agent : next_agent++);
                         }
                         break;

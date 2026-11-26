@@ -358,10 +358,14 @@ namespace ReplayWire {
         for (const auto quest : quests) {
             remove(GAME_SMSG_QUEST_REMOVE, quest);
         }
-        for (const auto& [agent, effect] : effects) {
+        // A gone agent's buffs stay as in play, where the server removes none after its 33 (the client keeps them, m03).
+        const auto on_held = [&held](const std::pair<uint32_t, uint32_t>& buff) {
+            return held.Created().contains(buff.first);
+        };
+        for (const auto& [agent, effect] : effects | std::views::filter(on_held)) {
             remove(GAME_SMSG_EFFECT_REMOVED, agent, effect);
         }
-        for (const auto& [agent, upkeep] : upkeeps) {
+        for (const auto& [agent, upkeep] : upkeeps | std::views::filter(on_held)) {
             remove(GAME_SMSG_EFFECT_UPKEEP_REMOVED, agent, upkeep);
         }
         if (party_locked) {
