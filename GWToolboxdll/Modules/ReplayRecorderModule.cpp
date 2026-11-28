@@ -268,6 +268,7 @@ namespace ReplayRecorder {
             using namespace GW::Packet::StoC::GenericValueID;
             constexpr size_t play_effect_field = 3;
             constexpr size_t projectile_effect_field = 4;
+            constexpr size_t skillbar_skills_field = 1;
             std::vector<ReplayFile::SkillRow> skills;
             std::vector<ReplayFile::EffectRow> effects;
             std::vector<ReplayFile::AuraRow> auras;
@@ -320,6 +321,9 @@ namespace ReplayRecorder {
             }
             else if (message.id == GAME_SMSG_AGENT_PROJECTILE_LAUNCHED && message.fields.size() > projectile_effect_field) {
                 effect(message.U(projectile_effect_field));
+            }
+            else if (message.id == GAME_SMSG_SKILLBAR_UPDATE && message.fields.size() > skillbar_skills_field) {
+                std::ranges::for_each(message.fields[skillbar_skills_field].numbers, skill);
             }
             if (writer.AppendSkills(time_ms, skills) && writer.AppendEffects(time_ms, effects) && writer.AppendAuras(time_ms, auras)) {
                 return true;
