@@ -1,3 +1,5 @@
+#include <GWCA/Packets/Opcodes.h>
+
 #include <Utils/Replay/ReplayMessages.h>
 #include <Utils/Replay/ReplayWire.h>
 

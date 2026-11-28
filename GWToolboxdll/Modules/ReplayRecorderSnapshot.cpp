@@ -24,6 +24,7 @@
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/SkillbarMgr.h>
 #include <GWCA/Managers/UIMgr.h>
+#include <GWCA/Packets/Opcodes.h>
 #include <GWCA/Utilities/Scanner.h>
 #include <Logger.h>
 #include <Modules/ReplayRecorderInternal.h>

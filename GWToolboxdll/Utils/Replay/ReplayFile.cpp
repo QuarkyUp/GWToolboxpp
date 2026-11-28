@@ -1,6 +1,5 @@
 #include <Utils/Replay/ReplayFile.h>
 #include <Utils/Replay/ReplayMessages.h>
-#include <Utils/StoCHandlers.h>
 
 #include <algorithm>
 #include <bit>
@@ -1015,8 +1014,8 @@ namespace ReplayFile {
         for (const auto& language : texts.languages) {
             Put(body, language.language, 4);
             Put(body, language.files.size(), 2);
-            for (const auto file : language.files) {
-                Put(body, file, 4);
+            for (const auto file_id : language.files) {
+                Put(body, file_id, 4);
             }
         }
         return Append(time_ms, body.data(), body.size());

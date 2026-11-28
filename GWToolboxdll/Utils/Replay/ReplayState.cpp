@@ -1,6 +1,5 @@
 #include <Utils/Replay/ReplayMessages.h>
 #include <Utils/Replay/ReplayState.h>
-#include <Utils/StoCHandlers.h>
 
 #include <algorithm>
 #include <bit>
@@ -16,6 +15,7 @@
 namespace ReplayState {
     namespace {
         using namespace ReplayMessages;
+        using ReplayFile::StoCFieldType;
 
 
         enum CreateField : size_t {
@@ -48,43 +48,43 @@ namespace ReplayState {
 
 
         constexpr uint16_t bag_content_ids[] = {
-            GAME_SMSG_TRADE_REQUEST,
-            GAME_SMSG_TRADE_TERMINATE,
-            GAME_SMSG_TRADE_CHANGE_OFFER,
-            GAME_SMSG_TRADE_RECEIVE_OFFER,
-            GAME_SMSG_TRADE_ADD_ITEM,
-            GAME_SMSG_TRADE_ACKNOWLEDGE,
-            GAME_SMSG_TRADE_ACCEPT,
+            TradeRequest,
+            TradeTerminate,
+            TradeChangeOffer,
+            TradeReceiveOffer,
+            TradeAddItem,
+            TradeAcknowledge,
+            TradeAccept,
             TradeToClient7,
-            GAME_SMSG_TRADE_OFFERED_COUNT,
+            TradeOfferedCount,
             TradeToClient9,
-            GAME_SMSG_ACCOUNT_CURRENCY,
-            GAME_SMSG_WINDOW_OPEN,
-            GAME_SMSG_WINDOW_ADD_ITEMS,
-            GAME_SMSG_WINDOW_ITEMS_END,
-            GAME_SMSG_WINDOW_ITEM_STREAM_END,
-            GAME_SMSG_WINDOW_MERCHANT,
-            GAME_SMSG_WINDOW_OWNER,
+            AccountCurrency,
+            CharWindowOpen,
+            CharWindowAddItems,
+            CharWindowItemsEnd,
+            CharWindowItemStreamEnd,
+            CharWindowMerchant,
+            CharWindowOwner,
             CharWindowCollect,
             CharWindowPriced,
             CharWindowSkills,
-            GAME_SMSG_TRANSACTION_DONE,
-            GAME_SMSG_SKILL_ADD_TO_WINDOWS_DATA,
-            GAME_SMSG_ITEM_MOVED_TO_LOCATION,
-            GAME_SMSG_INVENTORY_CREATE_BAG,
-            GAME_SMSG_GOLD_CHARACTER_ADD,
-            GAME_SMSG_GOLD_STORAGE_ADD,
+            CharTransactionDone,
+            CharWindowAddList,
+            ItemInventoryAdd,
+            ItemInventoryAddBag,
+            ItemInventoryAddGold,
+            ItemInventoryAddGoldAccount,
             ItemInventoryClean,
             ItemInventoryCompact,
             ItemInventoryEquipBag,
-            GAME_SMSG_ITEM_WEAPON_SET,
+            ItemInventoryEquipSet,
             ItemInventoryGrowBag,
-            GAME_SMSG_ITEM_CHANGE_LOCATION,
+            ItemInventoryMove,
             ItemInventoryMoveBag,
-            GAME_SMSG_ITEM_REMOVE,
+            ItemInventoryRemove,
             ItemInventoryRemoveBag,
-            GAME_SMSG_GOLD_CHARACTER_REMOVE,
-            GAME_SMSG_GOLD_STORAGE_REMOVE,
+            ItemInventoryRemoveGold,
+            ItemInventoryRemoveGoldAccount,
             ItemInventorySetBundleItem,
             ItemInventorySwap,
             ItemInventoryUnequipBag,
@@ -92,25 +92,25 @@ namespace ReplayState {
             ItemMarketDataRemove
         };
         constexpr uint16_t transient_ids[] = {
-            GAME_SMSG_PING_REQUEST,
-            GAME_SMSG_PING_REPLY,
+            NetPing,
+            NetPingReply,
             AgentSyncCheck,
-            GAME_SMSG_AGENT_PINGED,
+            CharAgentPinged,
             CharToClient61,
             CharToClient69,
-            GAME_SMSG_SCREEN_SHAKE,
+            CharScreenShake,
             CharToClient71,
-            GAME_SMSG_CHAT_MESSAGE_CORE,
-            GAME_SMSG_CHAT_MESSAGE_SERVER,
-            GAME_SMSG_CHAT_MESSAGE_GLOBAL,
-            GAME_SMSG_CHAT_MESSAGE_LOCAL,
-            GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET,
-            GAME_SMSG_AGENT_ATTR_PLAY_EFFECT,
-            GAME_SMSG_AGENT_PROJECTILE_LAUNCHED,
-            GAME_SMSG_SPEECH_BUBBLE,
-            GAME_SMSG_SKILL_INTERUPTED,
-            GAME_SMSG_SKILL_CANCEL,
-            GAME_SMSG_SKILL_ACTIVATE,
+            CharChatMessageCore,
+            CharChatMessageServer,
+            CharChatMessageGlobal,
+            CharChatMessageLocal,
+            CharAgentAttrUpdateIntTarget,
+            CharAgentAttrPlayEffect,
+            CharAgentProjectileLaunched,
+            CharSpeechBubble,
+            CharSkillInterupted,
+            CharSkillActivated,
+            CharSkillActivate,
             ItemPickup
         };
         constexpr uint32_t class_kind_mask = 0xF0000000;
@@ -120,8 +120,8 @@ namespace ReplayState {
         constexpr size_t observer_field = 5;
         constexpr size_t equipment_slots = 9;
         constexpr uint32_t look_slots = 5;
-        constexpr uint16_t quest_ids[] = {GAME_SMSG_QUEST_ADD, GAME_SMSG_QUEST_GENERAL_INFO, GAME_SMSG_QUEST_UPDATE_NAME, GAME_SMSG_QUEST_DESCRIPTION, GAME_SMSG_QUEST_ADD_MARKER, GAME_SMSG_QUEST_UPDATE_MARKER, CharQuestEarned};
-        constexpr uint16_t item_ids[] = {GAME_SMSG_ITEM_GENERAL_INFO, GAME_SMSG_ITEM_REUSE_ID, ItemReportDetailLow, ItemProfession, GAME_SMSG_ITEM_UPDATE_NAME, GAME_SMSG_ITEM_UPDATE_OWNER};
+        constexpr uint16_t quest_ids[] = {CharQuestAdd, CharQuestGeneralInfo, CharQuestUpdateName, CharQuestDescription, CharQuestAddMarker, CharQuestUpdateMarker, CharQuestEarned};
+        constexpr uint16_t item_ids[] = {ItemReportDetailAll, ItemReportDetailAllReset, ItemReportDetailLow, ItemProfession, ItemCustomize, ItemAssign};
         constexpr size_t skillbar_create_field = 3;
         constexpr size_t item_model_file_field = 1;
         constexpr size_t item_quantity_field = 10;
@@ -133,21 +133,21 @@ namespace ReplayState {
         constexpr size_t title_points_field = 2;
         constexpr IdField named_id_fields[] = {
             {CharPlayerRowFlags, 0, IdKind::Player},
-            {GAME_SMSG_QUEST_ADD, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_DESCRIPTION, 0, IdKind::Quest},
+            {CharQuestAdd, 0, IdKind::Quest},
+            {CharQuestDescription, 0, IdKind::Quest},
             {CharQuestEarned, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_GENERAL_INFO, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_UPDATE_MARKER, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_REMOVE, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_ADD_MARKER, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_UPDATE_NAME, 0, IdKind::Quest},
-            {GAME_SMSG_EFFECT_APPLIED, 1, IdKind::Skill},
-            {GAME_SMSG_NPC_UPDATE_PROPERTIES, 0, IdKind::Npc},
-            {GAME_SMSG_NPC_UPDATE_MODEL, 0, IdKind::Npc},
-            {GAME_SMSG_AGENT_CREATE_PLAYER, 0, IdKind::Player},
-            {GAME_SMSG_AGENT_DESTROY_PLAYER, 0, IdKind::Player},
-            {GAME_SMSG_NPC_UPDATE_WEAPONS, 1, IdKind::Item},
-            {GAME_SMSG_NPC_UPDATE_WEAPONS, 2, IdKind::Item},
+            {CharQuestGeneralInfo, 0, IdKind::Quest},
+            {CharQuestUpdateMarker, 0, IdKind::Quest},
+            {CharQuestRemove, 0, IdKind::Quest},
+            {CharQuestAddMarker, 0, IdKind::Quest},
+            {CharQuestUpdateName, 0, IdKind::Quest},
+            {CharEffectApplied, 1, IdKind::Skill},
+            {CharNpcProperties, 0, IdKind::Npc},
+            {CharNpcModel, 0, IdKind::Npc},
+            {CharPlayerCreate, 0, IdKind::Player},
+            {CharAgentDestroyPlayer, 0, IdKind::Player},
+            {CharNpcUpdateWeapons, 1, IdKind::Item},
+            {CharNpcUpdateWeapons, 2, IdKind::Item},
             {CharEquipment, 1, IdKind::Item},
             {CharEquipment, 2, IdKind::Item},
             {CharEquipment, 3, IdKind::Item},
@@ -161,105 +161,100 @@ namespace ReplayState {
             {CharHeroActivate, 0, IdKind::Hero},
             {CharHeroActivate, 2, IdKind::Inventory},
             {CharHeroDataAdd, 0, IdKind::Hero},
-            {GAME_SMSG_MERCENARY_INFO, 0, IdKind::Hero},
-            {GAME_SMSG_UPDATE_AGENT_MODEL, 1, IdKind::Npc},
-            {GAME_SMSG_UPDATE_AGENT_PARTYSIZE, 0, IdKind::Player},
+            {CharMercenaryInfo, 0, IdKind::Hero},
+            {CharUpdateAgentModel, 1, IdKind::Npc},
+            {CharUpdateAgentPartysize, 0, IdKind::Player},
             {CharPlayerLink, 0, IdKind::Player},
             {CharPlayerLink, 1, IdKind::Player},
             {CharSkillAdrenalineSet, 1, IdKind::Skill},
             {CharSkillAdrenalineSpend, 1, IdKind::Skill},
-            {GAME_SMSG_SKILLBAR_UPDATE_SKILL, 2, IdKind::Skill},
-            {GAME_SMSG_SKILL_UPDATE_SKILL_COUNT_1, 0, IdKind::Skill},
-            {GAME_SMSG_SKILL_INTERUPTED, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_CANCEL, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_ACTIVATE, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_RECHARGE, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_RECHARGED, 1, IdKind::Skill},
-            {GAME_SMSG_MANIPULATE_MAP_OBJECT, 0, IdKind::Prop},
+            {CharSkillbarUpdateSkill, 2, IdKind::Skill},
+            {CharSkillUpdateSkillAdded, 0, IdKind::Skill},
+            {CharSkillInterupted, 1, IdKind::Skill},
+            {CharSkillActivated, 1, IdKind::Skill},
+            {CharSkillActivate, 1, IdKind::Skill},
+            {CharSkillRecharge, 1, IdKind::Skill},
+            {CharSkillRecharged, 1, IdKind::Skill},
+            {PropAnimate, 0, IdKind::Prop},
             {PropColor, 0, IdKind::Prop},
             {PropTeam, 0, IdKind::Prop},
-            {GAME_SMSG_MANIPULATE_MAP_OBJECT2, 0, IdKind::Prop},
-            {GAME_SMSG_GUILD_PLAYER_ROLE, 0, IdKind::Guild},
-            {GAME_SMSG_GUILD_ALLIANCE_INFO, 0, IdKind::Guild},
-            {GAME_SMSG_GUILD_GENERAL_INFO, 0, IdKind::Guild},
-            {GAME_SMSG_ITEM_UPDATE_OWNER, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_UPDATE_QUANTITY, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_UPDATE_NAME, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_MOVED_TO_LOCATION, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_MOVED_TO_LOCATION, 1, IdKind::Item},
-            {GAME_SMSG_ITEM_MOVED_TO_LOCATION, 2, IdKind::Bag},
-            {GAME_SMSG_INVENTORY_CREATE_BAG, 0, IdKind::Inventory},
-            {GAME_SMSG_INVENTORY_CREATE_BAG, 3, IdKind::Bag},
-            {GAME_SMSG_GOLD_CHARACTER_ADD, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_STREAM_CREATE, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_WEAPON_SET, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_WEAPON_SET, 2, IdKind::Item},
-            {GAME_SMSG_ITEM_WEAPON_SET, 3, IdKind::Item},
-            {GAME_SMSG_ITEM_SET_ACTIVE_WEAPON_SET, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_CHANGE_LOCATION, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_CHANGE_LOCATION, 1, IdKind::Item},
-            {GAME_SMSG_ITEM_CHANGE_LOCATION, 2, IdKind::Bag},
-            {GAME_SMSG_ITEM_REMOVE, 0, IdKind::Inventory},
-            {GAME_SMSG_ITEM_REMOVE, 1, IdKind::Item},
-            {GAME_SMSG_GOLD_CHARACTER_REMOVE, 0, IdKind::Inventory},
+            {PropLayers, 0, IdKind::Prop},
+            {GuildAssign, 0, IdKind::Guild},
+            {GuildAllianceInfo, 0, IdKind::Guild},
+            {GuildGeneralInfo, 0, IdKind::Guild},
+            {ItemAssign, 0, IdKind::Item},
+            {ItemCount, 0, IdKind::Item},
+            {ItemCustomize, 0, IdKind::Item},
+            {ItemInventoryAdd, 0, IdKind::Inventory},
+            {ItemInventoryAdd, 1, IdKind::Item},
+            {ItemInventoryAdd, 2, IdKind::Bag},
+            {ItemInventoryAddBag, 0, IdKind::Inventory},
+            {ItemInventoryAddBag, 3, IdKind::Bag},
+            {ItemInventoryAddGold, 0, IdKind::Inventory},
+            {ItemInventoryCreate, 0, IdKind::Inventory},
+            {ItemInventoryEquipSet, 0, IdKind::Inventory},
+            {ItemInventoryEquipSet, 2, IdKind::Item},
+            {ItemInventoryEquipSet, 3, IdKind::Item},
+            {ItemInventoryEquipSetActivate, 0, IdKind::Inventory},
+            {ItemInventoryMove, 0, IdKind::Inventory},
+            {ItemInventoryMove, 1, IdKind::Item},
+            {ItemInventoryMove, 2, IdKind::Bag},
+            {ItemInventoryRemove, 0, IdKind::Inventory},
+            {ItemInventoryRemove, 1, IdKind::Item},
+            {ItemInventoryRemoveGold, 0, IdKind::Inventory},
             {ItemInventorySwap, 0, IdKind::Inventory},
             {ItemInventorySwap, 1, IdKind::Item},
             {ItemInventorySwap, 2, IdKind::Item},
             {ItemPickup, 0, IdKind::Item},
             {ItemProfession, 0, IdKind::Item},
             {ItemReportDetailLow, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_GENERAL_INFO, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_REUSE_ID, 0, IdKind::Item},
-            {GAME_SMSG_INSTANCE_LOAD_INFO, 0, IdKind::Player},
+            {ItemReportDetailAll, 0, IdKind::Item},
+            {ItemReportDetailAllReset, 0, IdKind::Item},
+            {MissionInstanceInfo, 0, IdKind::Player},
             {PartyAssign, 0, IdKind::Party},
-            {GAME_SMSG_PARTY_PLAYER_ADD, 0, IdKind::Party},
-            {GAME_SMSG_PARTY_PLAYER_ADD, 1, IdKind::Player},
-            {GAME_SMSG_PARTY_PLAYER_REMOVE, 0, IdKind::Party},
-            {GAME_SMSG_PARTY_PLAYER_REMOVE, 1, IdKind::Player},
-            {GAME_SMSG_PARTY_CREATE, 0, IdKind::Party},
-            {GAME_SMSG_PARTY_MEMBER_STREAM_END, 0, IdKind::Party},
+            {PartyMemberAdd, 0, IdKind::Party},
+            {PartyMemberAdd, 1, IdKind::Player},
+            {PartyMemberRemove, 0, IdKind::Party},
+            {PartyMemberRemove, 1, IdKind::Player},
+            {PartyMembershipBegin, 0, IdKind::Party},
+            {PartyMembershipEnd, 0, IdKind::Party},
         };
         constexpr IdField id_bringers[] = {
-            {GAME_SMSG_AGENT_SPAWNED, 0, IdKind::Agent},
+            {AgentCreate, 0, IdKind::Agent},
             {CharAttributeState, 0, IdKind::Agent},
-            {GAME_SMSG_AGENT_CREATE_PLAYER, 1, IdKind::Agent},
-            {GAME_SMSG_AGENT_UPDATE_SCALE, 0, IdKind::Agent},
-            {GAME_SMSG_AGENT_UPDATE_NPC_NAME, 0, IdKind::Agent},
-            {GAME_SMSG_AGENT_ATTR_UPDATE_INT, 1, IdKind::Agent},
-            {GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, 2, IdKind::Agent},
+            {CharPlayerCreate, 1, IdKind::Agent},
+            {CharAgentUpdateScale, 0, IdKind::Agent},
+            {CharAgentUpdateNpcName, 0, IdKind::Agent},
+            {CharNotifyDword, 1, IdKind::Agent},
+            {CharAgentAttrUpdateIntTarget, 2, IdKind::Agent},
             {CharProjectileLanded, 0, IdKind::Agent},
-            {GAME_SMSG_AGENT_INITIAL_EFFECTS, 0, IdKind::Agent},
-            {GAME_SMSG_AGENT_UPDATE_EFFECTS, 0, IdKind::Agent},
+            {CharAgentInitialEffects, 0, IdKind::Agent},
+            {CharAgentUpdateEffects, 0, IdKind::Agent},
             {ItemReportDetailLow, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_GENERAL_INFO, 0, IdKind::Item},
-            {GAME_SMSG_ITEM_REUSE_ID, 0, IdKind::Item},
-            {GAME_SMSG_INVENTORY_CREATE_BAG, 3, IdKind::Bag},
-            {GAME_SMSG_ITEM_STREAM_CREATE, 0, IdKind::Inventory},
-            {GAME_SMSG_GUILD_ALLIANCE_INFO, 0, IdKind::Guild},
-            {GAME_SMSG_GUILD_GENERAL_INFO, 0, IdKind::Guild},
-            {GAME_SMSG_PARTY_CREATE, 0, IdKind::Party},
-            {GAME_SMSG_AGENT_CREATE_PLAYER, 0, IdKind::Player},
-            {GAME_SMSG_UPDATE_AGENT_PARTYSIZE, 0, IdKind::Player},
+            {ItemReportDetailAll, 0, IdKind::Item},
+            {ItemReportDetailAllReset, 0, IdKind::Item},
+            {ItemInventoryAddBag, 3, IdKind::Bag},
+            {ItemInventoryCreate, 0, IdKind::Inventory},
+            {GuildAllianceInfo, 0, IdKind::Guild},
+            {GuildGeneralInfo, 0, IdKind::Guild},
+            {PartyMembershipBegin, 0, IdKind::Party},
+            {CharPlayerCreate, 0, IdKind::Player},
+            {CharUpdateAgentPartysize, 0, IdKind::Player},
             {CharPlayerLink, 0, IdKind::Player},
-            {GAME_SMSG_INSTANCE_LOAD_INFO, 0, IdKind::Player},
-            {GAME_SMSG_QUEST_ADD, 0, IdKind::Quest},
-            {GAME_SMSG_QUEST_GENERAL_INFO, 0, IdKind::Quest},
-            {GAME_SMSG_MERCENARY_INFO, 0, IdKind::Hero},
+            {MissionInstanceInfo, 0, IdKind::Player},
+            {CharQuestAdd, 0, IdKind::Quest},
+            {CharQuestGeneralInfo, 0, IdKind::Quest},
+            {CharMercenaryInfo, 0, IdKind::Hero},
             {CharHeroDataAdd, 0, IdKind::Hero},
-            {GAME_SMSG_NPC_UPDATE_PROPERTIES, 0, IdKind::Npc},
-            {GAME_SMSG_MANIPULATE_MAP_OBJECT2, 0, IdKind::Prop},
-            {GAME_SMSG_EFFECT_APPLIED, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_INTERUPTED, 1, IdKind::Skill},
-            {GAME_SMSG_SKILL_ACTIVATE, 1, IdKind::Skill},
+            {CharNpcProperties, 0, IdKind::Npc},
+            {PropLayers, 0, IdKind::Prop},
+            {CharEffectApplied, 1, IdKind::Skill},
+            {CharSkillInterupted, 1, IdKind::Skill},
+            {CharSkillActivate, 1, IdKind::Skill},
         };
-        constexpr uint16_t row_ids[] = {GAME_SMSG_AGENT_UPDATE_SCALE,           GAME_SMSG_AGENT_UPDATE_NPC_NAME,   GAME_SMSG_AGENT_ATTR_UPDATE_INT,
-                                        GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, GAME_SMSG_AGENT_UPDATE_PROFESSION, GAME_SMSG_AGENT_CREATE_NPC,
-                                        GAME_SMSG_AGENT_INITIAL_EFFECTS,        GAME_SMSG_AGENT_UPDATE_EFFECTS,    CharAgentMorale,
-                                        GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT};
-        constexpr uint16_t character_rows[] = {
-            GAME_SMSG_AGENT_UPDATE_SCALE,     GAME_SMSG_AGENT_UPDATE_NPC_NAME, GAME_SMSG_AGENT_ATTR_UPDATE_INT, GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET, GAME_SMSG_AGENT_UPDATE_PROFESSION, GAME_SMSG_AGENT_UPDATE_EFFECTS, CharAgentMorale,
-            GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT
-        };
+        constexpr uint16_t row_ids[] = {CharAgentUpdateScale,    CharAgentUpdateNpcName, CharNotifyDword, CharAgentAttrUpdateIntTarget, CharAgentUpdateProfession, CharAgentCreateNpc,
+                                        CharAgentInitialEffects, CharAgentUpdateEffects, CharAgentMorale, CharAgentAttrUpdateFloat};
+        constexpr uint16_t character_rows[] = {CharAgentUpdateScale, CharAgentUpdateNpcName, CharNotifyDword, CharAgentAttrUpdateIntTarget, CharAgentUpdateProfession, CharAgentUpdateEffects, CharAgentMorale, CharAgentAttrUpdateFloat};
 
         template <typename List>
         bool Contains(const List& list, const uint32_t value)
@@ -269,7 +264,7 @@ namespace ReplayState {
 
         bool IsAgentClient(const uint16_t id)
         {
-            return id >= GAME_SMSG_AGENT_MOVEMENT_TICK && id <= GAME_SMSG_AGENT_UPDATE_ALLEGIANCE;
+            return id >= AgentAdvance && id <= AgentUpdateTeamToken;
         }
 
         bool IsStateNotice(const uint32_t kind)
@@ -280,49 +275,49 @@ namespace ReplayState {
         // 160's kinds 14 and 15 dress armour slot f2 of an agent (CharCliOnNotifyDword's composite and colour overrides): that f2 is no agent.
         bool IsLookNotice(const Message& message)
         {
-            return message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET && (message.U(0) == LookComposite || message.U(0) == LookColour);
+            return message.id == CharAgentAttrUpdateIntTarget && (message.U(0) == LookComposite || message.U(0) == LookColour);
         }
 
         bool IsRow(const Message& message)
         {
-            return Contains(row_ids, message.id) && (message.id != GAME_SMSG_AGENT_ATTR_UPDATE_INT || IsStateNotice(message.U(0))) && (message.id != GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET || IsLookNotice(message));
+            return Contains(row_ids, message.id) && (message.id != CharNotifyDword || IsStateNotice(message.U(0))) && (message.id != CharAgentAttrUpdateIntTarget || IsLookNotice(message));
         }
 
         bool IsUpkeep(const uint32_t id)
         {
-            return id == GAME_SMSG_EFFECT_UPKEEP_ADDED || id == GAME_SMSG_EFFECT_UPKEEP_APPLIED;
+            return id == CharEffectUpkeepAdded || id == CharEffectUpkeepApplied;
         }
 
         int AgentField(const uint16_t id)
         {
             if (IsAgentClient(id)) {
-                return id == GAME_SMSG_AGENT_MOVEMENT_TICK || id == GAME_SMSG_AGENT_INSTANCE_TIMER || id == GAME_SMSG_AGENT_SET_PLAYER ? -1 : 0;
+                return id == AgentAdvance || id == AgentConnect || id == AgentReporter ? -1 : 0;
             }
             switch (id) {
-                case GAME_SMSG_AGENT_ATTR_UPDATE_INT:
-                case GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET:
-                case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT:
-                case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT_TARGET:
+                case CharNotifyDword:
+                case CharAgentAttrUpdateIntTarget:
+                case CharAgentAttrUpdateFloat:
+                case CharAgentAttrUpdateFloatTarget:
                     return 1;
                 case CharAttackInterval:
-                case GAME_SMSG_AGENT_ALLY_DESTROY:
-                case GAME_SMSG_EFFECT_UPKEEP_ADDED:
-                case GAME_SMSG_EFFECT_UPKEEP_REMOVED:
-                case GAME_SMSG_EFFECT_UPKEEP_APPLIED:
-                case GAME_SMSG_EFFECT_APPLIED:
-                case GAME_SMSG_EFFECT_REMOVED:
-                case GAME_SMSG_AGENT_DISPLAY_CAPE:
-                case GAME_SMSG_NPC_UPDATE_WEAPONS:
+                case CharAgentAllyDestroy:
+                case CharEffectUpkeepAdded:
+                case CharEffectUpkeepRemoved:
+                case CharEffectUpkeepApplied:
+                case CharEffectApplied:
+                case CharEffectRemoved:
+                case CharAgentDisplayCape:
+                case CharNpcUpdateWeapons:
                 case CharEquipment:
                 case CharEquipUpdate:
-                case GAME_SMSG_AGENT_UPDATE_SCALE:
-                case GAME_SMSG_AGENT_UPDATE_NPC_NAME:
+                case CharAgentUpdateScale:
+                case CharAgentUpdateNpcName:
                 case CharAgentMorale:
-                case GAME_SMSG_AGENT_UPDATE_PROFESSION:
-                case GAME_SMSG_AGENT_CREATE_NPC:
-                case GAME_SMSG_UPDATE_AGENT_MODEL:
-                case GAME_SMSG_AGENT_INITIAL_EFFECTS:
-                case GAME_SMSG_AGENT_UPDATE_EFFECTS:
+                case CharAgentUpdateProfession:
+                case CharAgentCreateNpc:
+                case CharUpdateAgentModel:
+                case CharAgentInitialEffects:
+                case CharAgentUpdateEffects:
                 case GadgetState:
                     return 0;
                 default:
@@ -333,8 +328,8 @@ namespace ReplayState {
         std::vector<uint32_t> InstanceKey(const Message& message)
         {
             switch (message.id) {
-                case GAME_SMSG_INSTANCE_LOADED:
-                case GAME_SMSG_POST_PROCESS:
+                case CharPlayerTeam:
+                case CharPostProcess:
                 case CharContextValue112:
                 case CharAccountNameData:
                 case CharToClient91:
@@ -342,13 +337,13 @@ namespace ReplayState {
                 case CharToClient125:
                 case CharToClient153:
                 case CharPrefs:
-                case GAME_SMSG_SKILLS_UNLOCKED:
-                case GAME_SMSG_SKILL_UPDATE_SKILL_COUNT_2:
-                case GAME_SMSG_PLAYER_ATTR_SET:
-                case GAME_SMSG_PLAYER_ATTR_MAX_KURZICK:
-                case GAME_SMSG_PLAYER_ATTR_MAX_LUXON:
-                case GAME_SMSG_PLAYER_ATTR_MAX_BALTHAZAR:
-                case GAME_SMSG_PLAYER_ATTR_MAX_IMPERIAL:
+                case CharUnlockedSkills:
+                case CharSkillUpdateSkillCount2:
+                case CharPlayerAttrSet:
+                case CharPlayerAttrMaxKurzick:
+                case CharPlayerAttrMaxLuxon:
+                case CharPlayerAttrMaxBalthazar:
+                case CharPlayerAttrMaxImperial:
                 case CharDisplay:
                 case GuildToClient284:
                 case GuildToClient302:
@@ -357,43 +352,43 @@ namespace ReplayState {
                 case MissionToClient404:
                 case PartyAssign:
                 case PartyToClient446:
-                case GAME_SMSG_PARTY_SET_DIFFICULTY:
-                case GAME_SMSG_PARTY_LOCK:
+                case PartySetDifficulty:
+                case PartyLock:
                     return {message.id};
                 case MissionTeam:
-                case GAME_SMSG_GUILD_PLAYER_ROLE:
-                case GAME_SMSG_GUILD_ALLIANCE_INFO:
-                case GAME_SMSG_GUILD_GENERAL_INFO:
-                case GAME_SMSG_NPC_UPDATE_PROPERTIES:
-                case GAME_SMSG_NPC_UPDATE_MODEL:
+                case GuildAssign:
+                case GuildAllianceInfo:
+                case GuildGeneralInfo:
+                case CharNpcProperties:
+                case CharNpcModel:
                 case GadgetClassDefine:
-                case GAME_SMSG_MANIPULATE_MAP_OBJECT:
-                case GAME_SMSG_MANIPULATE_MAP_OBJECT2:
-                case GAME_SMSG_UPDATE_AGENT_PARTYSIZE:
+                case PropAnimate:
+                case PropLayers:
+                case CharUpdateAgentPartysize:
                 case CharPlayerLink:
                 case CharPointTable141:
-                case GAME_SMSG_QUEST_ADD:
-                case GAME_SMSG_QUEST_DESCRIPTION:
+                case CharQuestAdd:
+                case CharQuestDescription:
                 case CharQuestEarned:
-                case GAME_SMSG_QUEST_GENERAL_INFO:
-                case GAME_SMSG_QUEST_UPDATE_MARKER:
-                case GAME_SMSG_QUEST_ADD_MARKER:
-                case GAME_SMSG_QUEST_UPDATE_NAME:
-                case GAME_SMSG_PARTY_CREATE:
-                case GAME_SMSG_PARTY_MEMBER_STREAM_END:
-                case GAME_SMSG_ITEM_STREAM_CREATE:
-                case GAME_SMSG_ITEM_SET_ACTIVE_WEAPON_SET:
-                case GAME_SMSG_HERO_SKILL_STATUS_BITMAP:
+                case CharQuestGeneralInfo:
+                case CharQuestUpdateMarker:
+                case CharQuestAddMarker:
+                case CharQuestUpdateName:
+                case PartyMembershipBegin:
+                case PartyMembershipEnd:
+                case ItemInventoryCreate:
+                case ItemInventoryEquipSetActivate:
+                case CharHeroSkillStatusBitmap:
                 case CharHeroActivate:
                 case CharHeroDataAdd:
-                case GAME_SMSG_MERCENARY_INFO:
-                case GAME_SMSG_TITLE_RANK_DATA:
-                case GAME_SMSG_TITLE_RANK_DISPLAY:
-                case GAME_SMSG_TITLE_TRACK_INFO:
+                case CharMercenaryInfo:
+                case CharTitleRankData:
+                case CharTitleRankDisplay:
+                case CharTitleTrackInfo:
                     return {message.id, message.U(0)};
-                case GAME_SMSG_PARTY_PLAYER_ADD:
+                case PartyMemberAdd:
                     return {message.id, message.U(0), message.U(1)};
-                case GAME_SMSG_PARTY_HERO_ADD:
+                case PartyHeroAdd:
                     return {message.id, message.U(0), message.U(1), message.U(2)};
                 default:
                     return {};
@@ -403,21 +398,21 @@ namespace ReplayState {
         int EntrySection(const uint16_t id)
         {
             switch (id) {
-                case GAME_SMSG_INSTANCE_LOAD_HEAD:
+                case MissionInstanceLoadHead:
                 case MissionConfigEnd:
-                case GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME:
-                case GAME_SMSG_INSTANCE_LOAD_INFO:
+                case MissionInstanceLoadPlayerName:
+                case MissionInstanceInfo:
                     return 0;
                 case MissionManifestPhase:
                 case MissionManifestChunk:
                 case MissionManifestComplete:
                     return 1;
-                case GAME_SMSG_READY_FOR_MAP_SPAWN:
+                case MissionReadyForMapSpawn:
                     return 2;
-                case GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT:
+                case MissionLoadMap:
                     return 3;
-                case GAME_SMSG_MISSION_STREAM_START:
-                case GAME_SMSG_INSTANCE_LOAD_FINISH:
+                case CharMissionStreamStart:
+                case MissionInstanceLoadFinish:
                     return 4;
                 default:
                     return -1;
@@ -669,7 +664,7 @@ namespace ReplayState {
                 }
             };
             switch (message.id) {
-                case GAME_SMSG_AGENT_SPAWNED:
+                case AgentCreate:
                     if (message.U(CreateDef) == item_def) {
                         add(CreateClass);
                     }
@@ -682,7 +677,7 @@ namespace ReplayState {
                 case CharEquipUpdate:
                     add(2);
                     break;
-                case GAME_SMSG_NPC_UPDATE_WEAPONS:
+                case CharNpcUpdateWeapons:
                     add(1);
                     add(2);
                     break;
@@ -791,7 +786,7 @@ namespace ReplayState {
 
     std::vector<Message> ItemReport(const ReplayFile::MessageTable& table, const ClientItem& item)
     {
-        auto details = Blank(table, GAME_SMSG_ITEM_GENERAL_INFO);
+        auto details = Blank(table, ItemReportDetailAll);
         if (details.fields.size() <= item_mods_field) {
             return {};
         }
@@ -812,7 +807,7 @@ namespace ReplayState {
             profession.Set(1, item.profession);
             messages.push_back(profession);
         }
-        if (auto customize = Blank(table, GAME_SMSG_ITEM_UPDATE_NAME); !item.customizer.empty() && customize.fields.size() > 1) {
+        if (auto customize = Blank(table, ItemCustomize); !item.customizer.empty() && customize.fields.size() > 1) {
             customize.Set(0, item.item_id);
             customize.fields[1].text = item.customizer;
             messages.push_back(customize);
@@ -827,13 +822,13 @@ namespace ReplayState {
             fields.push_back({message_id, static_cast<uint8_t>(field), IdKind::Agent});
         };
         if (IsAgentClient(message_id)) {
-            if (message_id != GAME_SMSG_AGENT_MOVEMENT_TICK && message_id != GAME_SMSG_AGENT_INSTANCE_TIMER) {
+            if (message_id != AgentAdvance && message_id != AgentConnect) {
                 agent(0);
             }
-            if (message_id == GAME_SMSG_AGENT_UPDATE_DESTINATION) {
+            if (message_id == AgentUpdateMoveTarget) {
                 agent(4);
             }
-            if (message_id == GAME_SMSG_AGENT_SPAWNED) {
+            if (message_id == AgentCreate) {
                 agent(20);
             }
         }
@@ -887,8 +882,8 @@ namespace ReplayState {
             }
         }
         // A ground item's 32 names its item by its class: the stream sends the item's details first.
-        if (const auto item = message.U(CreateClass); message.id == GAME_SMSG_AGENT_SPAWNED && message.U(CreateDef) == item_def && item && !brought.contains({IdKind::Item, item})) {
-            unbrought.emplace_back(IdField{GAME_SMSG_AGENT_SPAWNED, static_cast<uint8_t>(CreateClass), IdKind::Item}, item);
+        if (const auto item = message.U(CreateClass); message.id == AgentCreate && message.U(CreateDef) == item_def && item && !brought.contains({IdKind::Item, item})) {
+            unbrought.emplace_back(IdField{AgentCreate, static_cast<uint8_t>(CreateClass), IdKind::Item}, item);
         }
         return unbrought;
     }
@@ -918,7 +913,7 @@ namespace ReplayState {
         constexpr uint32_t highest_manifest_phase = 1;
         const auto agent_invalid_position = std::numeric_limits<float>::infinity();
         switch (message.id) {
-            case GAME_SMSG_AGENT_SPAWNED:
+            case AgentCreate:
                 if (message.U(CreateDef) > highest_agent_def) {
                     return std::format("f2, the agent's def ({}), is past the agent context's definitions (AgAgent.cpp:180)", message.U(CreateDef));
                 }
@@ -931,23 +926,23 @@ namespace ReplayState {
                     return "f1, the attack interval, is 0: CCharAgent::SetAttackInterval asserts base (AvChar.cpp:7207)";
                 }
                 return message.F(2) == 0.f ? "f2, the attack modifier, is 0: CCharAgent::SetAttackInterval asserts modifier (AvChar.cpp:7208)" : "";
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET:
+            case CharAgentAttrUpdateIntTarget:
                 return IsLookNotice(message) && message.U(2) >= look_slots ? std::format("f2, the armour slot ({}), is past the agent's five (ChCliApi.cpp:{})", message.U(2), message.U(0) == LookComposite ? 2156 : 2167) : "";
-            case GAME_SMSG_QUEST_GENERAL_INFO:
+            case CharQuestGeneralInfo:
                 return message.U(1) & quest_description_filled ? "f1, the quest's state, holds the bit the client sets once it has the description (ChCliApi.cpp:702)" : "";
-            case GAME_SMSG_NPC_UPDATE_MODEL:
+            case CharNpcModel:
                 return message.fields.size() > 1 && message.fields[1].numbers.size() > most_npc_model_files ? std::format("f1, the NPC's model files, holds {}, past MONSTER_COMPOSITE_MAX_DWORDS (CharMsg.cpp:4438)", message.fields[1].numbers.size()) : "";
-            case GAME_SMSG_ITEM_SET_ACTIVE_WEAPON_SET:
+            case ItemInventoryEquipSetActivate:
                 return message.U(1) > highest_weapon_set ? std::format("f1, the weapon set ({}), is past ITEM_PLAYER_EQUIP_SETS (ItCliInv.cpp:329)", message.U(1)) : "";
-            case GAME_SMSG_ITEM_GENERAL_INFO:
-            case GAME_SMSG_ITEM_REUSE_ID: {
+            case ItemReportDetailAll:
+            case ItemReportDetailAllReset: {
                 if (!message.U(item_model_file_field)) {
                     return "f1, the model file, is 0 (ItCliApi.cpp:2505)";
                 }
                 const auto mods = message.U(item_mods_field);
                 return mods && message.U(item_mods_field + mods) == item_code_terminator ? "f12, the mods, end with the item code's terminator (ItemCode.h:516)" : "";
             }
-            case GAME_SMSG_INSTANCE_LOAD_SPAWN_POINT:
+            case MissionLoadMap:
                 return message.U(0) ? "" : "f0, the map file, is 0, which the game's map load asserts on (File.cpp:367)";
             case MissionManifestComplete:
                 return message.U(0) > highest_manifest_type ? std::format("f0, the manifest's type ({}), is past MANIFEST_TYPES (MsCliMan.cpp:487)", message.U(0)) : "";
@@ -965,28 +960,27 @@ namespace ReplayState {
             case GadgetClassDefine:
                 gadget_classes.insert(message.U(0));
                 return "";
-            case GAME_SMSG_AGENT_SPAWNED:
+            case AgentCreate:
                 attack_intervals.erase(agent_id);
                 if (!created.insert(agent_id).second) {
                     return std::format("agent {} created again before its 33: the client asserts !array[agent] (AgAgent.cpp:162)", agent_id);
                 }
                 // The gadget agent's constructor draws its class's model file, which only 263 sets (GadgetCliGetClass, then FileConvertIdToPath).
                 return message.U(CreateDef) == gadget_def && !gadget_classes.contains(message.U(CreateClass)) ? std::format("agent {} is a gadget of class {} that no 263 defined: its model file is 0 (File.cpp:367)", agent_id, message.U(CreateClass)) : "";
-            case GAME_SMSG_AGENT_DESPAWNED:
+            case AgentDestroy:
                 created.erase(agent_id);
                 attack_intervals.erase(agent_id);
                 return "";
-            case GAME_SMSG_AGENT_UPDATE_DIRECTION:
-            case GAME_SMSG_AGENT_UPDATE_SPEED_BASE:
-            case GAME_SMSG_AGENT_STOP_MOVING:
-            case GAME_SMSG_AGENT_MOVE_TO_POINT:
-            case GAME_SMSG_AGENT_UPDATE_DESTINATION:
-            case GAME_SMSG_AGENT_UPDATE_SPEED:
-            case GAME_SMSG_AGENT_UPDATE_POSITION: {
+            case AgentUpdateDirection:
+            case AgentUpdateMaxSpeed:
+            case AgentUpdateMoveAbort:
+            case AgentUpdateMovePath:
+            case AgentUpdateMoveTarget:
+            case AgentUpdateMoveType:
+            case AgentUpdatePoint: {
                 // Each IAgent::OnMsgSrvUpdate* asserts its agent in the server's world.
                 constexpr std::pair<uint16_t, uint32_t> assert_lines[] = {
-                    {GAME_SMSG_AGENT_UPDATE_DIRECTION, 412},   {GAME_SMSG_AGENT_UPDATE_SPEED_BASE, 462}, {GAME_SMSG_AGENT_STOP_MOVING, 486},     {GAME_SMSG_AGENT_MOVE_TO_POINT, 513},
-                    {GAME_SMSG_AGENT_UPDATE_DESTINATION, 535}, {GAME_SMSG_AGENT_UPDATE_SPEED, 554},      {GAME_SMSG_AGENT_UPDATE_POSITION, 579},
+                    {AgentUpdateDirection, 412}, {AgentUpdateMaxSpeed, 462}, {AgentUpdateMoveAbort, 486}, {AgentUpdateMovePath, 513}, {AgentUpdateMoveTarget, 535}, {AgentUpdateMoveType, 554}, {AgentUpdatePoint, 579},
                 };
                 const auto line = std::ranges::find(assert_lines, message.id, &std::pair<uint16_t, uint32_t>::first)->second;
                 return created.contains(agent_id) ? "" : std::format("agent {} has no 32 before its message {}: its handler asserts the agent (AgMsg.cpp:{})", agent_id, message.id, line);
@@ -997,7 +991,7 @@ namespace ReplayState {
                 }
                 attack_intervals.insert(agent_id);
                 return "";
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET: {
+            case CharAgentAttrUpdateIntTarget: {
                 const auto kind = message.U(0);
                 const auto attacker = message.U(1);
                 if (!created.contains(attacker) || attack_intervals.contains(attacker)) {
@@ -1024,15 +1018,15 @@ namespace ReplayState {
             return {id, message.U(0)};
         }
         switch (id) {
-            case GAME_SMSG_AGENT_CREATE_PLAYER:
+            case CharPlayerCreate:
             case CharPlayerRowFlags:
             case CharAttributeState:
             case CharAttributes:
-            case GAME_SMSG_PLAYER_UNLOCKED_PROFESSION:
-            case GAME_SMSG_PLAYER_UPDATE_PROFESSION:
-            case GAME_SMSG_SKILLBAR_UPDATE:
+            case CharPlayerUnlockedProfession:
+            case CharProfessions:
+            case CharSkillbar:
                 return {id, message.U(0)};
-            case GAME_SMSG_AGENT_UPDATE_ATTRIBUTE:
+            case CharAgentUpdateAttribute:
                 return {id, message.U(0), message.U(1)};
             default:
                 break;
@@ -1043,19 +1037,19 @@ namespace ReplayState {
         }
         const auto agent = message.U(agent_field);
         switch (id) {
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT:
+            case CharNotifyDword:
                 return message.U(0) == AuraAdded || message.U(0) == AuraRemoved ? std::vector<uint32_t>{id, agent, message.U(0), message.U(2)} : std::vector<uint32_t>{id, agent, message.U(0)};
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET:
+            case CharAgentAttrUpdateIntTarget:
                 return IsLookNotice(message) ? std::vector<uint32_t>{id, agent, message.U(0), message.U(2)} : std::vector<uint32_t>{id, agent};
-            case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT:
-            case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT_TARGET:
+            case CharAgentAttrUpdateFloat:
+            case CharAgentAttrUpdateFloatTarget:
                 return {id, agent, message.U(0)};
-            case GAME_SMSG_EFFECT_APPLIED:
-            case GAME_SMSG_EFFECT_UPKEEP_ADDED:
-            case GAME_SMSG_EFFECT_UPKEEP_APPLIED:
+            case CharEffectApplied:
+            case CharEffectUpkeepAdded:
+            case CharEffectUpkeepApplied:
                 return {id, agent, message.U(3)};
-            case GAME_SMSG_EFFECT_REMOVED:
-            case GAME_SMSG_EFFECT_UPKEEP_REMOVED:
+            case CharEffectRemoved:
+            case CharEffectUpkeepRemoved:
                 return {id, agent, message.U(1)};
             default:
                 return {id, agent};
@@ -1070,8 +1064,8 @@ namespace ReplayState {
     namespace {
         constexpr uint32_t tag_capacity = 6;
         constexpr uint32_t guild_name_min_capacity = 32;
-        constexpr uint16_t guild_messages[] = {GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
-        constexpr uint16_t guild_tag_messages[] = {GAME_SMSG_CHAT_MESSAGE_GLOBAL, GAME_SMSG_TOWN_ALLIANCE_OBJECT, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_INVITE_RECEIVED, MissionAutoTournPartyAdd, MissionToClient431};
+        constexpr uint16_t guild_messages[] = {GuildTownAllianceObject, GuildAllianceInfo, GuildGeneralInfo, GuildInviteReceived, MissionAutoTournPartyAdd, MissionToClient431};
+        constexpr uint16_t guild_tag_messages[] = {CharChatMessageGlobal, GuildTownAllianceObject, GuildAllianceInfo, GuildGeneralInfo, GuildInviteReceived, MissionAutoTournPartyAdd, MissionToClient431};
     } // namespace
 
     NameStripper::NameStripper(const bool other_players, const bool own_names, std::wstring own_name) : other_players(other_players), own_names(own_names)
@@ -1096,16 +1090,16 @@ namespace ReplayState {
         if (std::ranges::contains(guild_messages, message_id) && capacity >= guild_name_min_capacity) {
             return numbered(guilds, L"Guild ");
         }
-        if (message_id == CharAccountNameData || message_id == GAME_SMSG_HERO_ACCOUNT_NAME) {
+        if (message_id == CharAccountNameData || message_id == CharHeroAccountName) {
             account_names.emplace(name);
         }
-        if (message_id == GAME_SMSG_INSTANCE_LOAD_PLAYER_NAME) {
+        if (message_id == MissionInstanceLoadPlayerName) {
             recorder_names.emplace(name);
         }
         if (account_names.contains(name)) {
             return own_names ? ReplayFile::own_name_placeholder : other_players ? numbered(players, L"Player ") : std::wstring(name);
         }
-        if (message_id == GAME_SMSG_MERCENARY_INFO) {
+        if (message_id == CharMercenaryInfo) {
             return own_names ? numbered(mercenaries, L"Mercenary ") : other_players ? numbered(players, L"Player ") : std::wstring(name);
         }
         if (recorder_names.contains(name)) {
@@ -1145,7 +1139,7 @@ namespace ReplayState {
 
     bool InventoryFilter::Keep(const Message& message, std::vector<Message>& shown_before, std::vector<uint32_t>& unknown_items)
     {
-        if (message.id == GAME_SMSG_INSTANCE_LOAD_HEAD) {
+        if (message.id == MissionInstanceLoadHead) {
             // Item ids are the instance's: a new map's items are not those shown in the one before.
             shown.clear();
             held.clear();
@@ -1153,16 +1147,16 @@ namespace ReplayState {
         if (IsBagContent(message)) {
             return false;
         }
-        if (Contains(item_ids, message.id) || message.id == GAME_SMSG_ITEM_UPDATE_QUANTITY) {
+        if (Contains(item_ids, message.id) || message.id == ItemCount) {
             if (shown.contains(message.U(0))) {
                 return true;
             }
             auto& kept = held[message.U(0)];
-            if (message.id != GAME_SMSG_ITEM_UPDATE_QUANTITY) {
+            if (message.id != ItemCount) {
                 kept[message.id] = message;
             }
-            else if (kept.contains(GAME_SMSG_ITEM_GENERAL_INFO)) {
-                kept[GAME_SMSG_ITEM_GENERAL_INFO].Set(item_quantity_field, message.U(1));
+            else if (kept.contains(ItemReportDetailAll)) {
+                kept[ItemReportDetailAll].Set(item_quantity_field, message.U(1));
             }
             return false;
         }
@@ -1197,7 +1191,7 @@ namespace ReplayState {
 
     bool InventoryFilter::Holds(const Message& message) const
     {
-        return (Contains(item_ids, message.id) || message.id == GAME_SMSG_ITEM_UPDATE_QUANTITY) && !shown.contains(message.U(0));
+        return (Contains(item_ids, message.id) || message.id == ItemCount) && !shown.contains(message.U(0));
     }
 
     size_t InventoryFilter::Held() const
@@ -1222,20 +1216,20 @@ namespace ReplayState {
 
     void World::Apply(const Message& message)
     {
-        if ((message.id == GAME_SMSG_INSTANCE_LOAD_HEAD || message.id == GAME_SMSG_INSTANCE_LOAD_INFO) && connected) {
+        if ((message.id == MissionInstanceLoadHead || message.id == MissionInstanceInfo) && connected) {
             const auto errors = layout_errors;
             *this = World(*table);
             layout_errors = errors;
         }
         switch (message.id) {
-            case GAME_SMSG_AGENT_MOVEMENT_TICK:
+            case AgentAdvance:
                 Tick(message.U(0));
                 return;
-            case GAME_SMSG_AGENT_INSTANCE_TIMER:
+            case AgentConnect:
                 clock = message.U(0);
                 connected = true;
                 return;
-            case GAME_SMSG_AGENT_SPAWNED: {
+            case AgentCreate: {
                 auto& agent = agents[message.U(0)];
                 if (agent.create.id) {
                     agent = {};
@@ -1243,7 +1237,7 @@ namespace ReplayState {
                 agent.create = message;
                 // An agent made mid-walk (CAgent's constructor with a stop time) is kept as the client walks it: where it is now, then its order, as a keyframe writes it.
                 if (const auto point_time = message.U(CreatePointTime); message.U(CreateStopTime) && std::isfinite(message.F(CreateTarget, 0))) {
-                    agent.move = Blank(*table, message.U(CreateTargetAgent) ? GAME_SMSG_AGENT_UPDATE_DESTINATION : GAME_SMSG_AGENT_MOVE_TO_POINT);
+                    agent.move = Blank(*table, message.U(CreateTargetAgent) ? AgentUpdateMoveTarget : AgentUpdateMovePath);
                     agent.move.Set(0, message.U(0));
                     agent.move.Set(MovePoint, message.U(CreateTarget, 0), 0);
                     agent.move.Set(MovePoint, message.U(CreateTarget, 1), 1);
@@ -1269,22 +1263,22 @@ namespace ReplayState {
                 }
                 return;
             }
-            case GAME_SMSG_AGENT_DESPAWNED:
+            case AgentDestroy:
                 agents.erase(message.U(0));
                 return;
-            case GAME_SMSG_AGENT_SET_PLAYER:
+            case AgentReporter:
                 reporter = message;
                 return;
-            case GAME_SMSG_INSTANCE_LOAD_INFO: {
+            case MissionInstanceInfo: {
                 auto stored = message;
                 stored.Set(observer_field, 0);
                 entry.push_back(stored);
                 return;
             }
-            case GAME_SMSG_AGENT_CREATE_PLAYER:
+            case CharPlayerCreate:
                 players[message.U(0)] = message;
                 return;
-            case GAME_SMSG_AGENT_DESTROY_PLAYER:
+            case CharAgentDestroyPlayer:
                 players.erase(message.U(0));
                 player_flags.erase(message.U(0));
                 return;
@@ -1294,7 +1288,7 @@ namespace ReplayState {
                 flags.mask |= message.U(2);
                 return;
             }
-            case GAME_SMSG_QUEST_REMOVE:
+            case CharQuestRemove:
                 for (const auto id : quest_ids) {
                     instance.erase({id, message.U(0)});
                 }
@@ -1302,26 +1296,26 @@ namespace ReplayState {
             case CharMapInitStart:
                 map_init = {message};
                 return;
-            case GAME_SMSG_PARTY_LOCK:
+            case PartyLock:
                 // With f0 0 the party table's lock is cleared (PyCliParty.cpp): a load's own state, nothing kept.
                 if (!message.U(0)) {
                     instance.erase({message.id});
                     return;
                 }
                 break;
-            case GAME_SMSG_CARTOGRAPHY_DATA:
+            case CharMapInit:
                 if (!map_init.empty()) {
                     map_init.push_back(message);
                 }
                 return;
-            case GAME_SMSG_TITLE_UPDATE:
-                if (const auto found = instance.find({GAME_SMSG_TITLE_TRACK_INFO, message.U(0)}); found != instance.end()) {
+            case CharTitleUpdate:
+                if (const auto found = instance.find({CharTitleTrackInfo, message.U(0)}); found != instance.end()) {
                     found->second.Set(title_points_field, message.U(1));
                 }
                 return;
-            case GAME_SMSG_ITEM_UPDATE_QUANTITY:
-                if (const auto found = items.find(message.U(0)); found != items.end() && found->second.contains(GAME_SMSG_ITEM_GENERAL_INFO)) {
-                    found->second[GAME_SMSG_ITEM_GENERAL_INFO].Set(item_quantity_field, message.U(1));
+            case ItemCount:
+                if (const auto found = items.find(message.U(0)); found != items.end() && found->second.contains(ItemReportDetailAll)) {
+                    found->second[ItemReportDetailAll].Set(item_quantity_field, message.U(1));
                 }
                 return;
             case CharAttributeState:
@@ -1339,14 +1333,14 @@ namespace ReplayState {
                 character.attribute_updates.clear();
                 return;
             }
-            case GAME_SMSG_AGENT_UPDATE_ATTRIBUTE:
+            case CharAgentUpdateAttribute:
                 characters[message.U(0)].attribute_updates[message.U(1)] = message;
                 return;
-            case GAME_SMSG_PLAYER_UNLOCKED_PROFESSION:
-            case GAME_SMSG_PLAYER_UPDATE_PROFESSION:
+            case CharPlayerUnlockedProfession:
+            case CharProfessions:
                 characters[message.U(0)].latest[message.id] = message;
                 return;
-            case GAME_SMSG_SKILLBAR_UPDATE: {
+            case CharSkillbar: {
                 auto& skillbar = characters[message.U(0)].latest[message.id];
                 skillbar = message;
                 skillbar.Set(skillbar_create_field, 1);
@@ -1362,11 +1356,11 @@ namespace ReplayState {
         if (Contains(item_ids, message.id)) {
             auto& item = items[message.U(0)];
             // 354 frees the item before reporting it as 353 does (ItemCliOnReportDetailAllReset); 353's AddDetailLow unassigns it and sets its profession to any (11).
-            if (message.id == GAME_SMSG_ITEM_REUSE_ID) {
+            if (message.id == ItemReportDetailAllReset) {
                 item.clear();
             }
-            else if (message.id == GAME_SMSG_ITEM_GENERAL_INFO) {
-                for (const auto replaced : std::initializer_list<uint16_t>{GAME_SMSG_ITEM_REUSE_ID, ItemProfession, GAME_SMSG_ITEM_UPDATE_OWNER}) {
+            else if (message.id == ItemReportDetailAll) {
+                for (const auto replaced : std::initializer_list<uint16_t>{ItemReportDetailAllReset, ItemProfession, ItemAssign}) {
                     item.erase(replaced);
                 }
             }
@@ -1394,23 +1388,23 @@ namespace ReplayState {
     void World::ApplyToAgent(Agent& agent, const Message& message)
     {
         switch (message.id) {
-            case GAME_SMSG_AGENT_STOP_MOVING:
+            case AgentUpdateMoveAbort:
                 agent.move = {};
                 agent.leg.reset();
                 return;
-            case GAME_SMSG_AGENT_MOVE_TO_POINT:
-            case GAME_SMSG_AGENT_UPDATE_DESTINATION:
+            case AgentUpdateMovePath:
+            case AgentUpdateMoveTarget:
                 agent.move = message;
                 agent.leg.reset();
                 agent.pace = Pace(agent);
                 return;
-            case GAME_SMSG_AGENT_UPDATE_SPEED_BASE:
+            case AgentUpdateMaxSpeed:
                 // CAgent::UpdateMaxSpeed starts the walk again from where the agent is, toward its order's point, at the new speed.
                 agent.slots[{message.id}] = message;
                 agent.leg.reset();
                 agent.pace = Pace(agent);
                 return;
-            case GAME_SMSG_AGENT_UPDATE_POSITION:
+            case AgentUpdatePoint:
                 // CAgent::UpdatePoint: the agent stands at the point, its walk stopped (StopMovement).
                 agent.create.Set(CreatePosition, message.U(1, 0), 0);
                 agent.create.Set(CreatePosition, message.U(1, 1), 1);
@@ -1418,8 +1412,8 @@ namespace ReplayState {
                 agent.move = {};
                 agent.leg.reset();
                 return;
-            case GAME_SMSG_AGENT_PLAYER_DIE:
-                agent.slots.erase({GAME_SMSG_AGENT_UPDATE_ROTATION});
+            case AgentUpdateRotateAbort:
+                agent.slots.erase({AgentUpdateRotation});
                 return;
             case CharEquipment:
                 for (size_t slot = 0; slot < equipment_slots; slot++) {
@@ -1433,33 +1427,33 @@ namespace ReplayState {
                     agent.equipped = true;
                 }
                 return;
-            case GAME_SMSG_NPC_UPDATE_WEAPONS:
+            case CharNpcUpdateWeapons:
                 agent.slots[{message.id}] = message;
                 return;
-            case GAME_SMSG_AGENT_INITIAL_EFFECTS:
-            case GAME_SMSG_AGENT_UPDATE_EFFECTS:
-                agent.slots[{GAME_SMSG_AGENT_INITIAL_EFFECTS}] = message;
+            case CharAgentInitialEffects:
+            case CharAgentUpdateEffects:
+                agent.slots[{CharAgentInitialEffects}] = message;
                 return;
-            case GAME_SMSG_AGENT_ALLY_DESTROY:
-                agent.slots.erase({GAME_SMSG_AGENT_CREATE_NPC});
+            case CharAgentAllyDestroy:
+                agent.slots.erase({CharAgentCreateNpc});
                 return;
-            case GAME_SMSG_EFFECT_UPKEEP_ADDED:
-            case GAME_SMSG_EFFECT_UPKEEP_APPLIED:
+            case CharEffectUpkeepAdded:
+            case CharEffectUpkeepApplied:
                 agent.slots[{message.id, message.U(3)}] = message;
                 return;
-            case GAME_SMSG_EFFECT_UPKEEP_REMOVED:
-                agent.slots.erase({GAME_SMSG_EFFECT_UPKEEP_ADDED, message.U(1)});
-                agent.slots.erase({GAME_SMSG_EFFECT_UPKEEP_APPLIED, message.U(1)});
+            case CharEffectUpkeepRemoved:
+                agent.slots.erase({CharEffectUpkeepAdded, message.U(1)});
+                agent.slots.erase({CharEffectUpkeepApplied, message.U(1)});
                 return;
-            case GAME_SMSG_EFFECT_APPLIED: {
+            case CharEffectApplied: {
                 const auto duration = message.F(4);
                 agent.effects[message.U(3)] = {message, duration > 0.f ? clock + static_cast<uint32_t>(std::lround(duration * 1000.0)) : 0};
                 return;
             }
-            case GAME_SMSG_EFFECT_REMOVED:
+            case CharEffectRemoved:
                 agent.effects.erase(message.U(1));
                 return;
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT: {
+            case CharNotifyDword: {
                 const auto kind = message.U(0);
                 if (kind == AuraAdded) {
                     agent.slots[{message.id, AuraAdded, message.U(2)}] = message;
@@ -1472,10 +1466,10 @@ namespace ReplayState {
                 }
                 return;
             }
-            case GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET:
+            case CharAgentAttrUpdateIntTarget:
                 agent.slots[{message.id, message.U(0), message.U(2)}] = message;
                 return;
-            case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT:
+            case CharAgentAttrUpdateFloat:
                 switch (message.U(0)) {
                     case Energy:
                         agent.energy = message.F(2);
@@ -1494,7 +1488,7 @@ namespace ReplayState {
                         break;
                 }
                 return;
-            case GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT_TARGET:
+            case CharAgentAttrUpdateFloatTarget:
                 if (Contains(std::initializer_list<uint32_t>{Hit, CriticalHit, Damage, IgnoringArmour}, message.U(0))) {
                     agent.health = Clamped(agent.health + message.F(3));
                 }
@@ -1518,10 +1512,10 @@ namespace ReplayState {
             std::erase_if(agent.effects, [this](const auto& effect) {
                 return effect.second.expiry && clock >= effect.second.expiry;
             });
-            if (const auto regen = agent.slots.find({GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, HealthRegen}); regen != agent.slots.end()) {
+            if (const auto regen = agent.slots.find({CharAgentAttrUpdateFloat, HealthRegen}); regen != agent.slots.end()) {
                 agent.health = Clamped(agent.health + regen->second.F(2) * seconds);
             }
-            if (const auto regen = agent.slots.find({GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, EnergyRegen}); regen != agent.slots.end()) {
+            if (const auto regen = agent.slots.find({CharAgentAttrUpdateFloat, EnergyRegen}); regen != agent.slots.end()) {
                 agent.energy = Clamped(agent.energy + regen->second.F(2) * seconds);
             }
             Walk(agent, milliseconds);
@@ -1532,8 +1526,8 @@ namespace ReplayState {
     float World::Pace(const Agent& agent)
     {
         // BeginMovementSegment's velocity: the max speed (32's or 39's) times the move speed (32's or 43's), kept until the next leg.
-        const auto max_speed = agent.slots.find({GAME_SMSG_AGENT_UPDATE_SPEED_BASE});
-        const auto move_type = agent.slots.find({GAME_SMSG_AGENT_UPDATE_SPEED});
+        const auto max_speed = agent.slots.find({AgentUpdateMaxSpeed});
+        const auto move_type = agent.slots.find({AgentUpdateMoveType});
         return (max_speed != agent.slots.end() ? max_speed->second.F(1) : agent.create.F(CreateSpeed)) * (move_type != agent.slots.end() ? move_type->second.F(1) : agent.create.F(CreateMoveSpeed));
     }
 
@@ -1577,14 +1571,14 @@ namespace ReplayState {
         agent.create.Set(CreatePlane, motion.plane);
         agent.create.SetF(CreateSpeed, motion.max_speed);
         agent.create.SetF(CreateMoveSpeed, motion.move_speed);
-        agent.slots.erase({GAME_SMSG_AGENT_UPDATE_SPEED_BASE});
-        agent.slots.erase({GAME_SMSG_AGENT_UPDATE_SPEED});
+        agent.slots.erase({AgentUpdateMaxSpeed});
+        agent.slots.erase({AgentUpdateMoveType});
         agent.move = {};
         agent.leg.reset();
         if (!motion.walking) {
             return;
         }
-        agent.move = Blank(*table, motion.target_agent ? GAME_SMSG_AGENT_UPDATE_DESTINATION : GAME_SMSG_AGENT_MOVE_TO_POINT);
+        agent.move = Blank(*table, motion.target_agent ? AgentUpdateMoveTarget : AgentUpdateMovePath);
         agent.move.Set(0, motion.agent);
         agent.move.SetF(MovePoint, motion.target_x, 0);
         agent.move.SetF(MovePoint, motion.target_y, 1);
@@ -1605,7 +1599,7 @@ namespace ReplayState {
             if (!agent.create.id || agent.create.U(CreateDef) != living_def) {
                 continue;
             }
-            auto point = Blank(*table, GAME_SMSG_AGENT_UPDATE_POSITION);
+            auto point = Blank(*table, AgentUpdatePoint);
             point.Set(0, agent_id);
             point.Set(1, agent.create.U(CreatePosition, 0), 0);
             point.Set(1, agent.create.U(CreatePosition, 1), 1);
@@ -1614,7 +1608,7 @@ namespace ReplayState {
             if (agent.move.id) {
                 out.push_back(agent.move);
                 out.back().Set(MoveCurrentPlane, agent.create.U(CreatePlane));
-                if (agent.move.id == GAME_SMSG_AGENT_UPDATE_DESTINATION && !Alive(agent.move.U(MoveTargetAgent))) {
+                if (agent.move.id == AgentUpdateMoveTarget && !Alive(agent.move.U(MoveTargetAgent))) {
                     out.back().Set(MoveTargetAgent, 0);
                 }
             }
@@ -1659,7 +1653,7 @@ namespace ReplayState {
             if (agent.equipped) {
                 shown.insert(agent.equipment.begin(), agent.equipment.end());
             }
-            if (const auto weapons = agent.slots.find({GAME_SMSG_NPC_UPDATE_WEAPONS}); weapons != agent.slots.end()) {
+            if (const auto weapons = agent.slots.find({CharNpcUpdateWeapons}); weapons != agent.slots.end()) {
                 shown.insert({weapons->second.U(1), weapons->second.U(2)});
             }
         }
@@ -1670,7 +1664,7 @@ namespace ReplayState {
     void World::JoinItem(const uint32_t item_id, std::vector<Message>& out, std::set<Key>& emitted) const
     {
         const auto found = items.find(item_id);
-        if (!item_id || found == items.end() || !emitted.insert({GAME_SMSG_ITEM_GENERAL_INFO, item_id}).second) {
+        if (!item_id || found == items.end() || !emitted.insert({ItemReportDetailAll, item_id}).second) {
             return;
         }
         for (const auto id : item_ids) {
@@ -1682,7 +1676,7 @@ namespace ReplayState {
 
     void World::JoinInventory(const uint32_t inventory_id, std::vector<Message>& out, std::set<Key>& emitted) const
     {
-        for (const auto id : std::initializer_list<uint16_t>{GAME_SMSG_ITEM_STREAM_CREATE, GAME_SMSG_ITEM_SET_ACTIVE_WEAPON_SET}) {
+        for (const auto id : std::initializer_list<uint16_t>{ItemInventoryCreate, ItemInventoryEquipSetActivate}) {
             if (const auto found = instance.find({id, inventory_id}); found != instance.end() && emitted.insert(found->first).second) {
                 out.push_back(found->second);
             }
@@ -1698,8 +1692,8 @@ namespace ReplayState {
             }
         };
         const auto define_npc = [&](const uint32_t npc) {
-            define({GAME_SMSG_NPC_UPDATE_PROPERTIES, npc});
-            define({GAME_SMSG_NPC_UPDATE_MODEL, npc});
+            define({CharNpcProperties, npc});
+            define({CharNpcModel, npc});
         };
         if (create.U(CreateDef) == gadget_def) {
             define({GadgetClassDefine, create.U(CreateClass)});
@@ -1707,7 +1701,7 @@ namespace ReplayState {
         if ((create.U(CreateClass) & class_kind_mask) == npc_class) {
             define_npc(create.U(CreateClass) & ~class_kind_mask);
         }
-        if (const auto model = agent.slots.find({GAME_SMSG_UPDATE_AGENT_MODEL}); model != agent.slots.end()) {
+        if (const auto model = agent.slots.find({CharUpdateAgentModel}); model != agent.slots.end()) {
             define_npc(model->second.U(1));
         }
         if (create.U(CreateDef) == item_def) {
@@ -1727,7 +1721,7 @@ namespace ReplayState {
                     continue;
                 }
                 const auto now = before_connect ? Contains(character_rows, message.id) : bringers || (brought && !agent.create.id);
-                if (now && emitted.insert({GAME_SMSG_AGENT_SPAWNED, agent_id, row}).second) {
+                if (now && emitted.insert({AgentCreate, agent_id, row}).second) {
                     out.push_back(message);
                 }
             }
@@ -1742,7 +1736,7 @@ namespace ReplayState {
         }
         const auto& create = agent.create;
         out.push_back(create);
-        if (const auto weapons = agent.slots.find({GAME_SMSG_NPC_UPDATE_WEAPONS}); weapons != agent.slots.end()) {
+        if (const auto weapons = agent.slots.find({CharNpcUpdateWeapons}); weapons != agent.slots.end()) {
             JoinItem(weapons->second.U(1), out, emitted);
             JoinItem(weapons->second.U(2), out, emitted);
         }
@@ -1757,15 +1751,15 @@ namespace ReplayState {
         uint32_t row = 0;
         for (const auto& [key, message] : agent.slots) {
             row++;
-            if ((!IsRow(message) && !IsUpkeep(key[0])) || (IsRow(message) && emitted.insert({GAME_SMSG_AGENT_SPAWNED, agent_id, row}).second)) {
+            if ((!IsRow(message) && !IsUpkeep(key[0])) || (IsRow(message) && emitted.insert({AgentCreate, agent_id, row}).second)) {
                 out.push_back(message);
             }
         }
         if (agent.health != 1.f) {
-            out.push_back(Make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {Health, agent_id, std::bit_cast<uint32_t>(agent.health)}));
+            out.push_back(Make(CharAgentAttrUpdateFloat, {Health, agent_id, std::bit_cast<uint32_t>(agent.health)}));
         }
         if (agent.energy != 1.f) {
-            out.push_back(Make(GAME_SMSG_AGENT_ATTR_UPDATE_FLOAT, {Energy, agent_id, std::bit_cast<uint32_t>(agent.energy)}));
+            out.push_back(Make(CharAgentAttrUpdateFloat, {Energy, agent_id, std::bit_cast<uint32_t>(agent.energy)}));
         }
         for (const auto& effect : agent.effects | std::views::values) {
             auto applied = effect.applied;
@@ -1784,12 +1778,12 @@ namespace ReplayState {
         }
         const auto& character = found->second;
         out.push_back(character.attribute_state);
-        for (const auto id : std::initializer_list<uint16_t>{GAME_SMSG_PLAYER_UPDATE_PROFESSION, GAME_SMSG_PLAYER_UNLOCKED_PROFESSION, GAME_SMSG_SKILLBAR_UPDATE}) {
+        for (const auto id : std::initializer_list<uint16_t>{CharProfessions, CharPlayerUnlockedProfession, CharSkillbar}) {
             if (const auto latest = character.latest.find(id); latest != character.latest.end()) {
                 out.push_back(latest->second);
             }
         }
-        if (const auto status = instance.find({GAME_SMSG_HERO_SKILL_STATUS_BITMAP, agent_id}); status != instance.end() && emitted.insert(status->first).second) {
+        if (const auto status = instance.find({CharHeroSkillStatusBitmap, agent_id}); status != instance.end() && emitted.insert(status->first).second) {
             out.push_back(status->second);
         }
         if (const auto agent = agents.find(agent_id); agent != agents.end()) {
@@ -1870,7 +1864,7 @@ namespace ReplayState {
         std::ranges::sort(heroes);
 
         emit_entry(0);
-        for (auto found = instance.lower_bound({GAME_SMSG_ITEM_STREAM_CREATE}); found != instance.end() && found->first[0] == GAME_SMSG_ITEM_STREAM_CREATE; ++found) {
+        for (auto found = instance.lower_bound({ItemInventoryCreate}); found != instance.end() && found->first[0] == ItemInventoryCreate; ++found) {
             if (!hero_inventories.contains(found->first[1])) {
                 JoinInventory(found->first[1], out, emitted);
             }
@@ -1888,30 +1882,29 @@ namespace ReplayState {
                 }
             }
         }
-        for (const auto id :
-             std::initializer_list<uint16_t>{GAME_SMSG_PLAYER_ATTR_MAX_KURZICK, GAME_SMSG_PLAYER_ATTR_MAX_LUXON, GAME_SMSG_PLAYER_ATTR_MAX_BALTHAZAR, GAME_SMSG_PLAYER_ATTR_MAX_IMPERIAL, CharContextValue112, CharAccountNameData, CharToClient153}) {
+        for (const auto id : std::initializer_list<uint16_t>{CharPlayerAttrMaxKurzick, CharPlayerAttrMaxLuxon, CharPlayerAttrMaxBalthazar, CharPlayerAttrMaxImperial, CharContextValue112, CharAccountNameData, CharToClient153}) {
             emit_instance(id);
         }
         emit_entry(2);
         emit_entry(1);
         emit_entry(3);
-        for (const auto id : std::initializer_list<uint16_t>{MissionTeam, CharToClient91, GAME_SMSG_INSTANCE_LOADED, CharToClient124, CharToClient125}) {
+        for (const auto id : std::initializer_list<uint16_t>{MissionTeam, CharToClient91, CharPlayerTeam, CharToClient124, CharToClient125}) {
             emit_instance(id);
         }
         JoinCharacter(controlled, out, emitted);
         emit_instance(CharHeroDataAdd);
-        emit_instance(GAME_SMSG_MERCENARY_INFO);
+        emit_instance(CharMercenaryInfo);
         out.insert(out.end(), map_init.begin(), map_init.end());
-        for (const auto id : std::initializer_list<uint16_t>{CharPrefs, GAME_SMSG_SKILLS_UNLOCKED, GAME_SMSG_SKILL_UPDATE_SKILL_COUNT_2, GAME_SMSG_PLAYER_ATTR_SET, CharDisplay}) {
+        for (const auto id : std::initializer_list<uint16_t>{CharPrefs, CharUnlockedSkills, CharSkillUpdateSkillCount2, CharPlayerAttrSet, CharDisplay}) {
             emit_instance(id);
         }
         for (const auto& entry_message : entry) {
-            if (entry_message.id == GAME_SMSG_INSTANCE_LOAD_INFO) {
+            if (entry_message.id == MissionInstanceInfo) {
                 emit_flags(entry_message.U(0));
             }
         }
-        emit_instance(GAME_SMSG_TITLE_RANK_DATA);
-        emit_instance(GAME_SMSG_TITLE_TRACK_INFO);
+        emit_instance(CharTitleRankData);
+        emit_instance(CharTitleTrackInfo);
         emit_instance(CharPointTable141);
         for (const auto& [agent_id, hero] : heroes) {
             if (const auto inventory = instance.find({CharHeroActivate, hero}); inventory != instance.end()) {
@@ -1930,7 +1923,7 @@ namespace ReplayState {
         emit_upkeeps(true);
 
         if (connected) {
-            out.push_back(Make(GAME_SMSG_AGENT_INSTANCE_TIMER, {clock}));
+            out.push_back(Make(AgentConnect, {clock}));
             for (const auto item_id : ShownItems()) {
                 JoinItem(item_id, out, emitted);
             }
@@ -1975,7 +1968,7 @@ namespace ReplayState {
             for (const auto& [agent_id, agent] : agents) {
                 if (alive(agent_id) && agent.move.id) {
                     out.push_back(agent.move);
-                    if (agent.move.id == GAME_SMSG_AGENT_UPDATE_DESTINATION && !alive(agent.move.U(4))) {
+                    if (agent.move.id == AgentUpdateMoveTarget && !alive(agent.move.U(4))) {
                         out.back().Set(4, 0);
                     }
                 }
@@ -1986,21 +1979,21 @@ namespace ReplayState {
             emit_flags(player);
         }
         for (const auto id : std::initializer_list<uint16_t>{
-                 GAME_SMSG_UPDATE_AGENT_PARTYSIZE, CharPlayerLink, GAME_SMSG_TITLE_RANK_DISPLAY, GAME_SMSG_GUILD_ALLIANCE_INFO, GAME_SMSG_GUILD_GENERAL_INFO, GAME_SMSG_GUILD_PLAYER_ROLE, GuildToClient284, GuildToClient302, GAME_SMSG_POST_PROCESS,
-                 GadgetClassDefine, GAME_SMSG_NPC_UPDATE_PROPERTIES, GAME_SMSG_NPC_UPDATE_MODEL, GAME_SMSG_MANIPULATE_MAP_OBJECT2, GAME_SMSG_MANIPULATE_MAP_OBJECT
+                 CharUpdateAgentPartysize, CharPlayerLink, CharTitleRankDisplay, GuildAllianceInfo, GuildGeneralInfo, GuildAssign, GuildToClient284, GuildToClient302, CharPostProcess, GadgetClassDefine, CharNpcProperties, CharNpcModel, PropLayers,
+                 PropAnimate
              }) {
             emit_instance(id);
         }
-        for (auto found = instance.lower_bound({GAME_SMSG_PARTY_CREATE}); found != instance.end() && found->first[0] == GAME_SMSG_PARTY_CREATE; ++found) {
+        for (auto found = instance.lower_bound({PartyMembershipBegin}); found != instance.end() && found->first[0] == PartyMembershipBegin; ++found) {
             const auto party = found->first[1];
             if (emitted.insert(found->first).second) {
                 out.push_back(found->second);
             }
-            emit_party_member(GAME_SMSG_PARTY_PLAYER_ADD, party);
-            emit_party_member(GAME_SMSG_PARTY_HERO_ADD, party);
-            emit_party_member(GAME_SMSG_PARTY_MEMBER_STREAM_END, party);
+            emit_party_member(PartyMemberAdd, party);
+            emit_party_member(PartyHeroAdd, party);
+            emit_party_member(PartyMembershipEnd, party);
         }
-        for (const auto id : std::initializer_list<uint16_t>{GAME_SMSG_PARTY_PLAYER_ADD, GAME_SMSG_PARTY_HERO_ADD, GAME_SMSG_PARTY_MEMBER_STREAM_END, PartyAssign, GAME_SMSG_PARTY_SET_DIFFICULTY, PartyToClient446, GAME_SMSG_PARTY_LOCK}) {
+        for (const auto id : std::initializer_list<uint16_t>{PartyMemberAdd, PartyHeroAdd, PartyMembershipEnd, PartyAssign, PartySetDifficulty, PartyToClient446, PartyLock}) {
             emit_instance(id);
         }
         emit_entry(4);
