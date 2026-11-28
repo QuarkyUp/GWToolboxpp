@@ -47,6 +47,8 @@ namespace ReplayMessages {
         GadgetClassDefine = 263,
         PropColor = 271,
         PropTeam = 272,
+        GadgetColor = 274,
+        GadgetName = 275,
         GadgetState = 277,
         GuildToClient284 = 284,
         GuildToClient302 = 302,

@@ -963,7 +963,7 @@ namespace {
         if (i == end && i > contents.chapters[chapter].first_record) {
             i--;
         }
-        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms)};
+        return {i, contents.records[std::min(i, contents.records.size() - 1)].time_ms, ReplayFile::KeyframeKind::Periodic, JoinRecords(contents.table, world, contents.records[std::min(i, contents.records.size() - 1)].time_ms), {}, {}};
     }
 
     struct Starts {
@@ -1899,7 +1899,7 @@ namespace {
                 for (; keyframe_record < keyframe.record_index; keyframe_record++) {
                     at_keyframe.Apply(contents.records[keyframe_record]);
                 }
-                model_keyframes[k] = {keyframe.record_index, keyframe.time_ms, keyframe.kind, JoinRecords(contents.table, at_keyframe, keyframe.time_ms)};
+                model_keyframes[k] = {keyframe.record_index, keyframe.time_ms, keyframe.kind, JoinRecords(contents.table, at_keyframe, keyframe.time_ms), {}, {}};
             }
             // A time a chapter starts at is that chapter's, even when the map before it has a record at the same time.
             const auto last_ms = chapter + 1 < contents.chapters.size() ? std::min(contents.records[end - 1].time_ms, contents.chapters[chapter + 1].time_ms - 1) : contents.records[end - 1].time_ms;
@@ -2439,7 +2439,7 @@ namespace {
             ReplayFile::Writer writer;
             auto ok = writer.Open(rows_folder / name, written, table);
             for (const auto& chapter : chapters) {
-                ok &= writer.AppendChapter(chapter) && (!chapter.is_explorable || writer.AppendKeyframe(chapter.time_ms, ReplayFile::KeyframeKind::AfterLoad, {records.front()}));
+                ok &= writer.AppendChapter(chapter) && (!chapter.is_explorable || writer.AppendKeyframe({0, chapter.time_ms, ReplayFile::KeyframeKind::AfterLoad, {records.front()}, {}, {}}));
                 for (const auto& record : records) {
                     ok &= writer.Append(chapter.time_ms + record.time_ms, record.body.data(), record.body.size());
                 }
@@ -2615,7 +2615,7 @@ namespace {
         for (size_t i = 0; i < stream.records.size(); i++) {
             for (const auto* keyframe : {&after_load, &periodic}) {
                 if (keyframe->record_index == i) {
-                    ok &= writer.AppendKeyframe(keyframe->time_ms, keyframe == &after_load ? ReplayFile::KeyframeKind::AfterLoad : ReplayFile::KeyframeKind::Periodic, keyframe->records);
+                    ok &= writer.AppendKeyframe({0, keyframe->time_ms, keyframe == &after_load ? ReplayFile::KeyframeKind::AfterLoad : ReplayFile::KeyframeKind::Periodic, keyframe->records, {}, {}});
                     keyframes.push_back(*keyframe);
                     keyframes.back().record_index = written.size();
                     keyframes.back().kind = keyframe == &after_load ? ReplayFile::KeyframeKind::AfterLoad : ReplayFile::KeyframeKind::Periodic;
@@ -2984,7 +2984,7 @@ namespace {
                 ok &= chapter.first_record != i || writer.AppendChapter(chapter);
             }
             for (const auto& keyframe : plain.keyframes) {
-                ok &= keyframe.record_index != i || writer.AppendKeyframe(keyframe.time_ms, keyframe.kind, keyframe.records);
+                ok &= keyframe.record_index != i || writer.AppendKeyframe(keyframe);
             }
             ok &= i != sample_record || writer.AppendMotions(sample.time_ms, sample.clock, sample.agents);
             ok &= i == plain.records.size() || writer.Append(plain.records[i].time_ms, plain.records[i].body.data(), plain.records[i].body.size());
@@ -3069,6 +3069,157 @@ namespace {
         printf("the placement's digest at the self-test's seek times: %016llx (the same every run)\n", static_cast<unsigned long long>(digest));
     }
 
+    void TestSamples(const std::filesystem::path& folder)
+    {
+        ReplayFile::Contents sampled;
+        std::string error;
+        Check(ReplayFile::Read(folder / L"self-test-positions.gwrec", sampled, error) && sampled.keyframes.size() > 1 && sampled.motions.size() == 1, "the recording with motions is read for the samples");
+        auto& motion = sampled.motions.front().agents.front();
+        motion.drawn = true;
+        motion.z = -312.5f;
+        motion.rotation = 1.25f;
+        const ReplayFile::Clip swing = {10, 41, 0x1F3A22C1, 7, 1.33f, 0.75f, 96, -2.5f};
+        const ReplayFile::Clip idle = {11, 0, 0x55AA0F10, 2, 2.f, 1.f, 68, 0.5f};
+        const auto first = sampled.keyframes[0].record_index;
+        const auto second = sampled.keyframes[1].record_index;
+        // The same swing started twice with the same values: two starts, which a compare of the agent's fields would give as one.
+        sampled.clips = {{first + 3, sampled.records[first + 3].time_ms, swing}, {first + 3, sampled.records[first + 3].time_ms, swing}, {second + 5, sampled.records[second + 5].time_ms, idle}};
+        sampled.heights = {{first + 4, sampled.records[first + 4].time_ms, {{10, -310.f}, {11, 42.25f}}}, {second + 1, sampled.records[second + 1].time_ms, {{10, -305.5f}}}};
+        sampled.cameras = {
+            {first + 2, sampled.records[first + 2].time_ms, {{100.f, -200.f, -750.f}, {90.f, -180.f, -300.f}, 1.5f, 0.3f, 750.f, 1.3f}}, {second + 2, sampled.records[second + 2].time_ms, {{1.f, 2.f, 3.f}, {4.f, 5.f, 6.f}, 7.f, 8.f, 9.f, 10.f}}
+        };
+        sampled.skills = {{2, 14, 0x4, 5, 16, 0x8102, 0x8103, {0x20F31, 0x20F32, 0x20F33}, {2077, 12, 13, 2077, 14, 2077}, 0.75f, 1.75f, 8}, {980, 5, 0, 1, 20, 0x9000, 0x9001, {1, 2, 3}, {4, 5, 6, 7, 8, 9}, 0.f, 0.75f, 0}};
+        sampled.effects = {{12, 0x13387, 0, 0x64000000}, {13, 0x1338A, 0x1338B, 0x64000000}};
+        sampled.auras = {{0, 0x44C1B, 0x64000000}};
+        sampled.maps = {{148, 0, 1, 2, 2, 0x40000, 0x815D, 0x815E}};
+        sampled.texts = {0, L"0123456strnum()", {{0, {0x10001, 0x10002, 0x10003}}, {2, {0x20001, 0}}}};
+        for (auto& keyframe : sampled.keyframes) {
+            for (const auto gadget : {9001u, 9002u}) {
+                auto state = ReplayState::Blank(sampled.table, GadgetState);
+                state.Set(0, gadget);
+                state.Set(1, gadget & 3);
+                Check(ReplayState::Encode(sampled.table, state, keyframe.props.emplace_back(keyframe.time_ms).body), "a gadget's state encodes against the table");
+            }
+            keyframe.bodies = {{swing, keyframe.time_ms - 40, -312.5f, {{1, 350, 0}, {9, 2100, 1}}}, {idle, ReplayFile::unknown_time, 42.25f, {}}};
+        }
+        const auto path = folder / L"self-test-samples.gwrec";
+        ReplayFile::Writer writer;
+        auto ok = writer.Open(path, sampled.header, sampled.table);
+        const auto at = [](const size_t i) {
+            return [i](const auto& entry) {
+                return entry.record_index == i;
+            };
+        };
+        for (size_t i = 0; i <= sampled.records.size(); i++) {
+            for (const auto& chapter : sampled.chapters) {
+                ok &= chapter.first_record != i || writer.AppendChapter(chapter);
+            }
+            if (i == 0) {
+                ok &= writer.AppendTexts(0, sampled.texts) && writer.AppendMaps(0, sampled.maps) && writer.AppendSkills(0, sampled.skills) && writer.AppendEffects(0, sampled.effects) && writer.AppendAuras(0, sampled.auras);
+            }
+            for (const auto& keyframe : sampled.keyframes | std::views::filter(at(i))) {
+                ok &= writer.AppendKeyframe(keyframe);
+            }
+            for (const auto& motions : sampled.motions | std::views::filter(at(i))) {
+                ok &= writer.AppendMotions(motions.time_ms, motions.clock, motions.agents);
+            }
+            for (const auto& clip : sampled.clips | std::views::filter(at(i))) {
+                ok &= writer.AppendClip(clip.time_ms, clip.clip);
+            }
+            for (const auto& heights : sampled.heights | std::views::filter(at(i))) {
+                ok &= writer.AppendHeights(heights.time_ms, heights.agents);
+            }
+            for (const auto& camera : sampled.cameras | std::views::filter(at(i))) {
+                ok &= writer.AppendCamera(camera.time_ms, camera.camera);
+            }
+            ok &= i == sampled.records.size() || writer.Append(sampled.records[i].time_ms, sampled.records[i].body.data(), sampled.records[i].body.size());
+        }
+        ok &= writer.Close(sampled.header);
+        ReplayFile::Contents read;
+        Check(ok && ReplayFile::Read(path, read, error), std::format("a recording with every entry of format 4 is written and reads back ({})", error).c_str());
+        Check(read.records == sampled.records && read.chapters == sampled.chapters && read.motions == sampled.motions, "its stream, chapters and motions, with a drawn body's height and facing, read back as written");
+        Check(
+            read.keyframes == sampled.keyframes && read.keyframes[1].bodies.size() == 2 && read.keyframes[1].props.size() == 2, "its keyframes read back as written: their messages, their props' states, each body's clip, start, height and visible effects"
+        );
+        Check(read.clips == sampled.clips && read.clips[0].clip == read.clips[1].clip, "its clips read back as written, the same swing's two starts apart");
+        Check(read.heights == sampled.heights && read.cameras == sampled.cameras, "its walking agents' heights and its camera samples read back as written");
+        Check(read.skills == sampled.skills && read.effects == sampled.effects && read.auras == sampled.auras && read.maps == sampled.maps && read.texts == sampled.texts, "its skill, effect, aura and map rows and its text files read back as written");
+        using Kind = ReplayFile::EntryKind;
+        const auto counted = [&read](const Kind kind) {
+            return read.totals[static_cast<size_t>(kind)].count;
+        };
+        const auto table_bytes = std::accumulate(read.table.begin(), read.table.end(), size_t{4}, [](const size_t bytes, const std::vector<uint32_t>& descriptors) {
+            return bytes + 4 + descriptors.size() * 4;
+        });
+        const auto counted_bytes = std::accumulate(read.totals.begin(), read.totals.end(), uint64_t{0}, [](const uint64_t bytes, const ReplayFile::EntryTotal& total) {
+            return bytes + total.bytes;
+        });
+        Check(
+            counted(Kind::Stream) == sampled.records.size() && counted(Kind::Chapter) == sampled.chapters.size() && counted(Kind::Keyframe) == sampled.keyframes.size() && counted(Kind::Props) == 2 * sampled.keyframes.size() &&
+                counted(Kind::Bodies) == sampled.keyframes.size() && counted(Kind::Motions) == 1 && counted(Kind::Clip) == 3 && counted(Kind::Heights) == 2 && counted(Kind::Camera) == 2 && counted(Kind::Skills) == 1 && counted(Kind::Effects) == 1 &&
+                counted(Kind::Auras) == 1 && counted(Kind::Maps) == 1 && counted(Kind::Texts) == 1 && counted_bytes + ReplayFile::header_size + table_bytes == std::filesystem::file_size(path),
+            "every entry is counted under its kind, and the kinds' bytes with the header and the table are the file's size"
+        );
+        ReplayFile::Contents index;
+        Check(
+            ReplayFile::Read(path, index, error, false) && index.keyframes.size() == sampled.keyframes.size() && index.keyframes[1].bodies.empty() && index.clips.empty() && index.records.size() == sampled.records.size(),
+            "its index (no bodies) follows the keyframes' parts and skips the samples"
+        );
+        ReplayFile::Contents plain;
+        Check(ReplayFile::Read(folder / L"self-test-positions.gwrec", plain, error), "the recording without the new entries is read again");
+        const auto plan = ReplayWire::MakeKeyframePlan(read, read.keyframes[1]);
+        Check(
+            plan.error.empty() && std::ranges::equal(plan.posts, ReplayWire::MakeKeyframePlan(plain, plain.keyframes[1]).posts, {}, &ReplayWire::Post::bytes, &ReplayWire::Post::bytes),
+            "the in-game player posts the same messages with the new entries in the file as without: it skips them"
+        );
+
+        std::vector<uint8_t> bytes(static_cast<size_t>(std::filesystem::file_size(path)));
+        if (const auto file = _wfopen(path.c_str(), L"rb")) {
+            Check(fread(bytes.data(), 1, bytes.size(), file) == bytes.size(), "the recording's bytes are read");
+            fclose(file);
+        }
+        const auto first_entry = [&bytes, table_bytes](const uint16_t entry_id) {
+            auto offset = ReplayFile::header_size + table_bytes;
+            while (offset + 8 <= bytes.size() && (bytes[offset + 6] | bytes[offset + 7] << 8) != entry_id) {
+                offset += 6 + (bytes[offset + 4] | bytes[offset + 5] << 8);
+            }
+            return offset;
+        };
+        const auto rewritten = [&folder, &bytes](const wchar_t* name, const size_t size) {
+            const auto written = folder / name;
+            if (const auto file = _wfopen(written.c_str(), L"wb")) {
+                fwrite(bytes.data(), 1, size, file);
+                fclose(file);
+            }
+            return written;
+        };
+        constexpr size_t version_at = sizeof(ReplayFile::magic);
+        constexpr size_t flags_at = 68;
+        constexpr size_t entry_size_at = 4;
+        constexpr size_t keyframe_bodies_at = 6 + 11;
+        const auto clip_at = first_entry(ReplayFile::clip_entry_id);
+        const auto keyframe_at = first_entry(ReplayFile::keyframe_entry_id);
+        ReplayFile::Contents changed;
+        bytes[flags_at] &= static_cast<uint8_t>(~ReplayFile::Complete);
+        Check(
+            ReplayFile::Read(rewritten(L"self-test-samples-cut.gwrec", clip_at + 10), changed, error) && changed.truncated_tail && changed.clips.empty() && !changed.keyframes.empty() && changed.records.size() < sampled.records.size(),
+            "a recording that ends inside a clip's entry keeps what is whole before it and reports the cut"
+        );
+        Check(
+            ReplayFile::Read(rewritten(L"self-test-samples-no-bodies.gwrec", first_entry(ReplayFile::bodies_entry_id)), changed, error) && changed.truncated_tail && changed.keyframes.empty(),
+            "a recording that ends before a keyframe's bodies drops that keyframe: a keyframe read is a whole one"
+        );
+        bytes[flags_at] |= ReplayFile::Complete;
+        bytes[keyframe_at + keyframe_bodies_at]++;
+        Check(!ReplayFile::Read(rewritten(L"self-test-samples-bodies.gwrec", bytes.size()), changed, error) && error.contains("does not hold its bodies"), std::format("a keyframe that announces more bodies than follow it is refused ({})", error).c_str());
+        bytes[keyframe_at + keyframe_bodies_at]--;
+        bytes[clip_at + entry_size_at]--;
+        Check(!ReplayFile::Read(rewritten(L"self-test-samples-corrupt.gwrec", bytes.size()), changed, error) && error.contains("is not whole"), std::format("a clip's entry of another size is refused ({})", error).c_str());
+        bytes[clip_at + entry_size_at]++;
+        bytes[version_at] = 3;
+        Check(!ReplayFile::Read(rewritten(L"self-test-format3.gwrec", bytes.size()), changed, error) && error.contains("format version 3") && error.contains("expected 4"), std::format("a format 3 recording is refused by its version ({})", error).c_str());
+    }
+
     int SelfTest(const std::filesystem::path& folder)
     {
         std::error_code error_code;
@@ -3080,6 +3231,7 @@ namespace {
         TestWire(folder);
         TestFormat(folder);
         TestPositions(folder);
+        TestSamples(folder);
 
         std::mt19937 random(20261123);
         const auto table = SyntheticTable(random);
@@ -3132,7 +3284,7 @@ int wmain(const int argc, const wchar_t* argv[])
         return Rows(argv[2], argc == 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 0);
     }
     const auto command = argc > 2 ? std::wstring(argv[1]) : L"";
-    const auto arguments = command == L"--compare" || command == L"--wire" || command == L"--order" || command == L"--seek" ? 3 : command == L"--feed" ? 4 : 0;
+    const auto arguments = command == L"--compare" || command == L"--wire" || command == L"--order" || command == L"--seek" || command == L"--sizes" ? 3 : command == L"--feed" ? 4 : 0;
     if (!arguments || (command == L"--seek" ? argc < arguments : argc != arguments)) {
         printf(
             "usage: replay_check --compare <recording.gwrec>\n"
@@ -3140,6 +3292,7 @@ int wmain(const int argc, const wchar_t* argv[])
             "       replay_check --wire <recording.gwrec>\n"
             "       replay_check --order <recording.gwrec>\n"
             "       replay_check --seek <recording.gwrec> [ms...]\n"
+            "       replay_check --sizes <recording.gwrec>\n"
             "       replay_check --rows <folder> [client build]\n"
             "       replay_check --self-test <folder>\n"
         );
@@ -3150,6 +3303,21 @@ int wmain(const int argc, const wchar_t* argv[])
     if (!ReplayFile::Read(argv[2], contents, error)) {
         printf("%ls: %s\n", argv[2], error.c_str());
         return 1;
+    }
+    if (command == L"--sizes") {
+        const auto duration_ms = std::max(contents.header.duration_ms, contents.records.empty() ? 0 : contents.records.back().time_ms);
+        const auto megabytes_an_hour = [duration_ms](const uint64_t bytes) {
+            return duration_ms ? static_cast<double>(bytes) * 3600000. / duration_ms / 1e6 : 0.;
+        };
+        uint64_t bytes = 0;
+        printf("format %u, %u ms, by entry kind:\n", ReplayFile::format_version, duration_ms);
+        for (size_t kind = 0; kind < contents.totals.size(); kind++) {
+            const auto& total = contents.totals[kind];
+            bytes += total.bytes;
+            printf("  %-18s %8llu entries %10llu bytes %8.3f MB an hour\n", ReplayFile::EntryKindName(static_cast<ReplayFile::EntryKind>(kind)), total.count, total.bytes, megabytes_an_hour(total.bytes));
+        }
+        printf("  %-18s %8s         %10llu bytes %8.3f MB an hour\n", "all entries", "", bytes, megabytes_an_hour(bytes));
+        return 0;
     }
     if (command == L"--compare") {
         return ProveCompare(contents);

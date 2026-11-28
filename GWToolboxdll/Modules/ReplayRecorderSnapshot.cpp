@@ -23,6 +23,9 @@
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/PartyMgr.h>
 #include <GWCA/Managers/SkillbarMgr.h>
+#include <GWCA/Managers/UIMgr.h>
+#include <GWCA/Utilities/Scanner.h>
+#include <Logger.h>
 #include <Modules/ReplayRecorderInternal.h>
 #include <Modules/ReplayRecorderModule.h>
 #include <Utils/Replay/ReplayFile.h>
@@ -51,6 +54,41 @@ namespace ReplayRecorder {
             wchar_t* name_enc;
         };
         static_assert(sizeof(GadgetClass) == sizeof(GW::GadgetInfo));
+
+        using ConstRow_pt = const void*(__cdecl*)(uint32_t index);
+
+        struct ConstTable {
+            ConstRow_pt row = nullptr;
+            uint32_t rows = 0;
+        };
+
+        bool const_tables_sought = false;
+
+        ConstTable effect_table;
+
+        ConstTable aura_table;
+
+        ConstTable text_file_table;
+
+        const wchar_t* packed_characters = nullptr;
+
+        // A const table's accessor asserts its index below the table's size before it gives the row: the size is that compare's operand, and the accessor is never called at or past it.
+        ConstTable FindConstTable(const char* file, const char* assertion)
+        {
+            constexpr uint8_t index_to_esi[] = {0x55, 0x8B, 0xEC, 0x56, 0x8B, 0x75, 0x08};
+            constexpr uint8_t compare_esi_dword = 0x81;
+            constexpr uint8_t compare_esi_byte = 0x83;
+            constexpr uint8_t esi = 0xFE;
+            const auto accessor = GW::Scanner::ToFunctionStart(GW::Scanner::FindAssertion(file, assertion, 0, 0));
+            const auto compare = reinterpret_cast<const uint8_t*>(accessor) + sizeof(index_to_esi);
+            if (!accessor || memcmp(compare - sizeof(index_to_esi), index_to_esi, sizeof(index_to_esi)) != 0 || compare[1] != esi) {
+                return {};
+            }
+            if (compare[0] == compare_esi_dword) {
+                return {reinterpret_cast<ConstRow_pt>(accessor), *reinterpret_cast<const uint32_t*>(compare + 2)};
+            }
+            return compare[0] == compare_esi_byte ? ConstTable{reinterpret_cast<ConstRow_pt>(accessor), compare[2]} : ConstTable{};
+        }
 
         struct TeamRow {
             uint32_t team;
@@ -737,6 +775,121 @@ namespace ReplayRecorder {
             motion.target_agent = walking.target_agent;
         }
         return motion;
+    }
+
+    ReplayFile::Clip ClipOf(const GW::AgentLiving& agent)
+    {
+        return {
+            .agent = agent.agent_id,
+            .animation = reinterpret_cast<const AnimatedAgent&>(agent).animation,
+            .sequence = agent.animation_code,
+            .sequence_index = agent.animation_id,
+            .length = agent.animation_speed,
+            .scale = agent.animation_type,
+            .model_state = agent.model_state,
+            .rotation = agent.rotation_angle,
+        };
+    }
+
+    std::vector<ReplayFile::Body> Bodies(const std::map<uint32_t, uint32_t>& clip_starts)
+    {
+        std::vector<ReplayFile::Body> bodies;
+        const auto agents = GW::Agents::GetAgentArray();
+        if (!agents) {
+            return bodies;
+        }
+        for (const auto agent : *agents) {
+            const auto living = agent ? agent->GetAsAgentLiving() : nullptr;
+            if (!living) {
+                continue;
+            }
+            const auto started = clip_starts.find(living->agent_id);
+            auto& body = bodies.emplace_back(ClipOf(*living), started == clip_starts.end() ? ReplayFile::unknown_time : started->second, living->z);
+            for (const auto& effect : living->visible_effects) {
+                body.effects.push_back({effect.unk, static_cast<uint32_t>(effect.id), effect.has_ended});
+            }
+        }
+        return bodies;
+    }
+
+    void FindConstTables()
+    {
+        if (const_tables_sought) {
+            return;
+        }
+        const_tables_sought = true;
+        effect_table = FindConstTable("ConstEffect.cpp", "index < arrsize(s_effect)");
+        aura_table = FindConstTable("ConstAura.cpp", "index < arrsize(s_aura)");
+        text_file_table = FindConstTable("ConstText.cpp", "index < arrsize(s_fileId)");
+        // The text decoder's read of a packed string's small values (TextDecode.cpp): the 32 characters they stand for.
+        if (const auto characters = GW::Scanner::Find("\x83\xFA\x20\x73\x00\x0F\xB7\x0C\x55\x00\x00\x00\x00\xEB", "xxxx?xxxx????x", 9)) {
+            packed_characters = *reinterpret_cast<const wchar_t**>(characters);
+        }
+        for (const auto& [found, what] : {std::pair{effect_table.rows != 0, "effects' rows"}, {aura_table.rows != 0, "auras' rows"}, {text_file_table.rows != 0, "string files"}, {packed_characters != nullptr, "packed text's characters"}}) {
+            if (!found) {
+                LogLine(Log::Log, std::format("the client's table is not found in this client: recordings leave out the {}", what));
+            }
+        }
+    }
+
+    std::optional<ReplayFile::SkillRow> SkillRowOf(const uint32_t skill_id)
+    {
+        const auto skill = skill_id ? GW::SkillbarMgr::GetSkillConstantData(static_cast<GW::Constants::SkillID>(skill_id)) : nullptr;
+        if (!skill) {
+            return std::nullopt;
+        }
+        return ReplayFile::SkillRow{
+            .skill = skill_id,
+            .type = static_cast<uint32_t>(skill->type),
+            .special = skill->special,
+            .profession = static_cast<uint32_t>(skill->profession),
+            .attribute = static_cast<uint32_t>(skill->attribute),
+            .name = skill->name,
+            .description = skill->description,
+            .icon_files = {skill->icon_file_id, skill->icon_file_id_2, skill->icon_file_id_hi_res},
+            .visuals = {skill->caster_overhead_animation_id, skill->caster_body_animation_id, skill->target_body_animation_id, skill->target_overhead_animation_id, skill->projectile_animation_1_id, skill->projectile_animation_2_id},
+            .activation = skill->activation,
+            .aftercast = skill->aftercast,
+            .recharge = skill->recharge,
+        };
+    }
+
+    std::optional<ReplayFile::EffectRow> EffectRowOf(const uint32_t effect_id)
+    {
+        if (effect_id >= effect_table.rows) {
+            return std::nullopt;
+        }
+        const auto& row = *static_cast<const EffectTableRow*>(effect_table.row(effect_id));
+        return ReplayFile::EffectRow{effect_id, row.model_file, row.territory_model_file, row.h000C};
+    }
+
+    std::optional<ReplayFile::AuraRow> AuraRowOf(const uint32_t aura_id)
+    {
+        if (aura_id >= aura_table.rows) {
+            return std::nullopt;
+        }
+        const auto& row = *static_cast<const AuraTableRow*>(aura_table.row(aura_id));
+        return ReplayFile::AuraRow{aura_id, row.model_file, row.h0008};
+    }
+
+    ReplayFile::TextFiles TextFilesOf()
+    {
+        constexpr size_t packed_character_count = 32;
+        ReplayFile::TextFiles texts = {.language = static_cast<uint32_t>(GW::UI::GetTextLanguage())};
+        if (packed_characters) {
+            texts.characters.assign(packed_characters, packed_character_count);
+        }
+        for (uint32_t language = 0; language < text_file_table.rows; language++) {
+            ReplayFile::LanguageFiles files = {language, {}};
+            for (const auto name : static_cast<const LanguageFileNames*>(text_file_table.row(language))->names) {
+                // A file's name is its id in two characters (FileConvertPathToId): id = w0 - 0xff00ff + w1 * 0xff00.
+                files.files.push_back(name && name[0] && name[1] ? static_cast<uint32_t>(name[0]) + static_cast<uint32_t>(name[1]) * 0xff00 - 0xff00ff : 0);
+            }
+            if (std::ranges::any_of(files.files, std::identity())) {
+                texts.languages.push_back(std::move(files));
+            }
+        }
+        return texts;
     }
 
     std::vector<Message> ItemDetails(const uint32_t item_id)

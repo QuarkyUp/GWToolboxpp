@@ -4,8 +4,14 @@
 #include <GWCA/Context/CharContext.h>
 #include <GWCA/Context/PreGameContext.h>
 #include <GWCA/GameEntities/Agent.h>
+#include <GWCA/GameEntities/Camera.h>
 #include <GWCA/GameEntities/Map.h>
 #include <GWCA/Managers/AgentMgr.h>
+// GWCA's CameraMgr.h gives a C export a Vec3f to return, which clang warns of in every file that includes it.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+#include <GWCA/Managers/CameraMgr.h>
+#pragma clang diagnostic pop
 #include <GWCA/Managers/MapMgr.h>
 #include <GWCA/Managers/MemoryMgr.h>
 #include <GWCA/Managers/StoCMgr.h>
@@ -32,6 +38,10 @@ namespace ReplayRecorder {
         constexpr auto flush_interval = std::chrono::seconds(5);
 
         constexpr uint32_t keyframe_interval_ms = 30000;
+
+        constexpr uint32_t heights_interval_ms = 250;
+
+        constexpr uint32_t camera_interval_ms = 100;
 
         GW::HookEntry stoc_hook_entry;
 
@@ -86,6 +96,46 @@ namespace ReplayRecorder {
 
         std::map<uint32_t, SampledWalk> sampled_walks;
 
+        uint32_t next_heights_ms = 0;
+
+        uint32_t next_camera_ms = 0;
+
+        ReplayFile::Camera sampled_camera;
+
+        StartClip_pt StartClip_Func = nullptr;
+
+        StartClip_pt StartClip_Ret = nullptr;
+
+        struct StartedClip {
+            uint32_t time_ms = 0;
+            ReplayFile::Clip clip;
+        };
+
+        std::mutex started_clips_mutex;
+
+        std::vector<StartedClip> started_clips;
+
+        std::map<uint32_t, uint32_t> clip_starts;
+
+        uint64_t clips_written = 0;
+
+        // The decoded form of 270 to 277: the prop's tag or the gadget's agent, then the message's values (273's state and mask).
+        struct PropStatePacket : PacketBase {
+            uint32_t prop;
+            uint32_t state;
+            uint32_t mask;
+        };
+
+        std::map<std::array<uint32_t, 3>, std::vector<uint8_t>> prop_states;
+
+        std::set<uint32_t> written_skills;
+
+        std::set<uint32_t> written_effects;
+
+        std::set<uint32_t> written_auras;
+
+        std::set<uint32_t> written_maps;
+
         uint32_t ElapsedMs(const Clock::time_point since)
         {
             return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - since).count());
@@ -101,11 +151,32 @@ namespace ReplayRecorder {
             return GW::Map::GetMapInfo(map_id) && !GWToolbox::ShouldDisableToolbox(map_id);
         }
 
+        void __fastcall OnStartClip(GW::AgentLiving* agent, void* edx, const uint32_t sequence, const uint32_t sequence_index, const float duration)
+        {
+            GW::Hook::EnterHook();
+            StartClip_Ret(agent, edx, sequence, sequence_index, duration);
+            {
+                // The game starts clips inside its own message handlers and its advance: the recorder writes them at its next write, never from here.
+                std::scoped_lock lock(started_clips_mutex);
+                started_clips.push_back({ElapsedMs(recording_start), ClipOf(*agent)});
+            }
+            GW::Hook::LeaveHook();
+        }
+
+        void RemoveClipHook()
+        {
+            if (StartClip_Func) {
+                GW::Hook::RemoveHook(StartClip_Func);
+                StartClip_Func = nullptr;
+            }
+        }
+
         void FinishRecording()
         {
             if (!writer.IsOpen()) {
                 return;
             }
+            RemoveClipHook();
             has_pending_chat = false;
             inventory_filter.reset();
             header.duration_ms = ElapsedMs(recording_start);
@@ -125,8 +196,8 @@ namespace ReplayRecorder {
                 return;
             }
             status = std::format(
-                "Saved {}: {} chapters, {} keyframes, {} messages, {} agents' motions, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, motions_written, size / 1024, header.layout_errors,
-                header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : ""
+                "Saved {}: {} chapters, {} keyframes, {} messages, {} agents' motions, {} clips, {} KB, {} layout errors{}", RecordingName(), chapter_count, keyframe_count, header.record_count, motions_written, clips_written, size / 1024,
+                header.layout_errors, header.flags & ReplayFile::SizeCapReached ? " (size cap reached)" : ""
             );
             LogLine(Log::Info, status);
         }
@@ -173,12 +244,95 @@ namespace ReplayRecorder {
             return true;
         }
 
+        bool WriteClips()
+        {
+            std::vector<StartedClip> started;
+            {
+                std::scoped_lock lock(started_clips_mutex);
+                started.swap(started_clips);
+            }
+            for (const auto& [time_ms, clip] : started) {
+                clip_starts[clip.agent] = time_ms;
+                if (!writer.AppendClip(time_ms, clip)) {
+                    FinishRecording();
+                    return false;
+                }
+                clips_written++;
+            }
+            return true;
+        }
+
+        // A reader with Gw.dat and no Gw.exe draws a skill, an effect or an aura from its row: each is written once, before the first message that names it.
+        bool WriteRowsNamed(const Message& message, const uint32_t time_ms)
+        {
+            using namespace GW::Packet::StoC::GenericValueID;
+            constexpr size_t play_effect_field = 3;
+            constexpr size_t projectile_effect_field = 4;
+            std::vector<ReplayFile::SkillRow> skills;
+            std::vector<ReplayFile::EffectRow> effects;
+            std::vector<ReplayFile::AuraRow> auras;
+            const auto effect = [&effects](const uint32_t effect_id) {
+                if (const auto row = written_effects.insert(effect_id).second ? EffectRowOf(effect_id) : std::nullopt) {
+                    effects.push_back(*row);
+                }
+            };
+            const auto skill = [&skills, &effect](const uint32_t skill_id) {
+                if (const auto row = written_skills.insert(skill_id).second ? SkillRowOf(skill_id) : std::nullopt) {
+                    skills.push_back(*row);
+                    std::ranges::for_each(row->visuals, effect);
+                }
+            };
+            for (const auto& field : ReplayState::IdFields(message_table, message.id)) {
+                if (field.kind == ReplayState::IdKind::Skill && field.field < message.fields.size()) {
+                    skill(message.U(field.field));
+                }
+            }
+            const auto notice = message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT || message.id == GAME_SMSG_AGENT_ATTR_UPDATE_INT_TARGET;
+            if (notice && message.fields.size() > 2) {
+                const auto value = message.U(message.fields.size() - 1);
+                switch (message.U(0)) {
+                    case skill_damage:
+                    case attack_skill_finished:
+                    case instant_skill_activated:
+                    case attack_skill_stopped:
+                    case attack_skill_activated:
+                    case skill_finished:
+                    case skill_stopped:
+                    case skill_activated:
+                        skill(value);
+                        break;
+                    case effect_on_target:
+                    case effect_on_agent:
+                        effect(value);
+                        break;
+                    case add_effect:
+                    case remove_effect:
+                        if (const auto row = written_auras.insert(value).second ? AuraRowOf(value) : std::nullopt) {
+                            auras.push_back(*row);
+                        }
+                        break;
+                    default:
+                        break;
+                }
+            }
+            else if (message.id == GAME_SMSG_AGENT_ATTR_PLAY_EFFECT && message.fields.size() > play_effect_field) {
+                effect(message.U(play_effect_field));
+            }
+            else if (message.id == GAME_SMSG_AGENT_PROJECTILE_LAUNCHED && message.fields.size() > projectile_effect_field) {
+                effect(message.U(projectile_effect_field));
+            }
+            if (writer.AppendSkills(time_ms, skills) && writer.AppendEffects(time_ms, effects) && writer.AppendAuras(time_ms, auras)) {
+                return true;
+            }
+            FinishRecording();
+            return false;
+        }
+
         void WriteKeyframe(const ReplayFile::KeyframeKind kind)
         {
             const auto started = Clock::now();
             const auto world = Snapshot();
-            const auto time_ms = ElapsedMs(recording_start);
-            std::vector<ReplayFile::Record> records;
+            ReplayFile::Keyframe keyframe = {0, ElapsedMs(recording_start), kind, {}, {}, {}};
             uint64_t bytes = 0;
             size_t not_encoded = 0;
             for (const auto& message : world.Join()) {
@@ -187,19 +341,29 @@ namespace ReplayRecorder {
                     not_encoded++;
                     continue;
                 }
+                if (!WriteRowsNamed(message, keyframe.time_ms)) {
+                    return;
+                }
                 bytes += encoded.size() + 6;
-                records.push_back({time_ms, std::move(encoded)});
+                keyframe.records.push_back({keyframe.time_ms, std::move(encoded)});
             }
-            if (records.empty() || !writer.AppendKeyframe(time_ms, kind, records)) {
+            if (!WriteClips()) {
+                return;
+            }
+            for (const auto& state : prop_states | std::views::values) {
+                keyframe.props.push_back({keyframe.time_ms, state});
+            }
+            keyframe.bodies = Bodies(clip_starts);
+            if (keyframe.records.empty() || !writer.AppendKeyframe(keyframe)) {
                 LogLine(Log::Log, std::format("keyframe {} not written: the client's state could not be read", ReplayFile::KeyframeKindName(kind)));
                 return;
             }
             keyframe_count++;
-            next_keyframe_ms = time_ms + keyframe_interval_ms;
+            next_keyframe_ms = keyframe.time_ms + keyframe_interval_ms;
             LogLine(
                 Log::Log, std::format(
-                              "keyframe {} ({}) at {} ms: {} messages, {} not encoded against the client's table, {} KB, read and written in {} ms", keyframe_count, ReplayFile::KeyframeKindName(kind), time_ms, records.size(), not_encoded, bytes / 1024,
-                              ElapsedMs(started)
+                              "keyframe {} ({}) at {} ms: {} messages, {} not encoded against the client's table, {} KB, {} bodies, {} props' states, read and written in {} ms", keyframe_count, ReplayFile::KeyframeKindName(kind), keyframe.time_ms,
+                              keyframe.records.size(), not_encoded, bytes / 1024, keyframe.bodies.size(), keyframe.props.size(), ElapsedMs(started)
                           )
             );
         }
@@ -212,7 +376,11 @@ namespace ReplayRecorder {
             }
             // The server world changes only by the stream's messages: an agent whose walk (or, standing, its point) changed since its last sample is sampled again, after the records that changed it.
             const auto clock = ServerTime();
+            const auto time_ms = ElapsedMs(recording_start);
+            // A walking body's height is no straight line along its leg: it is sampled again at a period.
+            const auto heights_due = time_ms >= next_heights_ms;
             std::vector<ReplayFile::Motion> changed;
+            std::vector<ReplayFile::Height> heights;
             std::erase_if(sampled_walks, [&context](const auto& sampled) {
                 return sampled.first >= context->agent_movement.size() || !context->agent_movement[sampled.first];
             });
@@ -221,6 +389,10 @@ namespace ReplayRecorder {
                     continue;
                 }
                 const auto& walking = reinterpret_cast<const WalkingAgent&>(*agent);
+                const auto drawn = GW::Agents::GetAgentByID(walking.agent_id);
+                if (heights_due && walking.stop_time && drawn) {
+                    heights.push_back({walking.agent_id, drawn->z});
+                }
                 SampledWalk sample = {MotionOf(walking, clock), walking.stop_time, walking.velocity_x, walking.velocity_y};
                 if (sample.motion.walking) {
                     sample.motion.x = sample.motion.y = 0.f;
@@ -231,12 +403,17 @@ namespace ReplayRecorder {
                     continue;
                 }
                 last = sample;
-                changed.push_back(MotionOf(walking, clock));
+                auto& motion = changed.emplace_back(MotionOf(walking, clock));
+                if (drawn) {
+                    motion.drawn = true;
+                    motion.z = drawn->z;
+                    motion.rotation = drawn->rotation_angle;
+                }
             }
-            if (changed.empty()) {
-                return;
+            if (heights_due) {
+                next_heights_ms = time_ms + heights_interval_ms;
             }
-            if (!writer.AppendMotions(ElapsedMs(recording_start), clock, changed)) {
+            if (!writer.AppendMotions(time_ms, clock, changed) || !writer.AppendHeights(time_ms, heights)) {
                 FinishRecording();
                 return;
             }
@@ -246,7 +423,17 @@ namespace ReplayRecorder {
         void WriteChapter(const uint32_t map_id, const bool explorable)
         {
             const auto map_info = GW::Map::GetMapInfo(static_cast<GW::Constants::MapID>(map_id));
-            writer.AppendChapter({0, ElapsedMs(recording_start), map_id, explorable, map_info ? static_cast<uint32_t>(map_info->type) : 0});
+            const auto time_ms = ElapsedMs(recording_start);
+            writer.AppendChapter({0, time_ms, map_id, explorable, map_info ? static_cast<uint32_t>(map_info->type) : 0});
+            if (map_info && written_maps.insert(map_id).second) {
+                writer.AppendMaps(
+                    time_ms, {{map_id, static_cast<uint32_t>(map_info->campaign), static_cast<uint32_t>(map_info->continent), static_cast<uint32_t>(map_info->region), static_cast<uint32_t>(map_info->type), map_info->flags, map_info->name_id,
+                               map_info->description_id}}
+                );
+            }
+            // Agents and props are a map's own: what the recorder holds of the map left says nothing of the next.
+            clip_starts.clear();
+            prop_states.clear();
             chapter_count++;
             chapter_map_file = 0;
             load_finished = false;
@@ -304,9 +491,27 @@ namespace ReplayRecorder {
             keyframe_count = 0;
             chapter_count = 0;
             motions_written = 0;
+            clips_written = 0;
             sampled_walks.clear();
+            started_clips.clear();
+            written_skills.clear();
+            written_effects.clear();
+            written_auras.clear();
+            written_maps.clear();
+            next_heights_ms = next_camera_ms = 0;
+            sampled_camera = {};
             recording_start = last_record_at = last_flush_at = Clock::now();
             WriteChapter(map_id, explorable);
+            FindConstTables();
+            writer.AppendTexts(0, TextFilesOf());
+            StartClip_Func = reinterpret_cast<StartClip_pt>(GW::Scanner::Find("\x55\x8B\xEC\x83\xEC\x18\xA1\x00\x00\x00\x00\x33\xC5\x89\x45\xFC\x56\x8B\xF1\x57\x8B\x7D\x0C\x8B\x86\x5C\x01\x00\x00", "xxxxxxx????xxxxxxxxxxxxxxxxxx", 0));
+            if (StartClip_Func && GW::Hook::CreateHook(&StartClip_Func, OnStartClip, &StartClip_Ret) == 0) {
+                GW::Hook::EnableHooks(StartClip_Func);
+            }
+            else {
+                StartClip_Func = nullptr;
+                LogLine(Log::Log, "the start of a body's clip is not found in this client: recordings hold each keyframe's clips, none between");
+            }
             status = std::format("Recording {}", RecordingName());
             LogLine(Log::Log, status);
             return true;
@@ -343,6 +548,9 @@ namespace ReplayRecorder {
             for (const auto item_id : unknown_items) {
                 std::ranges::move(ItemDetails(item_id), std::back_inserter(shown_before));
             }
+            if (!WriteRowsNamed(message, time_ms)) {
+                return false;
+            }
             for (const auto& details : shown_before) {
                 if (const auto encoded = Encoded(details); !encoded.empty() && !WriteRecord(time_ms, encoded)) {
                     return false;
@@ -374,6 +582,9 @@ namespace ReplayRecorder {
             if (packet->header == GAME_SMSG_INSTANCE_LOAD_INFO && static_cast<const GW::Packet::StoC::InstanceLoadInfo*>(packet)->is_observer) {
                 FinishRecording();
                 status = "Stopped: an observed match is never recorded";
+                return;
+            }
+            if (!WriteClips()) {
                 return;
             }
             // A map's after-load keyframe waits for the load's last message: an outpost's 446, 366, 398 and 404 come about 0.5 s after its 31.
@@ -427,6 +638,16 @@ namespace ReplayRecorder {
                 return;
             }
             PackRecord(packet, body);
+            // A keyframe taken later in the map holds what its props and gadgets were last told (270 to 277, but a gadget's name): no memory of the client's is read for it.
+            if (packet->header >= GAME_SMSG_MANIPULATE_MAP_OBJECT && packet->header <= GadgetState && packet->header != GadgetName && body.size() > 2) {
+                const auto state = static_cast<const PropStatePacket*>(packet);
+                prop_states[{packet->header, state->prop, packet->header == GAME_SMSG_MANIPULATE_MAP_OBJECT2 ? state->mask : 0}] = body;
+            }
+            if (packet->header == GAME_SMSG_AGENT_DESPAWNED) {
+                std::erase_if(prop_states, [agent_id = static_cast<const GW::Packet::StoC::AgentRemove*>(packet)->agent_id](const auto& state) {
+                    return state.first[0] >= GadgetColor && state.first[1] == agent_id;
+                });
+            }
             WriteMessage(time_ms, body);
         }
 
@@ -500,8 +721,21 @@ namespace ReplayRecorder {
             else if (loaded && !load_keyframe_due && ElapsedMs(recording_start) >= next_keyframe_ms) {
                 WriteKeyframe(ReplayFile::KeyframeKind::Periodic);
             }
-            if (writer.IsOpen() && loaded) {
+            if (writer.IsOpen() && WriteClips() && loaded) {
                 WriteMotions();
+            }
+            const auto time_ms = ElapsedMs(recording_start);
+            if (const auto camera = writer.IsOpen() && loaded && time_ms >= next_camera_ms ? GW::CameraMgr::GetCamera() : nullptr) {
+                const ReplayFile::Camera sample = {
+                    {camera->position.x, camera->position.y, camera->position.z}, {camera->look_at_target.x, camera->look_at_target.y, camera->look_at_target.z}, camera->yaw, camera->pitch, camera->distance, camera->field_of_view,
+                };
+                if (sample != sampled_camera) {
+                    sampled_camera = sample;
+                    next_camera_ms = time_ms + camera_interval_ms;
+                    if (!writer.AppendCamera(time_ms, sample)) {
+                        FinishRecording();
+                    }
+                }
             }
             if (writer.IsOpen() && now - last_flush_at > flush_interval) {
                 writer.Flush();
@@ -528,6 +762,7 @@ ReplayRecorderModule::~ReplayRecorderModule()
 {
     // A game ending without its window's close never runs SignalTerminate (DllMain's Terminate only asks the stopped game loop): the file's end is written at the module's unload, without the log or the game.
     if (writer.IsOpen()) {
+        RemoveClipHook();
         header.duration_ms = ElapsedMs(recording_start);
         header.flags |= ReplayFile::Complete;
         writer.Close(header);

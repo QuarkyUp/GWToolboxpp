@@ -5,6 +5,7 @@
 #include <Utils/Replay/ReplayMessages.h>
 #include <Utils/Replay/ReplayState.h>
 
+#include <GWCA/GameEntities/Agent.h>
 #include <GWCA/Packets/StoC.h>
 #include <GWCA/Utilities/Hook.h>
 
@@ -80,6 +81,35 @@ namespace ReplayRecorder {
 
     inline AgentNotifyParams_pt AgentNotifyParams_Func = nullptr;
 
+    // The agent view's character (IAgentView::CCharAgent, GWCA's AgentLiving): the animation its clip was started for (SetAnimation), GWCA's unnamed h00DC before animation_type.
+    struct AnimatedAgent {
+        uint8_t h0000[0xDC];
+        uint32_t animation;
+    };
+
+    // A row of the client's effect table (ConstEffect.cpp's s_effect): the model file a one-off effect or a projectile draws, and the one a home territory shows instead.
+    struct EffectTableRow {
+        uint32_t effect;
+        uint32_t model_file;
+        uint32_t territory_model_file;
+        uint32_t h000C;
+    };
+
+    // A row of the client's aura table (ConstAura.cpp's s_aura): the model file an aura attaches to its agent.
+    struct AuraTableRow {
+        uint32_t aura;
+        uint32_t model_file;
+        uint32_t h0008;
+    };
+
+    // A language's row of the client's string files (ConstText.cpp's s_fileId): each name is two characters that encode a Gw.dat file id.
+    struct LanguageFileNames {
+        const wchar_t* names[101];
+    };
+
+    // The clip's start of a character's body (AvChar.cpp): every clip the client plays on a body goes through it, and nothing in the agent keeps a repeat of the same clip apart from its first start.
+    using StartClip_pt = void(__fastcall*)(GW::AgentLiving* agent, void* edx, uint32_t sequence, uint32_t sequence_index, float duration);
+
     using ObserveGame_pt = void(__cdecl*)(uint32_t game_key);
 
     inline ObserveGame_pt ObserveGame_Func = nullptr;
@@ -119,6 +149,13 @@ namespace ReplayRecorder {
     std::filesystem::path RecordingsFolder();
     std::vector<Message> ItemDetails(uint32_t item_id);
     ReplayState::World Snapshot();
+    ReplayFile::Clip ClipOf(const GW::AgentLiving& agent);
+    std::vector<ReplayFile::Body> Bodies(const std::map<uint32_t, uint32_t>& clip_starts);
+    void FindConstTables();
+    std::optional<ReplayFile::SkillRow> SkillRowOf(uint32_t skill_id);
+    std::optional<ReplayFile::EffectRow> EffectRowOf(uint32_t effect_id);
+    std::optional<ReplayFile::AuraRow> AuraRowOf(uint32_t aura_id);
+    ReplayFile::TextFiles TextFilesOf();
     void DisarmPlayback();
     std::string ArmPlayback();
     void UpdatePlayback();
